@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "outDir": "../server/CityOfTowers/wwwroot/js",
+    "rootDir": "src",
+    "sourceMap": false,
+    "removeComments": false
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}

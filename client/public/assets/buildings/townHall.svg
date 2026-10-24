@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160">
+
+<defs><linearGradient id="s1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b0a694"/><stop offset="0.5" stop-color="#8a8070"/><stop offset="1" stop-color="#6a6258"/></linearGradient><linearGradient id="r1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3a6ad0"/><stop offset="1" stop-color="#1a2a60"/></linearGradient><linearGradient id="w1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a07a40"/><stop offset="1" stop-color="#5a3a18"/></linearGradient></defs>
+<ellipse cx="80" cy="148" rx="52" ry="9" fill="rgba(0,0,0,0.45)"/>
+<rect x="26" y="86" width="108" height="58" fill="url(#s1)" stroke="#2a1a10" stroke-width="1.5"/>
+<path d="M26 86 L26 86 L26 80 L35.25714285714285 80 L35.25714285714285 86 L41.42857142857143 86 L41.42857142857143 80 L50.68571428571428 80 L50.68571428571428 86 L56.85714285714286 86 L56.85714285714286 80 L66.11428571428571 80 L66.11428571428571 86 L72.28571428571428 86 L72.28571428571428 80 L81.54285714285713 80 L81.54285714285713 86 L87.71428571428572 86 L87.71428571428572 80 L96.97142857142858 80 L96.97142857142858 86 L103.14285714285714 86 L103.14285714285714 80 L112.39999999999999 80 L112.39999999999999 86 L118.57142857142857 86 L118.57142857142857 80 L127.82857142857142 80 L127.82857142857142 86 L134 86 Z" fill="#9a9080" stroke="#2a1a10" stroke-width="1"/>
+<rect x="66" y="34" width="28" height="54" fill="url(#s1)" stroke="#2a1a10" stroke-width="1.5"/>
+<path d="M60 34 L80 12 L100 34 Z" fill="url(#r1)" stroke="#2a1a10" stroke-width="1.5"/>
+<circle cx="80" cy="52" r="8" fill="#f0e0b0" stroke="#2a1a10" stroke-width="1.5"/>
+<line x1="80" y1="52" x2="80" y2="47" stroke="#2a1a10" stroke-width="1.5"/>
+<line x1="80" y1="52" x2="84" y2="54" stroke="#2a1a10" stroke-width="1.5"/>
+<rect x="72" y="112" width="16" height="32" fill="#241a10" stroke="#2a1a10" stroke-width="1"/>
+<path d="M72 112 A8 8 0 0 1 88 112 Z" fill="#241a10"/>
+<rect x="36" y="100" width="12" height="16" fill="#1a1410" stroke="#2a1a10" stroke-width="1"/>
+<rect x="112" y="100" width="12" height="16" fill="#1a1410" stroke="#2a1a10" stroke-width="1"/>
+<rect x="78" y="20" width="4" height="14" fill="#3a6ad0"/>
+<rect x="82" y="20" width="10" height="7" fill="#3a6ad0"/>
+
+</svg>

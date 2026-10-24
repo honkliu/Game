@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160">
+
+<defs><linearGradient id="s1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#d8c090"/><stop offset="1" stop-color="#8a7040"/></linearGradient><linearGradient id="r1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a08040"/><stop offset="1" stop-color="#4a3410"/></linearGradient></defs>
+<ellipse cx="80" cy="148" rx="52" ry="9" fill="rgba(0,0,0,0.45)"/>
+<rect x="44" y="70" width="72" height="74" fill="url(#s1)" stroke="#2a1a10" stroke-width="1.5"/>
+<path d="M40 70 A40 26 0 0 1 120 70 Z" fill="url(#r1)" stroke="#2a1a10" stroke-width="1.5"/>
+<line x1="44" y1="88" x2="116" y2="88" stroke="#6a5030" stroke-width="1"/>
+<line x1="44" y1="106" x2="116" y2="106" stroke="#6a5030" stroke-width="1"/>
+<line x1="44" y1="124" x2="116" y2="124" stroke="#6a5030" stroke-width="1"/>
+<rect x="72" y="112" width="16" height="32" fill="#3a2410" stroke="#1a1008" stroke-width="1"/>
+<ellipse cx="30" cy="136" rx="12" ry="10" fill="#c8b080" stroke="#2a1a10" stroke-width="1"/>
+<ellipse cx="130" cy="136" rx="12" ry="10" fill="#c8b080" stroke="#2a1a10" stroke-width="1"/>
+
+</svg>

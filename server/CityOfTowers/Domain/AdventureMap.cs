@@ -1,0 +1,376 @@
+namespace CityOfTowers.Domain;
+
+/// <summary>A single map tile.</summary>
+public class MapTile
+{
+    public string Terrain { get; set; } = "grass";
+    public int Variant { get; set; }
+    public bool Passable { get; set; } = true;
+    /// <summary>Object kind: mine, resource, treasure, artifact, shrine, monster, town, tree, rock, mountain, null.</summary>
+    public string? ObjectKind { get; set; }
+    /// <summary>Object payload (resource type, mine type, creature key, amount, ...).</summary>
+    public string? ObjectData { get; set; }
+    /// <summary>Owner player index for mines and towns; -1 for neutral.</summary>
+    public int Owner { get; set; } = -1;
+}
+
+public class AdventureMap
+{
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public List<MapTile> Tiles { get; set; } = new();
+
+    public MapTile At(int x, int y) => Tiles[y * Width + x];
+    public bool InBounds(int x, int y) => x >= 0 && y >= 0 && x < Width && y < Height;
+}
+
+public static class MapGenerator
+{
+    private static readonly string[] MineTypes = ["wood", "ore", "gold", "mercury", "sulfur", "crystal", "gems"];
+
+    public static AdventureMap Generate(int width, int height, int playerCount, int seed)
+    {
+        var rng = new Random(seed);
+        var map = new AdventureMap { Width = width, Height = height };
+
+        // ---- terrain via value noise
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                var n = Fbm(x / 14.0, y / 14.0, seed, 4);
+                var t = n switch
+                {
+                    < 0.35 => "dirt",
+                    < 0.42 => "rough",
+                    > 0.75 => "snow",
+                    > 0.68 => "sand",
+                    _ => "grass"
+                };
+                map.Tiles.Add(new MapTile
+                {
+                    Terrain = t,
+                    Variant = rng.Next(4),
+                    Passable = true
+                });
+            }
+        }
+
+        // ---- lakes
+        for (var i = 0; i < 6; i++)
+        {
+            var cx = rng.Next(6, width - 6);
+            var cy = rng.Next(6, height - 6);
+            var r = rng.Next(2, 5);
+            for (var y = cy - r; y <= cy + r; y++)
+            for (var x = cx - r; x <= cx + r; x++)
+            {
+                if (!map.InBounds(x, y)) continue;
+                if (Math.Sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) < r)
+                {
+                    var t = map.At(x, y);
+                    t.Terrain = "water";
+                    t.Passable = false;
+                }
+            }
+        }
+
+        // ---- mountains and rocks
+        for (var i = 0; i < 40; i++)
+        {
+            var cx = rng.Next(2, width - 2);
+            var cy = rng.Next(2, height - 2);
+            var r = rng.Next(1, 3);
+            for (var y = cy - r; y <= cy + r; y++)
+            for (var x = cx - r; x <= cx + r; x++)
+            {
+                if (!map.InBounds(x, y)) continue;
+                if (Math.Sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) >= r) continue;
+                if (rng.NextDouble() > 0.7) continue;
+                var t = map.At(x, y);
+                if (t.Terrain == "water") continue;
+                t.ObjectKind = rng.Next(2) == 0 ? "mountain" : "rock";
+                t.Passable = false;
+            }
+        }
+
+        // ---- forests
+        for (var i = 0; i < 260; i++)
+        {
+            var x = rng.Next(width);
+            var y = rng.Next(height);
+            var t = map.At(x, y);
+            if (t.ObjectKind != null || !t.Passable) continue;
+            if (t.Terrain is "sand" or "snow") continue;
+            t.ObjectKind = "tree";
+            t.Passable = false;
+        }
+
+        // ---- player start positions (corners, then edges)
+        var corners = new (int x, int y)[]
+        {
+            (8, 8), (width - 9, 8), (8, height - 9), (width - 9, height - 9),
+            (width / 2, 8), (width / 2, height - 9), (8, height / 2), (width - 9, height / 2),
+            (width / 3, height / 3), (width * 2 / 3, height * 2 / 3)
+        };
+
+        var starts = new List<(int x, int y)>();
+        for (var i = 0; i < playerCount && i < corners.Length; i++)
+        {
+            var (sx, sy) = corners[i];
+            for (var y = sy - 4; y <= sy + 4; y++)
+            for (var x = sx - 4; x <= sx + 4; x++)
+            {
+                if (!map.InBounds(x, y)) continue;
+                var t = map.At(x, y);
+                t.ObjectKind = null;
+                t.Passable = true;
+                if (t.Terrain == "water") t.Terrain = "grass";
+            }
+            starts.Add((sx, sy));
+        }
+
+        // ---- carve paths between starts so the map is connected
+        for (var i = 1; i < starts.Count; i++)
+            CarvePath(map, starts[i - 1], starts[i], rng);
+        for (var i = 0; i < 12; i++)
+        {
+            var a = (rng.Next(2, width - 2), rng.Next(2, height - 2));
+            var b = (rng.Next(2, width - 2), rng.Next(2, height - 2));
+            CarvePath(map, a, b, rng);
+        }
+
+        // ---- place objects on free tiles (keep the ground around each town and hero clear)
+        var free = new List<(int x, int y)>();
+        for (var y = 0; y < height; y++)
+        for (var x = 0; x < width; x++)
+        {
+            var t = map.At(x, y);
+            if (!t.Passable || t.ObjectKind != null) continue;
+            if (starts.Any(s => Math.Max(Math.Abs(s.x - x), Math.Abs(s.y - y)) <= 2)) continue;
+            free.Add((x, y));
+        }
+        Shuffle(free, rng);
+        var fi = 0;
+        (int x, int y) Take() => free[fi++ % free.Count];
+
+        // mines
+        for (var i = 0; i < 28; i++)
+        {
+            var (x, y) = Take();
+            var t = map.At(x, y);
+            t.ObjectKind = "mine";
+            t.ObjectData = MineTypes[i % MineTypes.Length];
+            t.Owner = -1;
+            t.Passable = false;
+        }
+
+        // resource piles
+        for (var i = 0; i < 60; i++)
+        {
+            var (x, y) = Take();
+            var t = map.At(x, y);
+            var type = MineTypes[rng.Next(MineTypes.Length)];
+            var amount = type == "gold" ? rng.Next(500, 1500) : rng.Next(3, 8);
+            t.ObjectKind = "resource";
+            t.ObjectData = type + ":" + amount;
+        }
+
+        // treasure chests
+        for (var i = 0; i < 20; i++)
+        {
+            var (x, y) = Take();
+            var t = map.At(x, y);
+            t.ObjectKind = "treasure";
+            t.ObjectData = rng.Next(1000, 3000) + ":" + rng.Next(500, 1500);
+        }
+
+        // artifacts
+        for (var i = 0; i < 12; i++)
+        {
+            var (x, y) = Take();
+            var t = map.At(x, y);
+            t.ObjectKind = "artifact";
+            t.ObjectData = "artifact" + i;
+        }
+
+        // shrines
+        for (var i = 0; i < 8; i++)
+        {
+            var (x, y) = Take();
+            var t = map.At(x, y);
+            t.ObjectKind = "shrine";
+            t.ObjectData = "spell" + i;
+        }
+
+        // wandering monsters (impassable obstacles, no combat): "creatureKey:count"
+        var wanderers = Creatures.All.Values
+            .Where(c => c.UpgradeOf == null && c.Tier <= 4)
+            .OrderBy(c => c.Key, StringComparer.Ordinal)
+            .ToArray();
+        for (var i = 0; i < 40; i++)
+        {
+            var (x, y) = Take();
+            var t = map.At(x, y);
+            var c = wanderers[rng.Next(wanderers.Length)];
+            var count = Math.Max(2, rng.Next(4, 16) * (5 - c.Tier) / 2);
+            t.ObjectKind = "monster";
+            t.ObjectData = c.Key + ":" + count;
+            t.Passable = false;
+        }
+
+        return map;
+    }
+
+    private static void CarvePath(AdventureMap map, (int x, int y) a, (int x, int y) b, Random rng)
+    {
+        var (x, y) = a;
+        var guard = 0;
+        while ((x != b.x || y != b.y) && guard++ < 2000)
+        {
+            var t = map.At(x, y);
+            t.ObjectKind = null;
+            t.Passable = true;
+            if (t.Terrain == "water") t.Terrain = "dirt";
+            if (x != b.x && (y == b.y || rng.Next(2) == 0)) x += Math.Sign(b.x - x);
+            else y += Math.Sign(b.y - y);
+        }
+    }
+
+    private static void Shuffle<T>(IList<T> list, Random rng)
+    {
+        for (var i = list.Count - 1; i > 0; i--)
+        {
+            var j = rng.Next(i + 1);
+            (list[i], list[j]) = (list[j], list[i]);
+        }
+    }
+
+    // ---- value noise
+    private static double Hash(int x, int y, int seed)
+    {
+        unchecked
+        {
+            var h = x * 374761393 + y * 668265263 + seed * 1274126177;
+            h = (h ^ (h >> 13)) * 1274126177;
+            h ^= h >> 16;
+            return (h & 0x7fffffff) / (double)0x7fffffff;
+        }
+    }
+
+    private static double ValueNoise(double x, double y, int seed)
+    {
+        var xi = (int)Math.Floor(x);
+        var yi = (int)Math.Floor(y);
+        var xf = x - xi;
+        var yf = y - yi;
+        var u = xf * xf * (3 - 2 * xf);
+        var v = yf * yf * (3 - 2 * yf);
+        var a = Hash(xi, yi, seed);
+        var b = Hash(xi + 1, yi, seed);
+        var c = Hash(xi, yi + 1, seed);
+        var d = Hash(xi + 1, yi + 1, seed);
+        return (a + (b - a) * u) + ((c + (d - c) * u) - (a + (b - a) * u)) * v;
+    }
+
+    private static double Fbm(double x, double y, int seed, int octaves)
+    {
+        var sum = 0.0;
+        var amp = 0.5;
+        var freq = 1.0;
+        for (var i = 0; i < octaves; i++)
+        {
+            sum += ValueNoise(x * freq, y * freq, seed + i * 17) * amp;
+            amp *= 0.5;
+            freq *= 2;
+        }
+        return sum;
+    }
+}
+
+/// <summary>A* pathfinding over the adventure map.</summary>
+public static class Pathfinder
+{
+    public static List<(int x, int y)>? FindPath(AdventureMap map, int sx, int sy, int tx, int ty)
+    {
+        if (!map.InBounds(sx, sy) || !map.InBounds(tx, ty)) return null;
+
+        var w = map.Width;
+        var h = map.Height;
+        var start = sy * w + sx;
+        var goal = ty * w + tx;
+
+        var gScore = new double[w * h];
+        var came = new int[w * h];
+        var closed = new bool[w * h];
+        Array.Fill(gScore, double.PositiveInfinity);
+        Array.Fill(came, -1);
+        gScore[start] = 0;
+
+        var open = new List<(int i, double f)> { (start, Heuristic(sx, sy, tx, ty)) };
+        var dirs = new (int dx, int dy)[]
+        {
+            (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)
+        };
+
+        var iter = 0;
+        while (open.Count > 0 && iter++ < 40000)
+        {
+            var bi = 0;
+            for (var i = 1; i < open.Count; i++) if (open[i].f < open[bi].f) bi = i;
+            var cur = open[bi];
+            open.RemoveAt(bi);
+
+            if (cur.i == goal)
+            {
+                var path = new List<(int x, int y)>();
+                var c = goal;
+                while (c != -1)
+                {
+                    path.Add((c % w, c / w));
+                    c = came[c];
+                }
+                path.Reverse();
+                return path;
+            }
+
+            if (closed[cur.i]) continue;
+            closed[cur.i] = true;
+
+            var cx = cur.i % w;
+            var cy = cur.i / w;
+
+            foreach (var (dx, dy) in dirs)
+            {
+                var nx = cx + dx;
+                var ny = cy + dy;
+                if (!map.InBounds(nx, ny)) continue;
+                var ni = ny * w + nx;
+                if (closed[ni]) continue;
+
+                var t = map.At(nx, ny);
+                var isGoal = ni == goal;
+                if (!t.Passable && !isGoal) continue;
+
+                // no corner cutting
+                if (dx != 0 && dy != 0)
+                {
+                    if (!map.At(cx + dx, cy).Passable || !map.At(cx, cy + dy).Passable) continue;
+                }
+
+                var cost = isGoal ? 1.0 : Terrain.MoveCost(t.Terrain) / 100.0;
+                var ng = gScore[cur.i] + cost;
+                if (ng < gScore[ni])
+                {
+                    gScore[ni] = ng;
+                    came[ni] = cur.i;
+                    open.Add((ni, ng + Heuristic(nx, ny, tx, ty)));
+                }
+            }
+        }
+        return null;
+    }
+
+    private static double Heuristic(int x, int y, int tx, int ty) =>
+        Math.Max(Math.Abs(x - tx), Math.Abs(y - ty));
+}

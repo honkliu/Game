@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160">
+
+<defs><linearGradient id="s1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#c0b6a4"/><stop offset="0.5" stop-color="#8a8070"/><stop offset="1" stop-color="#6a6258"/></linearGradient><linearGradient id="r1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3a6ad0"/><stop offset="1" stop-color="#1a2a60"/></linearGradient><linearGradient id="d1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8d080"/><stop offset="1" stop-color="#a08020"/></linearGradient></defs>
+<ellipse cx="80" cy="148" rx="52" ry="9" fill="rgba(0,0,0,0.45)"/>
+<rect x="14" y="92" width="42" height="52" fill="url(#s1)" stroke="#2a1a10" stroke-width="1.5"/>
+<rect x="104" y="92" width="42" height="52" fill="url(#s1)" stroke="#2a1a10" stroke-width="1.5"/>
+<rect x="52" y="76" width="56" height="68" fill="url(#s1)" stroke="#2a1a10" stroke-width="1.5"/>
+<path d="M11 92 L35 70 L59 92 Z" fill="url(#r1)" stroke="#2a1a10" stroke-width="1.5"/>
+<path d="M101 92 L125 70 L149 92 Z" fill="url(#r1)" stroke="#2a1a10" stroke-width="1.5"/>
+<path d="M52 76 A28 22 0 0 1 108 76 Z" fill="url(#d1)" stroke="#2a1a10" stroke-width="1.5"/>
+<rect x="74" y="112" width="12" height="32" fill="#241a10" stroke="#1a1008" stroke-width="1"/>
+<rect x="24" y="104" width="10" height="14" fill="#1a1410"/>
+<rect x="126" y="104" width="10" height="14" fill="#1a1410"/>
+<rect x="60" y="88" width="8" height="12" fill="#1a1410"/>
+<rect x="92" y="88" width="8" height="12" fill="#1a1410"/>
+<rect x="78" y="52" width="4" height="12" fill="#3a6ad0"/>
+
+</svg>
