@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
+import { useGameNavigate } from '../useGameNavigate';
 import { api, ApiError } from '../api';
 import type { ObeliskState } from '../types';
 import { t } from '../i18n';
@@ -8,7 +9,7 @@ import { toast } from '../ui/Toast';
 
 export function Obelisk() {
   const { gameId } = useParams<{ gameId: string }>();
-  const navigate = useNavigate();
+  const navigate = useGameNavigate();
   const [state, setState] = useState<ObeliskState | null>(null);
   const [answer, setAnswer] = useState('');
   const [draft, setDraft] = useState('');

@@ -90,29 +90,31 @@ test.describe('City of Towers', () => {
     expect(after.movement).toBeLessThan(before.movement);
   });
 
-  test('S6 town screen is a painted scene with tabs', async ({ page }) => {
+  test('S6 town screen is the original HoMM3 scene', async ({ page }) => {
     await choosePlayer(page, 'Alice');
     await createGame(page, 'Town Test');
 
     await page.getByRole('button', { name: 'Town', exact: true }).click();
-    await expect(page.getByText("Alice's Keep")).toBeVisible();
+    await expect(page.getByText('Steadwick')).toBeVisible();
 
-    for (const label of ['Build', 'Recruit', 'Market', 'Guild', 'Tavern', 'Garrison', 'Tower', 'Wall']) {
-      await expect(page.getByRole('button', { name: label, exact: true })).toBeVisible();
-    }
+    // the original HoMM3 scene: a canvas of structures over the town backdrop
+    await expect(page.locator('.town-scene canvas')).toBeVisible();
+    expect(await page.locator('.town-scene [data-building-slot]').count()).toBeGreaterThan(0);
 
-    const imgs = page.locator('.town-scene img');
-    expect(await imgs.count()).toBeGreaterThan(0);
-    await expect(imgs.first()).toHaveAttribute('src', /\/towns\/\w+\.png/);
+    // the lower panel drives the windows, as in HoMM3 — no invented text row
+    await expect(page.getByRole('button', { name: 'Hall', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Fort', exact: true })).toBeVisible();
+    expect(await page.locator('[data-creature]').count()).toBeGreaterThan(0);
+    expect(await page.getByRole('button', { name: 'Build', exact: true }).count()).toBe(0);
   });
 
   test('S7 build a dwelling from the town screen', async ({ page }) => {
     await choosePlayer(page, 'Alice');
     await createGame(page, 'Build Test');
     await page.getByRole('button', { name: 'Town', exact: true }).click();
-    await page.getByRole('button', { name: 'Build', exact: true }).click();
+    await page.getByRole('button', { name: 'Hall', exact: true }).click();
 
-    await expect(page.getByText('One structure per turn.')).toBeVisible();
+    await expect(page.getByText(/structures built/)).toBeVisible();
     await page.locator('[data-building="dwelling3"]').click();
     await page.locator('.modal').getByRole('button', { name: 'Build', exact: true }).click();
     await expect(page.getByText(/Built (Dwelling 3|Griffin Tower)/)).toBeVisible({ timeout: 10_000 });
@@ -122,10 +124,15 @@ test.describe('City of Towers', () => {
     await choosePlayer(page, 'Alice');
     await createGame(page, 'Recruit Test');
     await page.getByRole('button', { name: 'Town', exact: true }).click();
-    await page.getByRole('button', { name: 'Recruit', exact: true }).click();
+    await page.locator('[data-creature]').first().click();
 
+    // the original HoMM3 recruit screen
+    await expect(page.locator('img[src*="tpubuild"]')).toBeVisible();
     await expect(page.getByText('Pikeman')).toBeVisible();
+    await expect(page.locator('[data-tier]')).toHaveCount(7);
+
     await page.locator('.modal').getByRole('button', { name: '10', exact: true }).first().click();
+    await page.locator('.modal').getByRole('button', { name: 'Buy', exact: true }).click();
     await expect(page.getByText(/Recruited 10 Pikeman/)).toBeVisible({ timeout: 10_000 });
   });
 
@@ -137,6 +144,55 @@ test.describe('City of Towers', () => {
     for (const label of ['Attack', 'Defense', 'Power', 'Knowledge', 'Experience', 'Spell Points']) {
       await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
     }
+  });
+
+  test('S9b tavern shows hero details and hires', async ({ page }) => {
+    await choosePlayer(page, 'Alice');
+    await createGame(page, 'Tavern Test');
+    await page.getByRole('button', { name: 'Town', exact: true }).click();
+
+    // the tavern is already built in a starting town; open it from the scene
+    await page.locator('.town-scene [data-building-slot="tavern"]').first().click({ force: true });
+
+    const modal = page.locator('.modal');
+    // the original HoMM3 tavern screen
+    await expect(modal.locator('img[src*="tptavern"]')).toBeVisible();
+    await expect(modal.getByText('Attack', { exact: true })).toBeVisible();
+    await expect(modal.getByText('Defense', { exact: true })).toBeVisible();
+    await expect(modal.getByText('Power', { exact: true })).toBeVisible();
+    await expect(modal.getByText('Knowledge', { exact: true })).toBeVisible();
+    await expect(modal.getByText('Skills', { exact: true })).toBeVisible();
+    await expect(modal.getByText('2000', { exact: true })).toBeVisible();
+
+    await modal.getByRole('button', { name: 'Hire', exact: true }).click();
+    await expect(page.getByText(/^Hired /)).toBeVisible({ timeout: 10_000 });
+  });
+
+  test('S9c walking into your town opens the town screen', async ({ page }) => {
+    await choosePlayer(page, 'Alice');
+    await createGame(page, 'Walk In Test');
+    await page.waitForTimeout(2000);
+
+    const info = await page.evaluate(async () => {
+      const pid = localStorage.getItem('cityoftowers.player');
+      const games = await (await fetch('/api/games', { headers: { 'X-Player-Id': pid } })).json();
+      const g = games[0];
+      const map = await (await fetch(`/api/games/${g.id}/map`, { headers: { 'X-Player-Id': pid } })).json();
+      const heroes = await (await fetch(`/api/games/${g.id}/heroes`, { headers: { 'X-Player-Id': pid } })).json();
+      const idx = map.tiles.findIndex((t: { objectKind: string | null; owner: number }) => t.objectKind === 'town' && t.owner === 0);
+      return { width: map.width, town: { x: idx % map.width, y: Math.floor(idx / map.width) }, hero: { x: heroes[0].x, y: heroes[0].y } };
+    });
+
+    const canvas = page.locator('canvas[aria-label="Adventure map"]');
+    const box = (await canvas.boundingBox())!;
+    const TILE = 32;
+    // the camera starts at (0,0), so a tile renders at (tile * TILE) from the canvas origin
+    await page.mouse.click(
+      box.x + info.town.x * TILE + TILE / 2,
+      box.y + info.town.y * TILE + TILE / 2
+    );
+
+    await expect(page.locator('.town-scene')).toBeVisible({ timeout: 15_000 });
   });
 
   test('S10 obelisk reveals a fragment', async ({ page }) => {

@@ -169,3 +169,16 @@ export function Pcx(props: { name: string; x: number; y: number; w?: number; h?:
     style: { position: 'absolute', left: props.x, top: props.y, width: props.w, height: props.h, pointerEvents: 'none', ...props.style }
   });
 }
+
+/**
+ * Full-screen backdrop for a town window. Uses the original PCX when the player has
+ * HoMM3 data installed, and a plain panel otherwise so the controls stay readable.
+ */
+export function ScreenBackdrop(props: { name: string; w: number; h: number; alt?: string }) {
+  const h3 = useH3();
+  if (h3) return Pcx({ name: props.name, x: 0, y: 0, w: props.w, h: props.h, alt: props.alt });
+  return createElement('div', {
+    className: 'panel',
+    style: { position: 'absolute', left: 0, top: 0, width: props.w, height: props.h, borderRadius: 0 }
+  });
+}

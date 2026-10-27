@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
+import { useGameNavigate } from '../useGameNavigate';
 import { api, ApiError } from '../api';
 import type { ProjectDto } from '../api';
 import { Btn, Loading, Panel, Txt } from '../ui/Layout';
@@ -9,7 +10,7 @@ import { ResIcon } from '../ui/homm';
 
 export function Projects() {
   const { gameId } = useParams<{ gameId: string }>();
-  const navigate = useNavigate();
+  const navigate = useGameNavigate();
   const [projects, setProjects] = useState<ProjectDto[] | null>(null);
   const [gold, setGold] = useState(100);
   const [wood, setWood] = useState(5);

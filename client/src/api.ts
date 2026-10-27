@@ -51,8 +51,8 @@ export const api = {
 
   // games
   listGames: () => request<import('./types').GameSummary[]>('GET', '/api/games'),
-  createGame: (name: string, capacity: number, turnSeconds: number, turnLimit: number) =>
-    request<{ gameId: string }>('POST', '/api/games', { name, capacity, turnSeconds, turnLimit }),
+  createGame: (name: string, capacity: number, turnSeconds: number, turnLimit: number, aiPlayers = 0) =>
+    request<{ gameId: string }>('POST', '/api/games', { name, capacity, turnSeconds, turnLimit, aiPlayers }),
   joinGame: (id: string) => request<{ playerId: string }>('POST', `/api/games/${id}/join`),
   leaveGame: (id: string) => request<void>('POST', `/api/games/${id}/leave`),
   startGame: (id: string) => request<void>('POST', `/api/games/${id}/start`),
@@ -61,10 +61,31 @@ export const api = {
   getMap: (id: string) => request<import('./types').MapData>('GET', `/api/games/${id}/map`),
   getHeroes: (id: string) => request<import('./types').HeroDetail[]>('GET', `/api/games/${id}/heroes`),
   getHero: (id: string) => request<import('./types').HeroDetail>('GET', `/api/heroes/${id}`),
-  moveHero: (id: string, path: { x: number; y: number }[]) =>
-    request<import('./types').HeroDetail>('POST', `/api/heroes/${id}/move`, { path }),
+  moveHero: async (id: string, path: { x: number; y: number }[]) => {
+    const res = await fetch(`/api/heroes/${id}/move`, {
+      method: 'POST',
+      headers: {
+        'X-Player-Id': localStorage.getItem('cityoftowers.player') ?? '',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ path }),
+      credentials: 'same-origin'
+    });
+    const text = await res.text();
+    let json: unknown = null;
+    if (text) { try { json = JSON.parse(text); } catch { json = text; } }
+    if (!res.ok) {
+      const msg = json && typeof json === 'object' && 'error' in json ? String((json as { error: unknown }).error) : `Request failed (${res.status}).`;
+      throw new ApiError(res.status, msg);
+    }
+    return { hero: json as import('./types').HeroDetail, message: res.headers.get('X-Move-Message') };
+  },
   resolveEncounter: (id: string, action: string) =>
     request<{ message: string }>('POST', `/api/heroes/${id}/encounter`, { action }),
+  castSpell: (id: string, spell: string, x?: number, y?: number) =>
+    request<{ message: string; mana: number; x: number; y: number }>('POST', `/api/heroes/${id}/cast`, { spell, x, y }),
+  endTurn: (id: string) =>
+    request<{ day: number; week: number; month: number; turn: number }>('POST', `/api/games/${id}/endturn`),
   getTown: (id: string) => request<import('./types').TownDetail>('GET', `/api/towns/${id}`),
   recruit: (id: string, tier: number, count: number) =>
     request<{ recruited: number; creature: string }>('POST', `/api/towns/${id}/recruit`, { tier, count }),
@@ -72,6 +93,8 @@ export const api = {
     request<void>('POST', `/api/towns/${id}/trade`, { from, to, amount }),
   hire: (id: string, heroKey: string) =>
     request<{ heroId: string }>('POST', `/api/towns/${id}/hire`, { heroKey }),
+  moveGarrison: (id: string, direction: 'toGarrison' | 'toHero', slot: number, count: number) =>
+    request<{ moved: number; creature: string }>('POST', `/api/towns/${id}/garrison`, { direction, slot, count }),
 
   // city
   getCity: (playerId: string) => request<import('./types').CityView>('GET', `/api/cities/${playerId}`),
@@ -116,6 +139,12 @@ export const api = {
   // catalogue
   getBuildings: () => request<import('./types').BuildingDef[]>('GET', '/api/buildings'),
   getCreatures: () => request<import('./types').CreatureDef[]>('GET', '/api/creatures'),
+  getHeroCatalog: () => request<import('./types').HeroDef[]>('GET', '/api/heroes'),
+  getSpells: () => request<import('./types').SpellDef[]>('GET', '/api/spells'),
+  getAnnotations: (id: string) =>
+    request<{ id: string; x: number; y: number; text: string; author: string; createdAt: string }[]>('GET', `/api/games/${id}/annotations`),
+  addAnnotation: (id: string, x: number, y: number, text: string) =>
+    request<void>('POST', `/api/games/${id}/annotations`, { x, y, text }),
   getMessages: (id: string) => request<HeroMessageDto[]>('GET', `/api/games/${id}/messages`),
   sendMessage: (id: string, toPlayerId: string, body: string) =>
     request<void>('POST', `/api/games/${id}/messages`, { toPlayerId, body }),

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
+import { useGameNavigate } from '../useGameNavigate';
 import { api, ApiError } from '../api';
 import type { GameDetail } from '../types';
 import { Btn, Loading, Panel, Txt } from '../ui/Layout';
@@ -11,7 +12,7 @@ const RES = ['wood', 'ore', 'mercury', 'sulfur', 'crystal', 'gems', 'gold'] as c
 
 export function Social() {
   const { gameId } = useParams<{ gameId: string }>();
-  const navigate = useNavigate();
+  const navigate = useGameNavigate();
   const [search] = useSearchParams();
   const [game, setGame] = useState<GameDetail | null>(null);
   const [messages, setMessages] = useState<{ id: string; from: string; to: string; body: string; mine: boolean }[]>([]);
@@ -32,8 +33,10 @@ export function Social() {
       setTrades(t);
       if (!toPlayer && g.players.length) {
         const me = localStorage.getItem('cityoftowers.player') ?? '';
-        const other = g.players.find((p) => p.name.toLowerCase() !== me);
-        if (other) setToPlayer(other.playerId);
+        // default to another human player, not a computer seat
+        const others = g.players.filter((p) => p.name.toLowerCase() !== me);
+        const pick = others.find((p) => !p.isAi) ?? others[0];
+        if (pick) setToPlayer(pick.playerId);
       }
     } catch (e) {
       if (e instanceof ApiError) toast(e.message);

@@ -20,6 +20,19 @@ public static class Encounters
         var slots = Services.GameService.ParseArmy(armyJson);
         return slots.Any(s => s.Creature == null);
     }
+
+    /// <summary>
+    /// Expedition strength: the army's total AI value. A stack can be observed when the
+    /// army is at least half its strength, and recruited when it is at least as strong.
+    /// </summary>
+    public static int Strength(string armyJson) =>
+        Services.GameService.ArmyStrength(Services.GameService.ParseArmy(armyJson));
+
+    public static int StackStrength(int aiValue, int count) => aiValue * count;
+
+    public static bool CanObserve(int armyStrength, int stackStrength) => armyStrength * 2 >= stackStrength;
+
+    public static bool CanRecruit(int armyStrength, int stackStrength) => armyStrength >= stackStrength;
 }
 
 /// <summary>

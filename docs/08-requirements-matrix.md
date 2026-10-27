@@ -103,18 +103,30 @@ column is incomplete.
 
 | Gap | Impact |
 | --- | --- |
-| Spells not implemented (P-9, R-6) | The spellbook is empty; no utility spells |
-| No tests for mines/resources/treasure/shrines (P-11, P-14–16) | Implemented but unverified |
-| No test for weekly growth (P-19) | Implemented but unverified |
-| No test for Grail reveal/dig (P-24, P-25) | Implemented but unverified |
-| No test for tavern (P-26) | Implemented but unverified |
-| Obelisk is not on the map (P-23) | Visited from the sidebar instead of by walking |
 | Town art is generated placeholder SVG (P-17) | Layout is correct; final painted art still needed |
-| No automated realtime test (A-15) | Verified manually over SignalR |
-| Mage Guild empty (P-28) | Building exists, no spells |
-| Expedition strength (A-4) | Army has no peaceful purpose yet |
-| Shared mines (A-7) | Mines are exclusive |
-| Annotations have no map UI (A-13) | API works, not visible |
+| Rampart has no backdrop in the demo data | `tbrback.pcx` is absent; Rampart borrows Castle's (recorded in `TOWN_BACK_FALLBACK`) |
+| Only three factions | The 1999 demo ships Castle, Rampart, Necropolis sprites only |
+| Combat spells are inert | Combat is out of scope by design (`00-FIDELITY-CONTRACT.md:58`) |
+
+### Closed since the last audit
+
+| Gap | Resolution |
+| --- | --- |
+| No AI opponents | `AiService` builds, recruits and explores each day; lobby offers 0–2 computers |
+| Multiplayer join was broken | `POST /api/games/{id}/join` added; the lobby's Enter button now seats the player |
+| Social defaulted to an arbitrary recipient | Prefers another human seat over a computer |
+| Database grew without bound | Startup prunes games untouched for a day and caps the total at 20 (279 MB → 10 MB) |
+| Spells not implemented (P-9, R-6) | 25-spell catalogue, `/api/spells`, `/api/heroes/{id}/cast`, spellbook panel |
+| No tests for mines/resources/treasure/shrines (P-11, P-14–16) | `build/audit-mapobjects.js` |
+| No test for weekly growth (P-19) | `build/audit-mapobjects.js` |
+| No test for Grail reveal/dig (P-24, P-25) | `build/audit-mapobjects.js` |
+| No test for tavern (P-26) | `build/audit-mapobjects.js`, e2e S9b |
+| Obelisk is not on the map (P-23) | Placed by the generator; walking up to it opens the Obelisk screen |
+| Mage Guild empty (P-28) | Building a guild teaches one spell per level |
+| Expedition strength (A-4) | Gates observe (≥ half) and recruit (≥ full) at wandering stacks |
+| Shared mines (A-7) | `Owner` is a bitmask; several cities can work one mine |
+| Annotations have no map UI (A-13) | Gold pins on the map, `N` opens the note dialog |
+| No automated realtime test (A-15) | `build/audit-sync.js` asserts message and turn propagation between two browsers |
 
 ---
 
@@ -122,9 +134,26 @@ column is incomplete.
 
 | Suite | Checks | Result |
 | --- | --- | --- |
-| `test/adventure.js` | 50–54 | all pass |
+| `test/adventure.js` | 54 | all pass |
 | `test/social.js` | 37 | all pass |
 | `test/creatures.js` | 126 creatures | all pass |
-| `e2e/game.spec.ts` | 16 | all pass |
+| `e2e/game.spec.ts` | 18 | all pass |
+| `build/scenarios.js` | 60 | all pass |
+| `build/audit-all.js` | 43 | all pass |
+| `build/audit-rules.js` | 20 | all pass |
+| `build/audit-gaps.js` | 17 | all pass |
+| `build/audit-mapobjects.js` | 11 | all pass |
+| `build/audit-spells.js` | 6 | all pass |
+| `build/audit-townentry.js` | 9 | all pass |
+| `build/audit-walkin.js` | 2 | all pass |
+| `build/audit-noh3.js` | 5 | all pass |
+| `build/audit-hero.js` | 9 | all pass |
+| `build/audit-history.js` | 11 | all pass |
+| `build/audit-ai.js` | 7 | all pass |
+| `build/audit-sync.js` | 4 | all pass |
+| `build/audit-persist.js` | 8 | all pass |
+| `build/audit-longgame.js` | 13 | all pass |
+| `build/audit-responsive.js` | 36 | all pass |
+| `build/gen-check` | 15 | all pass |
 
-**Total: 87–91 server checks + 126 creatures + 16 browser tests, all green.**
+**Total: 385 checks, all green.**

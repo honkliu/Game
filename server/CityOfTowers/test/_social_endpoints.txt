@@ -1,0 +1,153 @@
+// ------------------------------------------------------------ encounters
+        app.MapPost("/api/heroes/{heroId:guid}/encounter", async (Guid heroId, EncounterReq req, SocialService social, HttpContext ctx) =>
+        {
+            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
+            var (ok, error, message) = await social.ResolveEncounterAsync(heroId, playerId, req.Action ?? "");
+            if (!ok) return Results.BadRequest(new { error });
+            return Results.Ok(new { message });
+        });
+
+        // ------------------------------------------------------------ hero messages
+        app.MapGet("/api/games/{id:guid}/messages", async (Guid id, SocialService social, HttpContext ctx) =>
+        {
+            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
+            return Results.Ok(await social.GetHeroMessagesAsync(id, playerId));
+        });
+
+        app.MapPost("/api/games/{id:guid}/messages", async (Guid id, MessageReq req, SocialService social, HttpContext ctx) =>
+        {
+            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
+            if (!Guid.TryParse(req.ToPlayerId, out var to)) return Results.BadRequest(new { error = "Recipient required." });
+            var (ok, error) = await social.SendHeroMessageAsync(id, playerId, to, req.Body ?? "");
+            if (!ok) return Results.BadRequest(new { error });
+            return Results.NoContent();
+        });
+
+        // ------------------------------------------------------------ trades
+        app.MapGet("/api/games/{id:guid}/trades", async (Guid id, SocialService social, HttpContext ctx) =>
+        {
+            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
+            return Results.Ok(await social.GetTradesAsync(id, playerId));
+        });
+
+        app.MapPost("/api/games/{id:guid}/trades", async (Guid id, TradeOfferReq req, SocialService social, HttpContext ctx) =>
+        {
+            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
+            if (!Guid.TryParse(req.ToPlayerId, out var to)) return Results.BadRequest(new { error = "Recipient required." });
+            var (ok, error) = await social.OfferTradeAsync(id, playerId, to,
+                req.Give ?? "", req.GiveAmount, req.Want ?? "", req.WantAmount);
+            if (!ok) return Results.BadRequest(new { error });
+            return Results.NoContent();
+        });
+
+        app.MapPost("/api/trades/{offerId:guid}/respond", async (Guid offerId, RespondReq req, SocialService social, HttpContext ctx) =>
+        {
+            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
+            var (ok, error) = await social.RespondTradeAsync(offerId, playerId, req.Accept);
+            if (!ok) return Results.BadRequest(new { error });
+            return Results.NoContent();
+        });
+
+        // ------------------------------------------------------------ shared projects
+        app.MapGet("/api/games/{id:guid}/projects", async (Guid id, SocialService social) =>
+            Results.Ok(await social.GetProjectsAsync(id)));
+
+        app.MapPost("/api/projects/{projectId:guid}/contribute", async (Guid projectId, ContributeReq req, SocialService social, HttpContext ctx) =>
+        {
+            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
+            var (ok, error) = await social.ContributeAsync(projectId, playerId, req.Gold, req.Wood, req.Ore);
+            if (!ok) return Results.BadRequest(new { error });
+            return Results.NoContent();
+        });
+
+        // ------------------------------------------------------------ annotations
+        app.MapGet("/api/games/{id:guid}/annotations", async (Guid id, SocialService social) =>
+            Results.Ok(await social.GetAnnotationsAsync(id)));
+
+        app.MapPost("/api/games/{id:guid}/annotations", async (Guid id, AnnotationReq req, SocialService social, HttpContext ctx) =>
+        {
+            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
+            var (ok, error) = await social.AddAnnotationAsync(id, playerId, req.X, req.Y, req.Text ?? "");
+            if (!ok) return Results.BadRequest(new { error });
+            return Results.NoContent();
+        });
+
+        // ------------------------------------------------------------ tower content
+        app.MapGet("/api/towns/{townId:guid}/posts", async (Guid townId, AppDb db) =>
+        {
+            var posts = await db.Posts.Where(p => p.TownId == townId).OrderBy(p => p.CreatedAt).ToListAsync();
+            return Results.Ok(posts.Select(p => new
+            {
+                id = p.Id, title = p.Title, body = p.Body, imageUrl = p.ImageUrl,
+                createdAt = p.CreatedAt, updatedAt = p.UpdatedAt
+            }));
+        });
+
+        app.MapPost("/api/towns/{townId:guid}/posts", async (Guid townId, PostReq req, SocialService social, HttpContext ctx) =>
+        {
+            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
+            var (id, error) = await social.CreatePostAsync(townId, playerId, req.Title ?? "", req.Body ?? "", req.ImageUrl);
+            if (error != null) return Results.BadRequest(new { error });
+            return Results.Ok(new { postId = id });
+        });
+
+        app.MapGet("/api/posts/{postId:guid}/comments", async (Guid postId, AppDb db) =>
+        {
+            var comments = await db.Comments.Where(c => c.PostId == postId).OrderBy(c => c.CreatedAt).ToListAsync();
+            var players = await db.Players.ToListAsync();
+            string NameOf(Guid id) =>
+                Seeded.Players.FirstOrDefault(s => s.Faction == players.FirstOrDefault(p => p.Id == id)?.Faction)?.Name ?? "?";
+            return Results.Ok(comments.Select(c => new
+            {
+                id = c.Id, author = NameOf(c.AuthorUserId), body = c.Body, createdAt = c.CreatedAt
+            }));
+        });
+
+        app.MapPost("/api/posts/{postId:guid}/comments", async (Guid postId, BodyReq req, SocialService social, HttpContext ctx) =>
+        {
+            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
+            var (id, error) = await social.AddCommentAsync(postId, playerId, req.Body ?? "");
+            if (error != null) return Results.BadRequest(new { error });
+            return Results.Ok(new { commentId = id });
+        });
+
+        app.MapGet("/api/towns/{townId:guid}/wall", async (Guid townId, AppDb db) =>
+        {
+            var msgs = await db.WallMessages.Where(m => m.TownId == townId).OrderBy(m => m.CreatedAt).ToListAsync();
+            var players = await db.Players.ToListAsync();
+            string NameOf(Guid id) =>
+                Seeded.Players.FirstOrDefault(s => s.Faction == players.FirstOrDefault(p => p.Id == id)?.Faction)?.Name ?? "?";
+            return Results.Ok(msgs.Select(m => new
+            {
+                id = m.Id, author = NameOf(m.AuthorUserId), body = m.Body,
+                parentId = m.ParentId, createdAt = m.CreatedAt
+            }));
+        });
+
+        app.MapPost("/api/towns/{townId:guid}/wall", async (Guid townId, WallReq req, SocialService social, HttpContext ctx) =>
+        {
+            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
+            var (id, error) = await social.AddWallMessageAsync(townId, playerId, req.Body ?? "", req.ParentId);
+            if (error != null) return Results.BadRequest(new { error });
+            return Results.Ok(new { messageId = id });
+        });
+
+        app.MapGet("/api/towns/{townId:guid}/tower", async (Guid townId, AppDb db) =>
+        {
+            var msgs = await db.TowerMessages.Where(m => m.TownId == townId).OrderBy(m => m.CreatedAt).ToListAsync();
+            var players = await db.Players.ToListAsync();
+            string NameOf(Guid id) =>
+                Seeded.Players.FirstOrDefault(s => s.Faction == players.FirstOrDefault(p => p.Id == id)?.Faction)?.Name ?? "?";
+            return Results.Ok(msgs.Select(m => new
+            {
+                id = m.Id, author = NameOf(m.AuthorUserId), body = m.Body, createdAt = m.CreatedAt
+            }));
+        });
+
+        app.MapPost("/api/towns/{townId:guid}/tower", async (Guid townId, BodyReq req, SocialService social, HttpContext ctx) =>
+        {
+            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
+            var (id, error) = await social.AddTowerMessageAsync(townId, playerId, req.Body ?? "");
+            if (error != null) return Results.BadRequest(new { error });
+            return Results.Ok(new { messageId = id });
+        });

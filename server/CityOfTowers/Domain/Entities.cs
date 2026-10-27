@@ -46,6 +46,8 @@ public class Player
     [MaxLength(20)] public string Faction { get; set; } = "castle";
     [MaxLength(40)] public string CityName { get; set; } = "";
     public bool Precious { get; set; }
+    /// <summary>Computer-controlled seat: the turn ticker plays it.</summary>
+    public bool IsAi { get; set; }
     public int ObeliskVisits { get; set; }
     public bool BuiltThisTurn { get; set; }
     public int WrongAnswers { get; set; }

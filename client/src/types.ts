@@ -66,6 +66,7 @@ export interface GamePlayer {
   name: string;
   faction: string;
   cityName: string;
+  isAi: boolean;
   precious: boolean;
   obeliskVisits: number;
   resources: Resources;
@@ -110,6 +111,7 @@ export interface HeroDetail {
   x: number;
   y: number;
   army: ArmySlot[];
+  strength: number;
   skills: Record<string, number>;
   spells: string[];
   artifacts: string[];
@@ -151,6 +153,7 @@ export interface TownDetail {
   growthMultiplier: number;
   available: { tier: number; creature: string | null; count: number; dwellingBuilt: boolean }[];
   garrison: ArmySlot[];
+  heroInTown: { id: string; name: string; army: ArmySlot[] } | null;
   tavern: string[];
   mageGuild: string[];
   resources: Resources;
@@ -170,8 +173,30 @@ export interface CreatureDef {
   growth: number;
   gold: number;
   shots: number;
+  aiValue: number;
   abilities: string[];
   upgradeOf: string | null;
+}
+
+export interface HeroDef {
+  key: string;
+  name: string;
+  faction: string;
+  might: boolean;
+  attack: number;
+  defense: number;
+  power: number;
+  knowledge: number;
+  skills: string[];
+}
+
+export interface SpellDef {
+  key: string;
+  name: string;
+  level: number;
+  school: string;
+  cost: number;
+  description: string;
 }
 
 export interface CityView {

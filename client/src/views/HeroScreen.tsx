@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
+import { useGameNavigate } from '../useGameNavigate';
 import { api } from '../api';
 import type { HeroDetail, CreatureDef } from '../types';
 import { Btn, Loading, Panel, Txt } from '../ui/Layout';
@@ -174,7 +175,7 @@ function StatIcon({ kind }: { kind: string }) {
 
 export function HeroScreen() {
   const { gameId, heroId } = useParams<{ gameId: string; heroId: string }>();
-  const navigate = useNavigate();
+  const navigate = useGameNavigate();
   const [hero, setHero] = useState<HeroDetail | null>(null);
   const [creatures, setCreatures] = useState<Record<string, CreatureDef>>({});
   const h3 = useH3();

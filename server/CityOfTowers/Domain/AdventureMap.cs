@@ -161,7 +161,7 @@ public static class MapGenerator
             var t = map.At(x, y);
             t.ObjectKind = "mine";
             t.ObjectData = MineTypes[i % MineTypes.Length];
-            t.Owner = -1;
+            t.Owner = 0; // bitmask: no city works this mine yet
             t.Passable = false;
         }
 
@@ -195,12 +195,22 @@ public static class MapGenerator
         }
 
         // shrines
+        var shrineSpells = Spells.OfLevel(1).Concat(Spells.OfLevel(2)).ToArray();
         for (var i = 0; i < 8; i++)
         {
             var (x, y) = Take();
             var t = map.At(x, y);
             t.ObjectKind = "shrine";
-            t.ObjectData = "spell" + i;
+            t.ObjectData = shrineSpells[i % shrineSpells.Length].Key;
+        }
+
+        // the Obelisk: one per map, visited by walking up to it
+        {
+            var (x, y) = Take();
+            var t = map.At(x, y);
+            t.ObjectKind = "obelisk";
+            t.ObjectData = null;
+            t.Passable = false;
         }
 
         // wandering monsters (impassable obstacles, no combat): "creatureKey:count"

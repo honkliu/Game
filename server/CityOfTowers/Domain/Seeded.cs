@@ -10,9 +10,9 @@ public static class Seeded
 {
     public static readonly SeededPlayer[] Players =
     [
-        new("alice", "Alice", "castle", "Alice's Keep", "christian"),
-        new("bob", "Bob", "rampart", "Bob's Grove", "ryland"),
-        new("carol", "Carol", "necropolis", "Carol's Crypt", "vidomina")
+        new("alice", "Alice", "castle", "Steadwick", "christian"),
+        new("bob", "Bob", "rampart", "AvLee", "ryland"),
+        new("carol", "Carol", "necropolis", "Deyja", "vidomina")
     ];
 
     public static SeededPlayer? Find(string? id) =>

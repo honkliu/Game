@@ -10,7 +10,18 @@ namespace CityOfTowers.Services;
 public class GameService
 {
     private readonly AppDb _db;
-    public GameService(AppDb db) => _db = db;
+    private readonly IServiceProvider _services;
+    public GameService(AppDb db, IServiceProvider services)
+    {
+        _db = db;
+        _services = services;
+    }
+
+    /// <summary>Resolved lazily: AiService depends on GameService, so injecting it directly would cycle.</summary>
+    private AiService Ai => _services.GetRequiredService<AiService>();
+
+    /// <summary>Message produced by the most recent move, e.g. "enter-town:{id}".</summary>
+    public string? LastMoveMessage { get; private set; }
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
@@ -156,7 +167,7 @@ public class GameService
     }
 
     // ---------------------------------------------------------------- game creation
-    public async Task<Game> CreateGameAsync(string name, int capacity, int turnSeconds, int turnLimit, int mapSize)
+    public async Task<Game> CreateGameAsync(string name, int capacity, int turnSeconds, int turnLimit, int mapSize, int aiPlayers = 0)
     {
         capacity = Math.Clamp(capacity, 2, 3);
         if (turnSeconds is not (30 or 60 or 300 or 86400)) turnSeconds = 300;
@@ -215,6 +226,8 @@ public class GameService
                 UserId = Guid.Empty,
                 Faction = sp.Faction,
                 CityName = sp.CityName,
+                // the host plays seat 0; the last `aiPlayers` seats are computer-controlled
+                IsAi = aiPlayers > 0 && i >= Seeded.Players.Length - aiPlayers,
                 Wood = 20, Ore = 20, Mercury = 5, Sulfur = 5, Crystal = 5, Gems = 5, Gold = 20000
             };
             _db.Players.Add(player);
@@ -290,6 +303,7 @@ public class GameService
         var moved = false;
         var acted = false;
         string? blocked = null;
+        LastMoveMessage = null;
 
         foreach (var (x, y) in path)
         {
@@ -303,14 +317,15 @@ public class GameService
             var cost = Terrain.MoveCost(tile.Terrain);
 
             // Mines, monster stacks and towns are visited from the neighbouring tile.
-            if (!tile.Passable && tile.ObjectKind is "mine" or "monster" or "town")
+            if (!tile.Passable && tile.ObjectKind is "mine" or "monster" or "town" or "obelisk")
             {
                 if (tile.ObjectKind != "town")
                 {
                     if (hero.Movement < cost) { blocked = "Not enough movement left today."; break; }
                     hero.Movement -= cost;
                 }
-                await InteractAsync(game, map, player, hero, tile, x, y);
+                var (_, adjMsg) = await InteractAsync(game, map, player, hero, tile, x, y);
+                if (adjMsg != null) LastMoveMessage = adjMsg;
                 acted = true;
                 break;
             }
@@ -325,7 +340,8 @@ public class GameService
             hero.Y = y;
             moved = true;
 
-            var (stop, _) = await InteractAsync(game, map, player, hero, tile, x, y);
+            var (stop, msg) = await InteractAsync(game, map, player, hero, tile, x, y);
+            if (msg != null) LastMoveMessage = msg;
             if (stop) break;
         }
 
@@ -342,7 +358,7 @@ public class GameService
         return (false, blocked ?? "Cannot move there.", hero);
     }
 
-    private Task<(bool stop, string? message)> InteractAsync(Game game, AdventureMap map, Player player, Hero hero, MapTile tile, int tx, int ty)
+    private async Task<(bool stop, string? message)> InteractAsync(Game game, AdventureMap map, Player player, Hero hero, MapTile tile, int tx, int ty)
     {
         switch (tile.ObjectKind)
         {
@@ -354,7 +370,7 @@ public class GameService
                 AddResource(player, type, amount);
                 tile.ObjectKind = null;
                 tile.ObjectData = null;
-                return Task.FromResult((false, (string?)$"Found {amount} {type}."));
+                return (false, (string?)$"Found {amount} {type}.");
             }
             case "treasure":
             {
@@ -365,17 +381,17 @@ public class GameService
                 GainExperience(hero, xp);
                 tile.ObjectKind = null;
                 tile.ObjectData = null;
-                return Task.FromResult((false, (string?)$"Found {gold} gold and {xp} experience."));
+                return (false, (string?)$"Found {gold} gold and {xp} experience.");
             }
             case "mine":
             {
                 var ownerIndex = Array.FindIndex(Seeded.Players, p => p.Faction == player.Faction);
-                if (tile.Owner == -1)
-                {
-                    tile.Owner = ownerIndex;
-                    return Task.FromResult((false, (string?)$"Claimed the {tile.ObjectData} mine."));
-                }
-                return Task.FromResult((false, (string?)(tile.Owner == ownerIndex ? null : "Another city already works this mine.")));
+                // Owner is a bitmask of the seats working this mine, so several cities can share it.
+                var bit = 1 << ownerIndex;
+                if ((tile.Owner & bit) != 0)
+                    return (false, (string?)null);
+                tile.Owner |= bit;
+                return (false, (string?)$"Claimed the {tile.ObjectData} mine.");
             }
             case "artifact":
             {
@@ -384,7 +400,7 @@ public class GameService
                 hero.ArtifactsJson = JsonSerializer.Serialize(arts, Json);
                 tile.ObjectKind = null;
                 tile.ObjectData = null;
-                return Task.FromResult((false, (string?)"Found an artifact."));
+                return (false, (string?)"Found an artifact.");
             }
             case "shrine":
             {
@@ -394,7 +410,7 @@ public class GameService
                 hero.SpellsJson = JsonSerializer.Serialize(spells, Json);
                 tile.ObjectKind = null;
                 tile.ObjectData = null;
-                return Task.FromResult((false, (string?)"Learned a spell."));
+                return (false, (string?)"Learned a spell.");
             }
             case "monster":
             {
@@ -404,10 +420,27 @@ public class GameService
                 var count = parts.Length > 1 && int.TryParse(parts[1], out var n) ? n : 5;
                 hero.PendingEncounterJson = JsonSerializer.Serialize(
                     new { creature, count, x = tx, y = ty }, Json);
-                return Task.FromResult((true, (string?)"A wandering band blocks the way."));
+                return (true, (string?)"A wandering band blocks the way.");
             }
             case "town":
-                return Task.FromResult((true, (string?)null));
+            {
+                // stepping up to a town enters it: the client opens the town screen
+                var townId = Guid.TryParse(tile.ObjectData, out var tid) ? tid : (Guid?)null;
+                if (townId == null) return (true, (string?)null);
+                var town = await _db.Towns.FirstOrDefaultAsync(t => t.Id == townId);
+                if (town == null) return (true, (string?)null);
+                var owner = await _db.Players.FirstOrDefaultAsync(p => p.Id == town.PlayerId);
+                var mine = owner != null && owner.Faction == player.Faction;
+                return (true, (string?)(mine ? $"enter-town:{townId}" : $"visit-town:{townId}"));
+            }
+            case "obelisk":
+            {
+                // visiting reveals the next fragment of the Grail riddle
+                var game2 = await _db.Games.FirstAsync(g => g.Id == game.Id);
+                var all = ParseStringArray(game2.FragmentsJson);
+                if (player.ObeliskVisits < all.Length) player.ObeliskVisits++;
+                return (true, (string?)$"obelisk:{player.ObeliskVisits}/{all.Length}");
+            }
             case "grail":
             {
                 // digging takes the rest of the day
@@ -417,10 +450,10 @@ public class GameService
                 hero.Movement = 0;
                 tile.ObjectKind = null;
                 tile.ObjectData = null;
-                return Task.FromResult((true, (string?)"You dig up the Grail!"));
+                return (true, (string?)"You dig up the Grail!");
             }
             default:
-                return Task.FromResult((false, (string?)null));
+                return (false, (string?)null);
         }
     }
 
@@ -515,7 +548,7 @@ public class GameService
                 var ownerIndex = Array.FindIndex(Seeded.Players, s => s.Faction == p.Faction);
                 foreach (var t in map.Tiles)
                 {
-                    if (t.ObjectKind != "mine" || t.Owner != ownerIndex) continue;
+                    if (t.ObjectKind != "mine" || (t.Owner & (1 << ownerIndex)) == 0) continue;
                     switch (t.ObjectData)
                     {
                         case "wood": p.Wood += 2; break;
@@ -553,11 +586,33 @@ public class GameService
                         avail[k] = (avail.TryGetValue(k, out var cur) ? cur : 0) + growth;
                     }
                     town.AvailableJson = JsonSerializer.Serialize(avail, Json);
+
+                    // the tavern offers two fresh heroes each day, never one already hired
+                    if (built.Contains("tavern"))
+                    {
+                        var owner = players.FirstOrDefault(p => p.Id == town.PlayerId);
+                        var hired = owner == null
+                            ? []
+                            : (await _db.Heroes.Where(h => h.PlayerId == owner.Id).Select(h => h.HeroKey).ToListAsync());
+                        var pool = Heroes.ForFaction(town.Faction)
+                            .Where(h => !hired.Contains(h.Key))
+                            .OrderBy(_ => Random.Shared.Next())
+                            .Take(2)
+                            .Select(h => h.Key)
+                            .ToArray();
+                        town.TavernJson = JsonSerializer.Serialize(pool, Json);
+                    }
                 }
             }
 
             if (game.TurnLimit > 0 && game.CurrentTurn > game.TurnLimit)
                 game.State = GameState.Finished;
+
+            await _db.SaveChangesAsync();
+
+            // computer seats take their turn after the day has rolled over
+            if (game.State == GameState.InProgress && players.Any(p => p.IsAi))
+                await Ai.PlayAsync(game);
 
             await SaveMapAsync(game, map);
             advanced.Add(game.Id);

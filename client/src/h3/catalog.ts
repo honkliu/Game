@@ -160,7 +160,7 @@ export const ROCK_DEFS = ['AVLr09u0', 'AVLr13u0', 'AVLR14R0', 'AVLR15R0', 'AVLr1
 export const MOUNTAIN_DEFS = ['AVLr02r0', 'AVLr04r0', 'AVLr09r0', 'AVLr06u0', 'AVLr12u0', 'AVLr02u0'];
 
 export const OBJECT_DEF: Record<string, string> = {
-  treasure: 'AVTchst0', shrine: 'AVXl1sh0', grail: 'AvXOblY'
+  treasure: 'AVTchst0', shrine: 'AVXl1sh0', grail: 'AvXOblY', obelisk: 'AvXOblY'
 };
 
 /** Artifacts in the original Artifact.def / AVA####.def numbering. */

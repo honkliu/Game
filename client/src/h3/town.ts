@@ -9,7 +9,7 @@ export const TOWN_STRUCTURES: Record<string, Record<string, Structure>> = {
     mageGuild2: ['TBCSMAG2', 706, 135, 1],
     mageGuild3: ['TBCSMAG3', 704, 107, 1],
     mageGuild4: ['TBCSMAG4', 704, 76, 1],
-    tavern: ['TBCSTVRN', 0, 230, 2],
+    tavern: ['TBCSTVRN', 0, 230, 0],
     fort: ['TBCSCSTL', 595, 66, -5],
     citadel: ['TBCSCAS2', 478, 66, -5],
     castle: ['TBCSCAS3', 478, 37, -5],
@@ -112,7 +112,13 @@ export const TOWN_STRUCTURES: Record<string, Record<string, Structure>> = {
   }
 };
 
+/**
+ * Town backdrop PCX per faction. The 1999 demo ships only three backdrops
+ * (Castle, Necropolis, Dungeon); Rampart has no `tbrback.pcx`, so it borrows
+ * Castle's. `TOWN_BACK_FALLBACK` records which factions are borrowing.
+ */
 export const TOWN_BACK: Record<string, string> = { castle: 'tbcsback', rampart: 'tbcsback', necropolis: 'tbncback' };
+export const TOWN_BACK_FALLBACK: Record<string, string> = { rampart: 'castle' };
 export const HALL_DEF: Record<string, string> = { castle: 'HALLCSTL', rampart: 'HALLRAMP', necropolis: 'HALLNECR' };
 
 /** Original HoMM3 building id (indexes HALL*.def group 0). */

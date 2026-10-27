@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
+import { useGameNavigate } from '../useGameNavigate';
 import { api } from '../api';
 import type { GameDetail } from '../types';
 import { t } from '../i18n';
@@ -7,7 +8,7 @@ import { Btn, Loading, Panel, Txt } from '../ui/Layout';
 
 export function GameOver() {
   const { gameId } = useParams<{ gameId: string }>();
-  const navigate = useNavigate();
+  const navigate = useGameNavigate();
   const [game, setGame] = useState<GameDetail | null>(null);
 
   useEffect(() => {

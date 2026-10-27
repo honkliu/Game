@@ -61,7 +61,11 @@ export function Lobby() {
                     <td>{game.state === 'InProgress' ? 'In progress' : game.state}</td>
                     <td style={{ width: 100 }}>
                       <button className="btn" style={{ position: 'relative', width: 84, height: 30 }}
-                        onClick={() => navigate(`/game/${game.id}`)}>Enter</button>
+                        onClick={async () => {
+                          // joining is idempotent: the server keeps the existing seat if there is one
+                          try { await api.joinGame(game.id); } catch { /* already seated */ }
+                          navigate(`/game/${game.id}`);
+                        }}>Enter</button>
                     </td>
                   </tr>
                 ))}
@@ -82,12 +86,13 @@ function CreateGameModal({ onClose, onCreated }: {
   const [name, setName] = useState('The Three Cities');
   const [turnSeconds, setTurnSeconds] = useState(300);
   const [turnLimit, setTurnLimit] = useState(0);
+  const [aiPlayers, setAiPlayers] = useState(0);
   const [busy, setBusy] = useState(false);
 
   async function submit() {
     setBusy(true);
     try {
-      const result = await api.createGame(name.trim(), 3, turnSeconds, turnLimit);
+      const result = await api.createGame(name.trim(), 3, turnSeconds, turnLimit, aiPlayers);
       onCreated(result.gameId);
     } catch (e) {
       toast(e instanceof ApiError ? e.message : 'Could not create the game.');
@@ -111,12 +116,19 @@ function CreateGameModal({ onClose, onCreated }: {
       <input className="inp" type="number" aria-label="Turn limit" min={0} max={500}
         style={{ left: 254, top: 174, width: 194, height: 36 }}
         value={turnLimit} onChange={e => setTurnLimit(Number(e.target.value))} />
-      <Txt x={32} y={242} w={416} size={12} color="var(--text-dim)">
-        Alice, Bob and Carol start together, each with a town and hero.
+      <Txt x={32} y={242}>Computer opponents</Txt>
+      <select className="inp" aria-label="Computer opponents" style={{ left: 32, top: 266, width: 194, height: 36 }}
+        value={aiPlayers} onChange={e => setAiPlayers(Number(e.target.value))}>
+        <option value={0}>None (human players)</option>
+        <option value={1}>1 computer</option>
+        <option value={2}>2 computers</option>
+      </select>
+      <Txt x={254} y={250} w={194} size={11} color="var(--text-dim)">
+        Computers build, recruit and explore each day.
       </Txt>
-      <Btn x={176} y={294} w={128} h={38} label={busy ? 'Creating...' : 'Create'}
+      <Btn x={176} y={330} w={128} h={38} label={busy ? 'Creating...' : 'Create'}
         disabled={busy || !name.trim()} onClick={submit} />
-      <Btn x={320} y={294} w={128} h={38} label="Cancel" onClick={onClose} />
+      <Btn x={320} y={330} w={128} h={38} label="Cancel" onClick={onClose} />
     </Modal>
   );
 }

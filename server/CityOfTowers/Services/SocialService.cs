@@ -47,6 +47,13 @@ public class SocialService
         {
             case "observe":
             {
+                if (creature != null)
+                {
+                    var mine = Encounters.Strength(hero.ArmyJson);
+                    var theirs = Encounters.StackStrength(creature.AiValue, enc.Count);
+                    if (!Encounters.CanObserve(mine, theirs))
+                        return (false, $"Your expedition is too weak to approach {enc.Count} {creature.Name}.", null);
+                }
                 var xp = creature != null ? Encounters.ObserveReward(creature.AiValue, enc.Count) : 10;
                 GameService.GainExperience(hero, xp);
                 hero.PendingEncounterJson = null;
@@ -56,6 +63,10 @@ public class SocialService
             case "recruit":
             {
                 if (creature == null) return (false, "Unknown creature.", null);
+                var mine = Encounters.Strength(hero.ArmyJson);
+                var theirs = Encounters.StackStrength(creature.AiValue, enc.Count);
+                if (!Encounters.CanRecruit(mine, theirs))
+                    return (false, $"Your expedition ({mine}) is weaker than the stack ({theirs}); they will not join you.", null);
                 var cost = Encounters.RecruitCost(creature.Gold, enc.Count);
                 if (player.Gold < cost) return (false, $"Not enough gold ({cost} needed).", null);
 

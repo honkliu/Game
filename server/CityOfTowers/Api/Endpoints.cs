@@ -43,8 +43,26 @@ public static class Endpoints
                 req.Capacity <= 0 ? 3 : req.Capacity,
                 req.TurnSeconds <= 0 ? 300 : req.TurnSeconds,
                 req.TurnLimit,
-                req.MapSize <= 0 ? 72 : req.MapSize);
+                req.MapSize <= 0 ? 72 : req.MapSize,
+                Math.Clamp(req.AiPlayers, 0, 2));
             return Results.Ok(new { gameId = game.Id });
+        });
+
+        // Take a seat in an existing game. Idempotent: a player who already has a seat
+        // gets it back, so the lobby's Enter button is safe to press repeatedly.
+        app.MapPost("/api/games/{id:guid}/join", async (Guid id, AppDb db, HttpContext ctx) =>
+        {
+            var sp = Seeded.Find(ctx.Request.Headers["X-Player-Id"]);
+            if (sp == null) return Results.BadRequest(new { error = "Unknown player." });
+
+            var game = await db.Games.FirstOrDefaultAsync(g => g.Id == id);
+            if (game == null) return Results.NotFound(new { error = "That game no longer exists." });
+
+            var existing = await db.Players.FirstOrDefaultAsync(p => p.GameId == id && p.Faction == sp.Faction);
+            if (existing != null) return Results.Ok(new { playerId = existing.Id });
+
+            // the seat is created with the game, so a missing one means the faction is not in this game
+            return Results.BadRequest(new { error = "That city is not part of this game." });
         });
 
         app.MapGet("/api/games/{id:guid}", async (Guid id, AppDb db) =>
@@ -80,6 +98,7 @@ public static class Endpoints
                     name = Seeded.Players.FirstOrDefault(s => s.Faction == p.Faction)?.Name ?? "?",
                     faction = p.Faction,
                     cityName = p.CityName,
+                    isAi = p.IsAi,
                     precious = p.Precious,
                     obeliskVisits = p.ObeliskVisits,
                     resources = new
@@ -192,6 +211,8 @@ public static class Endpoints
             var (ok, error, hero) = await games.MoveHeroAsync(heroId, playerId, path);
             if (!ok) return Results.BadRequest(new { error });
             await ws.BroadcastAsync(hero!.GameId, "heroMoved", new { heroId = hero.Id, x = hero.X, y = hero.Y });
+            // the hero payload is unchanged; a move notice (enter-town, pickup) rides in a header
+            if (games.LastMoveMessage != null) ctx.Response.Headers["X-Move-Message"] = games.LastMoveMessage;
             return Results.Ok(HeroDto(hero!));
         });
 
@@ -233,6 +254,7 @@ public static class Endpoints
                     dwellingBuilt = TownBuildings.HasDwelling(built, tier)
                 }),
                 garrison = GameService.ParseArmy(town.GarrisonJson),
+                heroInTown = await HeroInTownAsync(db, player.Id, town.X, town.Y),
                 tavern = GameService.ParseStringArray(town.TavernJson),
                 mageGuild = GameService.ParseStringArray(town.MageGuildJson),
                 resources = new
@@ -295,6 +317,16 @@ public static class Endpoints
                 town.AvailableJson = JsonSerializer.Serialize(avail, Json);
             }
 
+            // a Mage Guild teaches one spell per level it reaches
+            if (key.StartsWith("mageGuild"))
+            {
+                var level = int.TryParse(key.AsSpan("mageGuild".Length), out var lv) ? lv : 1;
+                var known = GameService.ParseStringArray(town.MageGuildJson).ToList();
+                foreach (var spell in Spells.ForGuild(level, Random.Shared))
+                    if (!known.Contains(spell)) known.Add(spell);
+                town.MageGuildJson = JsonSerializer.Serialize(known, Json);
+            }
+
             await db.SaveChangesAsync();
             return Results.NoContent();
         });
@@ -330,7 +362,8 @@ public static class Endpoints
             avail[k] = have - count;
             town.AvailableJson = JsonSerializer.Serialize(avail, Json);
 
-            var hero = await db.Heroes.FirstOrDefaultAsync(h => h.PlayerId == player.Id && h.X == town.X && h.Y == town.Y);
+            var hero = await db.Heroes.FirstOrDefaultAsync(h =>
+                h.PlayerId == player.Id && Math.Abs(h.X - town.X) <= 1 && Math.Abs(h.Y - town.Y) <= 1);
             if (hero != null)
             {
                 var army = GameService.ParseArmy(hero.ArmyJson);
@@ -429,6 +462,131 @@ public static class Endpoints
             return Results.Ok(new { heroId = hero.Id });
         });
 
+        // Move a stack between the hero standing in town and the garrison.
+        app.MapPost("/api/towns/{townId:guid}/garrison", async (Guid townId, GarrisonReq req, AppDb db, HttpContext ctx) =>
+        {
+            var sp = Seeded.Find(ctx.Request.Headers["X-Player-Id"]);
+            if (sp == null) return Results.BadRequest(new { error = "Unknown player." });
+
+            var town = await db.Towns.FirstOrDefaultAsync(t => t.Id == townId);
+            if (town == null) return Results.NotFound();
+            var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
+            if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your town." });
+
+            var hero = await db.Heroes.FirstOrDefaultAsync(h =>
+                h.PlayerId == player.Id && Math.Abs(h.X - town.X) <= 1 && Math.Abs(h.Y - town.Y) <= 1);
+            if (hero == null) return Results.BadRequest(new { error = "No hero is in town." });
+
+            var direction = req.Direction ?? "";
+            if (direction is not ("toGarrison" or "toHero"))
+                return Results.BadRequest(new { error = "Unknown direction." });
+            if (req.Slot < 0 || req.Slot > 6) return Results.BadRequest(new { error = "Unknown slot." });
+
+            var heroArmy = GameService.ParseArmy(hero.ArmyJson);
+            var garrison = GameService.ParseArmy(town.GarrisonJson);
+            var from = direction == "toGarrison" ? heroArmy : garrison;
+            var to = direction == "toGarrison" ? garrison : heroArmy;
+
+            var stack = from[req.Slot];
+            if (stack.Creature == null || stack.Count <= 0)
+                return Results.BadRequest(new { error = "That slot is empty." });
+
+            var count = req.Count <= 0 ? stack.Count : Math.Min(req.Count, stack.Count);
+            if (!GameService.AddToArmy(to, stack.Creature, count))
+                return Results.BadRequest(new { error = "The destination army is full." });
+
+            from[req.Slot] = stack with { Count = stack.Count - count };
+            if (from[req.Slot].Count <= 0) from[req.Slot] = new GameService.ArmySlot(null, 0);
+
+            hero.ArmyJson = GameService.SerializeArmy(heroArmy);
+            town.GarrisonJson = GameService.SerializeArmy(garrison);
+            await db.SaveChangesAsync();
+            return Results.Ok(new { moved = count, creature = stack.Creature });
+        });
+
+        // Cast a spell the hero knows. Adventure-map spells have real effects; the rest
+// are acknowledged (there is no combat in this game).
+        app.MapPost("/api/heroes/{heroId:guid}/cast", async (Guid heroId, CastReq req, AppDb db, GameService games, HttpContext ctx) =>
+        {
+            var sp = Seeded.Find(ctx.Request.Headers["X-Player-Id"]);
+            if (sp == null) return Results.BadRequest(new { error = "Unknown player." });
+
+            var hero = await db.Heroes.FirstOrDefaultAsync(h => h.Id == heroId);
+            if (hero == null) return Results.NotFound();
+            var player = await db.Players.FirstAsync(p => p.Id == hero.PlayerId);
+            if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your hero." });
+
+            var key = req.Spell ?? "";
+            if (!Spells.All.TryGetValue(key, out var spell)) return Results.BadRequest(new { error = "Unknown spell." });
+            var known = GameService.ParseStringArray(hero.SpellsJson);
+            if (!known.Contains(key)) return Results.BadRequest(new { error = "Your hero does not know that spell." });
+            if (hero.Mana < spell.Cost) return Results.BadRequest(new { error = "Not enough spell points." });
+
+            var game = await db.Games.FirstAsync(g => g.Id == hero.GameId);
+            if (game.State != GameState.InProgress) return Results.BadRequest(new { error = "The game is not in progress." });
+
+            string message;
+            switch (key)
+            {
+                case "townPortal":
+                {
+                    var town = await db.Towns.FirstOrDefaultAsync(t => t.PlayerId == player.Id);
+                    if (town == null) return Results.BadRequest(new { error = "You have no town." });
+                    hero.X = town.X;
+                    hero.Y = town.Y;
+                    hero.Movement = 0;
+                    message = $"You return to {town.Name}.";
+                    break;
+                }
+                case "dimensionDoor":
+                {
+                    if (req.X is not { } tx || req.Y is not { } ty)
+                        return Results.BadRequest(new { error = "Choose a destination." });
+                    var map = await games.LoadMapAsync(game);
+                    if (!map.InBounds(tx, ty) || !map.At(tx, ty).Passable)
+                        return Results.BadRequest(new { error = "You cannot appear there." });
+                    hero.X = tx;
+                    hero.Y = ty;
+                    hero.Movement = 0;
+                    message = "You step through a door in space.";
+                    break;
+                }
+                case "visions":
+                    message = "You sense the strength of the lands around you.";
+                    break;
+                default:
+                    message = $"{spell.Name} has no effect outside combat.";
+                    break;
+            }
+
+            hero.Mana -= spell.Cost;
+            await db.SaveChangesAsync();
+            return Results.Ok(new { message, mana = hero.Mana, x = hero.X, y = hero.Y });
+        });
+
+        // End the current turn: advance the day and restore every hero's movement.
+        app.MapPost("/api/games/{id:guid}/endturn", async (Guid id, AppDb db, GameService games, WsHub ws, HttpContext ctx) =>
+        {
+            var sp = Seeded.Find(ctx.Request.Headers["X-Player-Id"]);
+            if (sp == null) return Results.BadRequest(new { error = "Unknown player." });
+
+            var game = await db.Games.FirstOrDefaultAsync(g => g.Id == id);
+            if (game == null) return Results.NotFound();
+            if (game.State != GameState.InProgress) return Results.BadRequest(new { error = "The game is not in progress." });
+
+            var player = await db.Players.FirstOrDefaultAsync(p => p.GameId == id && p.Faction == sp.Faction);
+            if (player == null) return Results.NotFound();
+
+            // force this game's turn to expire, then let the ticker do the day rollover
+            game.TurnStartedAt = DateTime.UtcNow.AddSeconds(-(game.TurnSeconds + 1));
+            await db.SaveChangesAsync();
+            await games.TickAsync();
+
+            var fresh = await db.Games.FirstAsync(g => g.Id == id);
+            await ws.BroadcastAsync(id, "turnEnded", new { day = fresh.Day, week = fresh.Week, month = fresh.Month });
+            return Results.Ok(new { day = fresh.Day, week = fresh.Week, month = fresh.Month, turn = fresh.CurrentTurn });
+        });
+
         // ------------------------------------------------------------ obelisk
         app.MapGet("/api/games/{id:guid}/obelisk", async (Guid id, AppDb db, HttpContext ctx) =>
         {
@@ -497,7 +655,20 @@ public static class Endpoints
             key = c.Key, name = c.Name, faction = c.Faction, tier = c.Tier,
             attack = c.Attack, defense = c.Defense, damageMin = c.DamageMin, damageMax = c.DamageMax,
             health = c.Health, speed = c.Speed, growth = c.Growth, gold = c.Gold, shots = c.Shots,
-            abilities = c.Abilities, upgradeOf = c.UpgradeOf
+            aiValue = c.AiValue, abilities = c.Abilities, upgradeOf = c.UpgradeOf
+        })));
+
+        app.MapGet("/api/heroes", () => Results.Ok(Heroes.All.Values.Select(h => new
+        {
+            key = h.Key, name = h.Name, faction = h.Faction, might = h.Might,
+            attack = h.Attack, defense = h.Defense, power = h.Power, knowledge = h.Knowledge,
+            skills = h.Skills
+        })));
+
+        app.MapGet("/api/spells", () => Results.Ok(Spells.All.Values.Select(s => new
+        {
+            key = s.Key, name = s.Name, level = s.Level, school = s.School,
+            cost = s.Cost, description = s.Description
         })));
 
 // ------------------------------------------------------------ encounters
@@ -692,6 +863,19 @@ public static class Endpoints
             await db.SaveChangesAsync();
             return Results.NoContent();
         });
+
+        // advances every game one day so API tests can walk long distances
+        app.MapPost("/api/games/{id:guid}/_test/nextday", async (Guid id, AppDb db, GameService games, IHostEnvironment env) =>
+        {
+            if (!env.IsDevelopment()) return Results.NotFound();
+            // force the turn timer to expire so TickAsync advances this game
+            var game = await db.Games.FirstOrDefaultAsync(g => g.Id == id);
+            if (game == null) return Results.NotFound();
+            game.TurnStartedAt = DateTime.UtcNow.AddSeconds(-(game.TurnSeconds + 1));
+            await db.SaveChangesAsync();
+            await games.TickAsync();
+            return Results.NoContent();
+        });
     }
 
     private static async Task NotifyTownAsync(AppDb db, WsHub ws, Guid townId, string type)
@@ -715,6 +899,16 @@ public static class Endpoints
         return i < 0 || i >= fog.Length || fog[i] == 0;
     }
 
+    private static async Task<object?> HeroInTownAsync(AppDb db, Guid playerId, int x, int y)
+    {
+        // towns are entered from an adjacent tile, so "in town" means standing next to it
+        var hero = await db.Heroes.FirstOrDefaultAsync(h =>
+            h.PlayerId == playerId &&
+            Math.Abs(h.X - x) <= 1 && Math.Abs(h.Y - y) <= 1);
+        if (hero == null) return null;
+        return new { id = hero.Id, name = hero.Name, army = GameService.ParseArmy(hero.ArmyJson) };
+    }
+
     private static object HeroDto(CityOfTowers.Domain.Hero h) => new
     {
         id = h.Id,
@@ -735,6 +929,7 @@ public static class Endpoints
         x = h.X,
         y = h.Y,
         army = GameService.ParseArmy(h.ArmyJson),
+        strength = GameService.ArmyStrength(GameService.ParseArmy(h.ArmyJson)),
         skills = GameService.ParseSkills(h.SkillsJson),
         spells = GameService.ParseStringArray(h.SpellsJson),
         artifacts = GameService.ParseStringArray(h.ArtifactsJson),
@@ -763,13 +958,15 @@ public static class Endpoints
     }
 }
 
-public record CreateGameReq(string? Name, int Capacity, int TurnSeconds, int TurnLimit, int MapSize);
+public record CreateGameReq(string? Name, int Capacity, int TurnSeconds, int TurnLimit, int MapSize, int AiPlayers = 0);
 public record MoveReq(List<Point>? Path);
 public record Point(int X, int Y);
 public record BuildReq(string? BuildingKey);
 public record RecruitReq(int Tier, int Count);
 public record TradeReq(string? From, string? To, int Amount);
 public record HireReq(string? HeroKey);
+public record GarrisonReq(string? Direction, int Slot, int Count);
+public record CastReq(string? Spell, int? X, int? Y);
 public record BodyReq(string? Body);
 public record EncounterReq(string? Action);
 public record MessageReq(string? ToPlayerId, string? Body);
