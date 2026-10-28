@@ -277,9 +277,9 @@ static class ActionChecks
         await Case("guild-wisdom", "Respect Wisdom when learning guild spells", "Without Wisdom, learn levels one and two, but not level three.", f =>
         {
             TownRules.AddGear(f.Hero, TownRules.Spellbook);
-            f.Town.MageGuildJson = Strings("magicArrow", "visions", "prayer");
+            f.Town.MageGuildJson = Strings("magicArrow", "visions", "animateDead");
             var learned = TownRules.LearnGuildSpells(f.Hero, f.Town);
-            Require(learned.Contains("magicArrow") && learned.Contains("visions") && !learned.Contains("prayer"), "Guild ignored Wisdom.");
+            Require(learned.Contains("magicArrow") && learned.Contains("visions") && !learned.Contains("animateDead"), "Guild ignored Wisdom.");
             return Task.CompletedTask;
         });
         await Case("guild-rest", "Rest overnight at a Mage Guild", "A visiting hero with a spellbook regains full spell points after a day.", async f =>
@@ -348,8 +348,8 @@ static class ActionChecks
         await Case("shrine-wisdom", "Learn a shrine's higher-level spell", "A third-level shrine requires Basic Wisdom as well as a spellbook.", async f =>
         {
             TownRules.AddGear(f.Hero, TownRules.Spellbook);
-            await MoveObject(f, "shrine", "prayer", false);
-            Require(!GameService.ParseStringArray((await Hero(f)).SpellsJson).Contains("prayer"), "Shrine taught a third-level spell without Wisdom.");
+            await MoveObject(f, "shrine", "animateDead", false);
+            Require(!GameService.ParseStringArray((await Hero(f)).SpellsJson).Contains("animateDead"), "Shrine taught a third-level spell without Wisdom.");
         });
         foreach (var action in new[] { "observe", "recruit", "pass" })
             await Case($"encounter-{action}", $"Peaceful creature encounter: {action}", "Resolve the pending encounter; observe/pass preserve the obstacle, recruitment charges and removes it.", async f =>
@@ -532,11 +532,11 @@ static class ActionChecks
         await Case("shrine-learn", "Learn from a shrine and revisit it", "An eligible visitor learns once; the structure persists and the hero remains adjacent.", async f =>
         {
             TownRules.AddGear(f.Hero, TownRules.Spellbook); f.Hero.SkillsJson = "{\"wisdom\":1}";
-            await MoveObject(f, "shrine", "prayer", false);
+            await MoveObject(f, "shrine", "animateDead", false);
             await Post($"/api/heroes/{f.Hero.Id}/move", new { path = new[] { new { x = 2, y = 4 } } });
             var h = await Hero(f);
             var map = JsonSerializer.Deserialize<AdventureMap>((await f.Db.Games.AsNoTracking().SingleAsync()).MapJson, Json)!;
-            Require(GameService.ParseStringArray(h.SpellsJson).Count(s => s == "prayer") == 1
+            Require(GameService.ParseStringArray(h.SpellsJson).Count(s => s == "animateDead") == 1
                 && h.Y == 3 && !map.At(2, 4).Passable && map.At(2, 4).ObjectKind == "shrine", "Shrine duplicated a spell or lost its obstacle.");
         });
         await Case("mine-repeat", "Revisit your own mine", "A repeat visit neither pays a second daily yield nor removes the mine.", async f =>

@@ -129,7 +129,7 @@ async function integration() {
     run('adventure', process.execPath, [path.join(__dirname, 'adventure.js'), base]);
     run('social', process.execPath, [path.join(__dirname, 'social.js'), base]);
     const playwright = path.join(path.dirname(require.resolve('@playwright/test/package.json')), 'cli.js');
-    run('browser', process.execPath, [playwright, 'test'], {
+    run('browser', process.execPath, [playwright, 'test', '--output', path.join(root, 'test-results', 'action-browser')], {
       env: { ...process.env, PLAYWRIGHT_BASE_URL: base }
     });
   } finally {
@@ -138,8 +138,12 @@ async function integration() {
       server.kill();
       await stopped;
     }
-    fs.writeFileSync(path.join(output, 'server.log'), serverLog);
-    fs.rmSync(temp, { recursive: true, force: true });
+    try {
+      fs.mkdirSync(output, { recursive: true });
+      fs.writeFileSync(path.join(output, 'server.log'), serverLog);
+    } finally {
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
   }
 }
 
