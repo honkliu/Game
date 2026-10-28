@@ -124,11 +124,14 @@ async function call(method, path, playerId, body) {
   check('gold income 500', r.body.goldIncome === 500, r.body.goldIncome);
   check('7 tiers listed', r.body.available.length === 7, r.body.available.length);
   check('tier 1 is pikeman', r.body.available[0].creature === 'pikeman', r.body.available[0].creature);
-  check('tier 1 available 28', r.body.available[0].count === 28, r.body.available[0].count);
+  check('tier 1 opens with a week of growth', r.body.available[0].count === r.body.available[0].growth && r.body.available[0].growth === 14,
+    JSON.stringify(r.body.available[0]));
+  check('starting town has a fort and no marketplace', r.body.buildings.includes('fort') && !r.body.buildings.includes('marketplace'),
+    r.body.buildings.join(','));
 
   // build
-  r = await call('POST', `/api/towns/${aliceTownId}/build`, 'alice', { buildingKey: 'dwelling3' });
-  check('build dwelling3', r.status === 204, JSON.stringify(r.body));
+  r = await call('POST', `/api/towns/${aliceTownId}/build`, 'alice', { buildingKey: 'marketplace' });
+  check('build marketplace', r.status === 204, JSON.stringify(r.body));
   r = await call('POST', `/api/towns/${aliceTownId}/build`, 'alice', { buildingKey: 'dwelling4' });
   check('second build same turn rejected', r.status === 400, JSON.stringify(r.body));
   r = await call('POST', `/api/towns/${aliceTownId}/build`, 'bob', { buildingKey: 'orePit' });
@@ -193,14 +196,107 @@ async function call(method, path, playerId, body) {
     // advance build so the marketplace exists: direct build is one per turn, so skip if not built
     if (t.buildings.includes('marketplace')) {
       const before = t.resources;
+      check('one marketplace owned', t.marketCount === 1, t.marketCount);
+      // HoMM3 rates with one marketplace: 1 wood costs 2500 gold, sells for 25, and 5 mercury buy 1 wood
       r = await call('POST', `/api/towns/${aliceTownId}/trade`, 'alice', { from: 'gold', to: 'wood', amount: 1 });
       t = (await call('GET', '/api/towns/' + aliceTownId, 'alice')).body;
-      check('buy 1 wood costs 500 gold', t.resources.gold === before.gold - 500 && t.resources.wood === before.wood + 1,
+      check('buy 1 wood costs 2500 gold', t.resources.gold === before.gold - 2500 && t.resources.wood === before.wood + 1,
         `${before.gold}->${t.resources.gold}`);
+      r = await call('POST', `/api/towns/${aliceTownId}/trade`, 'alice', { from: 'wood', to: 'gold', amount: 1 });
+      const t2 = (await call('GET', '/api/towns/' + aliceTownId, 'alice')).body;
+      check('sell 1 wood for 25 gold', t2.resources.gold === t.resources.gold + 25 && t2.resources.wood === t.resources.wood - 1,
+        `${t.resources.gold}->${t2.resources.gold}`);
+      r = await call('POST', `/api/towns/${aliceTownId}/trade`, 'alice', { from: 'mercury', to: 'wood', amount: 1 });
+      const t3 = (await call('GET', '/api/towns/' + aliceTownId, 'alice')).body;
+      check('5 mercury buy 1 wood', t3.resources.mercury === t2.resources.mercury - 5 && t3.resources.wood === t2.resources.wood + 1,
+        `${t2.resources.mercury}->${t3.resources.mercury}`);
     } else {
       r = await call('POST', `/api/towns/${aliceTownId}/trade`, 'alice', { from: 'gold', to: 'wood', amount: 1 });
       check('trade needs a marketplace', r.status === 400, JSON.stringify(r.body));
     }
+  }
+
+  // ---------------------------------------------------------------- HoMM3 town rules
+  console.log('\nTown rules');
+  {
+    const town = () => call('GET', '/api/towns/' + aliceTownId, 'alice').then(x => x.body);
+    const nextDay = () => call('POST', `/api/games/${gameId}/_test/nextday`);
+    const build = async key => { await nextDay(); return call('POST', `/api/towns/${aliceTownId}/build`, 'alice', { buildingKey: key }); };
+
+    r = await call('GET', '/api/buildings?faction=castle');
+    check('castle tree has no Homestead', r.body.every(b => b.name !== 'Homestead') && r.body.some(b => b.name === 'Stables'),
+      r.body.map(b => b.key).join(','));
+    check('castle guild stops at level 4', !r.body.some(b => b.key === 'mageGuild5'));
+    await nextDay();
+    r = await call('POST', `/api/towns/${aliceTownId}/build`, 'alice', { buildingKey: 'dwelling3' });
+    check('Griffin Tower needs the Barracks', r.status === 400 && /Barracks/.test(r.body.error), JSON.stringify(r.body));
+
+    // the recruited pikemen went to the garrison, as in HoMM3
+    let t = await town();
+    check('recruits join the garrison', t.garrison[0].creature === 'pikeman' && t.garrison[0].count === 5, JSON.stringify(t.garrison));
+
+    // walk the hero back into town
+    r = await call('POST', `/api/heroes/${hero.id}/move`, 'alice', { path: [{ x: startX, y: startY }] });
+    t = await town();
+    check('hero is in town', t.heroInTown && t.heroInTown.id === hero.id, JSON.stringify(t.heroInTown));
+    check('might hero has no spellbook', t.heroInTown && t.heroInTown.spellbook === false);
+
+    // army exchange: garrison -> hero merges into the pikemen; a split goes to an empty slot
+    const army = (from, fromSlot, to, toSlot, count = 0) =>
+      call('POST', `/api/towns/${aliceTownId}/army`, 'alice', { fromArmy: from, fromSlot, toArmy: to, toSlot, count });
+    r = await army('garrison', 0, 'hero', 0);
+    check('merge garrison pikemen into hero', r.status === 200 && r.body.hero[0].count === 30 && !r.body.garrison[0].creature, JSON.stringify(r.body));
+    r = await army('hero', 0, 'garrison', 3, 10);
+    check('split 10 into the garrison', r.status === 200 && r.body.hero[0].count === 20 && r.body.garrison[3].count === 10, JSON.stringify(r.body));
+    r = await army('hero', 0, 'hero', 1, 0);
+    check('swap two hero stacks', r.status === 200 && r.body.hero[1].creature === 'pikeman' && r.body.hero[0].creature !== 'pikeman', JSON.stringify(r.body.hero));
+    r = await army('garrison', 3, 'hero', 0, 0);
+    check('swap a garrison stack onto a different hero stack', r.status === 200 && r.body.garrison[3].creature !== 'pikeman' && r.body.hero[0].creature === 'pikeman',
+      JSON.stringify(r.body));
+    r = await army('hero', 1, 'garrison', 6, 0);
+    r = await army('hero', 0, 'garrison', 5, 0);
+    check('a hero must keep one stack', r.status === 400 && /one stack/.test(r.body.error), JSON.stringify(r.body));
+    r = await army('garrison', 6, 'hero', 1, 0);
+
+    // blacksmith sells the castle's ballista
+    r = await build('blacksmith');
+    check('build blacksmith', r.status === 204, JSON.stringify(r.body));
+    const gold0 = (await town()).resources.gold;
+    r = await call('POST', `/api/towns/${aliceTownId}/blacksmith`, 'alice');
+    t = await town();
+    check('buy a ballista for 2500', r.status === 200 && t.heroInTown.warMachines.includes('ballista') && t.resources.gold === gold0 - 2500,
+      JSON.stringify(r.body));
+    r = await call('POST', `/api/towns/${aliceTownId}/blacksmith`, 'alice');
+    check('only one ballista per hero', r.status === 400, JSON.stringify(r.body));
+
+    // upgraded dwelling: recruit halberdiers from the same pool, upgrade a stack for the price difference
+    r = await build('upg1');
+    check('build upgraded Guardhouse', r.status === 204, JSON.stringify(r.body));
+    t = await town();
+    check('town reports upgraded dwelling', t.available[0].upgradeBuilt && t.available[0].upgraded === 'halberdier', JSON.stringify(t.available[0]));
+    r = await call('POST', `/api/towns/${aliceTownId}/recruit`, 'alice', { tier: 1, count: 2, creature: 'halberdier' });
+    check('recruit halberdiers', r.status === 200 && r.body.creature === 'halberdier', JSON.stringify(r.body));
+    t = await town();
+    const pikeSlot = t.heroInTown.army.findIndex(s => s.creature === 'pikeman');
+    const pikes = t.heroInTown.army[pikeSlot].count;
+    const g1 = t.resources.gold;
+    r = await call('POST', `/api/towns/${aliceTownId}/upgrade`, 'alice', { army: 'hero', slot: pikeSlot });
+    t = await town();
+    check('upgrade pikemen to halberdiers', r.status === 200 && t.heroInTown.army[pikeSlot].creature === 'halberdier', JSON.stringify(r.body));
+    check('upgrade costs the difference', t.resources.gold === g1 - 15 * pikes, `${g1} -> ${t.resources.gold}`);
+
+    // mage guild: buy a spellbook, then learn the guild's level-1 spells
+    r = await build('mageGuild1');
+    check('build mage guild', r.status === 204, JSON.stringify(r.body));
+    t = await town();
+    check('guild level 1 holds five spells', t.mageGuild.length === 5, JSON.stringify(t.mageGuild));
+    r = await call('POST', `/api/towns/${aliceTownId}/spellbook`, 'alice');
+    t = await town();
+    check('buy a spellbook and learn the guild spells', r.status === 200 && t.heroInTown.spellbook && r.body.learned.length === 5,
+      JSON.stringify(r.body));
+    const hs = (await call('GET', `/api/games/${gameId}/heroes`, 'alice')).body[0];
+    check('hero dto hides gear from artifacts', hs.spellbook && hs.warMachines.includes('ballista') && !hs.artifacts.includes('ballista'),
+      JSON.stringify({ a: hs.artifacts, w: hs.warMachines }));
   }
 
   // ---------------------------------------------------------------- obelisk

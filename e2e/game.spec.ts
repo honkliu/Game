@@ -114,10 +114,11 @@ test.describe('City of Towers', () => {
     await page.getByRole('button', { name: 'Town', exact: true }).click();
     await page.getByRole('button', { name: 'Hall', exact: true }).click();
 
-    await expect(page.getByText(/structures built/)).toBeVisible();
-    await page.locator('[data-building="dwelling3"]').click();
+    // the HoMM3 hall: green boxes can be built; Griffin Tower still needs Barracks (red)
+    await expect(page.locator('[data-building="dwelling3"]')).toHaveAttribute('data-state', 'locked');
+    await page.locator('[data-building="upg1"]').click();
     await page.locator('.modal').getByRole('button', { name: 'Build', exact: true }).click();
-    await expect(page.getByText(/Built (Dwelling 3|Griffin Tower)/)).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(/Built Upg\. Guardhouse/)).toBeVisible({ timeout: 10_000 });
   });
 
   test('S8 recruit creatures', async ({ page }) => {
@@ -127,13 +128,12 @@ test.describe('City of Towers', () => {
     await page.locator('[data-creature]').first().click();
 
     // the original HoMM3 recruit screen
-    await expect(page.locator('img[src*="tpubuild"]')).toBeVisible();
-    await expect(page.getByText('Pikeman')).toBeVisible();
-    await expect(page.locator('[data-tier]')).toHaveCount(7);
+    await expect(page.locator('img[src*="TPRCRT"]')).toBeVisible();
+    await expect(page.getByText('Recruit Pikeman')).toBeVisible();
 
-    await page.locator('.modal').getByRole('button', { name: '10', exact: true }).first().click();
+    await page.locator('.modal').getByRole('button', { name: 'Max', exact: true }).click();
     await page.locator('.modal').getByRole('button', { name: 'Buy', exact: true }).click();
-    await expect(page.getByText(/Recruited 10 Pikeman/)).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(/Recruited 14 Pikeman/)).toBeVisible({ timeout: 10_000 });
   });
 
   test('S9 hero screen shows stats and army', async ({ page }) => {

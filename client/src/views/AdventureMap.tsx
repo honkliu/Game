@@ -84,6 +84,72 @@ function facingFor(dx: number, dy: number): Facing {
   return { group: g, mirror: dx < 0 };
 }
 
+/** A hero sliding between tiles: fractional tile position, walking frame, path segment. */
+type Glide = { id: string; x: number; y: number; frame: number; seg: number };
+const STEP_MS = 60;
+const FRAMES_PER_TILE = 4;
+
+/** Edge-scrolls the camera just enough to keep (x, y) three tiles inside the view, pixel-aligned. */
+function followCam(map: MapData, c: { x: number; y: number }, x: number, y: number) {
+  const m = 3;
+  let nx = c.x, ny = c.y;
+  if (x - nx < m) nx = x - m; else if (x - nx > VIEW_TX - 1 - m) nx = x - (VIEW_TX - 1 - m);
+  if (y - ny < m) ny = y - m; else if (y - ny > VIEW_TY - 1 - m) ny = y - (VIEW_TY - 1 - m);
+  const r = clampCam(map, Math.round(nx * TILE) / TILE, Math.round(ny * TILE) / TILE);
+  return r.x === c.x && r.y === c.y ? c : r;
+}
+
+/**
+ * The tile a click on (x, y) means. Buildings cover several tiles but are entered at one
+ * (the server links covered "block" tiles to it); the castle art above the footprint also counts.
+ */
+function targetTile(map: MapData, x: number, y: number): { x: number; y: number } {
+  const t = map.tiles[y * map.width + x];
+  if (t?.objectKind === 'block' && t.objectData) {
+    const [ax, ay] = t.objectData.split(',').map(Number);
+    if (Number.isFinite(ax) && Number.isFinite(ay)) return { x: ax, y: ay };
+  }
+  if (t && (t.passable || t.fog === 0)) {
+    // town sprites are 6×6 tiles anchored at the gate (3 tiles in from the left, bottom row)
+    const town = map.towns.find((tw) => x >= tw.x - 2 && x <= tw.x + 2 && y >= tw.y - 4 && y <= tw.y - 3);
+    if (town) return { x: town.x, y: town.y };
+  }
+  return { x, y };
+}
+
+// HoMM3 path arrows (ADAG.def), from VCMI's MapRendererPath: indexed by the direction the path
+// enters a tile and the direction it leaves it, each as (dx+1) + 3·(dy+1); frame 0 is the end cross.
+const ARROW: number[][] = [
+  [16, 17, 18, 7, 0, 19, 6, 5, 0],
+  [8, 9, 18, 7, 0, 19, 6, 0, 20],
+  [8, 1, 10, 7, 0, 19, 0, 21, 20],
+  [24, 17, 18, 15, 0, 0, 6, 5, 4],
+  [0, 0, 0, 0, 0, 0, 0, 0, 0],
+  [8, 1, 2, 0, 0, 11, 22, 21, 20],
+  [24, 17, 0, 23, 0, 3, 14, 5, 4],
+  [24, 0, 2, 23, 0, 3, 22, 13, 4],
+  [0, 1, 2, 23, 0, 3, 22, 21, 12]
+];
+function arrowFrame(path: { x: number; y: number }[], i: number): number {
+  if (i >= path.length - 1) return 0;
+  const dir = (a: { x: number; y: number }, b: { x: number; y: number }) => (b.x - a.x + 1) + 3 * (b.y - a.y + 1);
+  return ARROW[dir(path[i - 1], path[i])][dir(path[i], path[i + 1])];
+}
+
+const terrainCost = (terrain: string | null) =>
+  terrain === 'rough' ? 125 : terrain === 'snow' ? 150 : terrain === 'swamp' ? 175 : 100;
+
+/** Index of the last path tile the hero can reach with today's movement points. */
+function reachableSteps(map: MapData, path: { x: number; y: number }[], movement: number): number {
+  let left = movement, last = 0;
+  for (let i = 1; i < path.length; i++) {
+    left -= terrainCost(map.tiles[path[i].y * map.width + path[i].x]?.terrain ?? null);
+    if (left < 0) break;
+    last = i;
+  }
+  return last;
+}
+
 export function AdventureMap() {
   const { gameId } = useParams<{ gameId: string }>();
   const navigate = useGameNavigate();
@@ -112,6 +178,8 @@ export function AdventureMap() {
   const [spellbookOpen, setSpellbookOpen] = useState(false);
   const [spellDefs, setSpellDefs] = useState<Record<string, { name: string; level: number; school: string; cost: number; description: string }>>({});
   const movingRef = useRef<string | null>(null);
+  const glideRef = useRef<Glide | null>(null);
+  const [animGen, setAnimGen] = useState(0);
   const facingRef = useRef(new Map<string, Facing>());
   const myPlayerIdRef = useRef<string | null>(null);
   const playerId = localStorage.getItem('cityoftowers.player') ?? '';
@@ -197,17 +265,24 @@ export function AdventureMap() {
     ctx.imageSmoothingEnabled = false;
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, MAP_W, MAP_H);
-    if (h3) renderH3(ctx, map, cam, tick, facingRef.current, movingRef.current, annotations);
+    if (h3) renderH3(ctx, map, cam, tick, facingRef.current, movingRef.current, annotations, glideRef.current);
     else renderFallback(ctx, map, cam);
 
     if (path && path.length > 1) {
-      for (let i = 1; i < path.length; i++) {
+      const from = glideRef.current ? glideRef.current.seg + 1 : 1;
+      const arrows = h3 ? getDef('ADAG') : null;
+      const reach = reachableSteps(map, path, hero?.movement ?? 0);
+      for (let i = from; i < path.length; i++) {
         const p = path[i];
-        const px = (p.x - cam.x) * TILE + TILE / 2;
-        const py = (p.y - cam.y) * TILE + TILE / 2;
+        const sx = (p.x - cam.x) * TILE, sy = (p.y - cam.y) * TILE;
+        if (arrows) {
+          drawFrame(ctx, arrows, arrowFrame(path, i) + (i <= reach ? 0 : 25), sx, sy);
+          continue;
+        }
+        const px = sx + TILE / 2, py = sy + TILE / 2;
         ctx.fillStyle = 'rgba(0,0,0,0.6)';
         ctx.beginPath(); ctx.arc(px + 1, py + 1, 4, 0, 7); ctx.fill();
-        ctx.fillStyle = i === path.length - 1 ? '#f0e040' : '#40d040';
+        ctx.fillStyle = i === path.length - 1 ? '#f0e040' : i <= reach ? '#40d040' : '#d04040';
         ctx.beginPath(); ctx.arc(px, py, 4, 0, 7); ctx.fill();
       }
     }
@@ -218,7 +293,7 @@ export function AdventureMap() {
       ctx.lineWidth = 1;
       ctx.strokeRect(sx + 0.5, sy + 0.5, TILE - 1, TILE - 1);
     }
-  }, [map, cam, hover, path, h3, tick, assetGen, annotations]);
+  }, [map, cam, hover, path, h3, tick, assetGen, annotations, animGen, hero]);
 
   // ---------------------------------------------------------------- input
   function toTile(e: React.MouseEvent<HTMLCanvasElement>) {
@@ -238,26 +313,53 @@ export function AdventureMap() {
 
   async function onClick(e: React.MouseEvent<HTMLCanvasElement>) {
     if (!map || !hero || !game || movingRef.current || encounter || meeting) return;
-    const t = toTile(e);
-    if (t.x < 0 || t.y < 0 || t.x >= map.width || t.y >= map.height) return;
+    const raw = toTile(e);
+    if (raw.x < 0 || raw.y < 0 || raw.x >= map.width || raw.y >= map.height) return;
+    // a click anywhere on a town or mine targets its entrance, as in HoMM3
+    const t = targetTile(map, raw.x, raw.y);
 
-    // Towns are entered by walking the hero up to them, as in HoMM3 — clicking a town
-    // sends the hero there; the town screen opens when the hero arrives.
+    // Towns are entered by walking the hero into the gate, as in HoMM3; the town screen
+    // opens when the hero arrives (the server answers with enter-town / visit-town).
     const town = map.towns.find((tw) => tw.x === t.x && tw.y === t.y);
+    if (town && hero.x === t.x && hero.y === t.y) { navigate(`/game/${gameId}/town/${town.id}`); return; }
     const other = map.heroes.find((h) => !h.isMine && h.x === t.x && h.y === t.y);
     const p = findPath(map, hero.x, hero.y, t.x, t.y);
     if (!p || p.length < 2) {
-      if (town || other) toast('Your hero cannot find a way there.');
+      if (!p) toast('Your hero cannot find a way there.');
       return;
     }
     const end = await walk(other ? p.slice(0, -1) : p);
-    if (!end || Math.max(Math.abs(end.x - t.x), Math.abs(end.y - t.y)) > 1) return;
+    if (!end || !other) return;
+    if (Math.max(Math.abs(end.x - t.x), Math.abs(end.y - t.y)) > 1) return;
+    const owner = game.players.find((pl) => pl.heroIds.includes(other.id));
+    if (owner) setMeeting({ heroName: other.name, playerId: owner.playerId, ownerName: owner.name });
+  }
 
-    if (town) navigate(`/game/${gameId}/town/${town.id}`);
-    else if (other) {
-      const owner = game.players.find((pl) => pl.heroIds.includes(other.id));
-      if (owner) setMeeting({ heroName: other.name, playerId: owner.playerId, ownerName: owner.name });
-    }
+  /** Slides the hero tile to tile with its walking frames, scrolling the map to follow. */
+  function glide(id: string, seq: { x: number; y: number }[]): Promise<void> {
+    return new Promise((resolve) => {
+      if (seq.length < 2) { resolve(); return; }
+      const t0 = performance.now();
+      const step = (now: number) => {
+        // rAF's timestamp is the frame start, which can precede t0
+        const f = Math.max(0, now - t0) / STEP_MS;
+        const seg = Math.floor(f);
+        if (seg >= seq.length - 1) {
+          const last = seq[seq.length - 1];
+          glideRef.current = { id, x: last.x, y: last.y, frame: 0, seg: seq.length - 1 };
+          resolve();
+          return;
+        }
+        const a = seq[seg], b = seq[seg + 1], u = f - seg;
+        facingRef.current.set(id, facingFor(Math.sign(b.x - a.x), Math.sign(b.y - a.y)));
+        const x = a.x + (b.x - a.x) * u, y = a.y + (b.y - a.y) * u;
+        glideRef.current = { id, x, y, frame: Math.floor(f * FRAMES_PER_TILE), seg };
+        setCam((c) => followCam(map!, c, x, y));
+        setAnimGen((n) => n + 1);
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    });
   }
 
   async function walk(p: { x: number; y: number }[]): Promise<{ x: number; y: number } | null> {
@@ -266,57 +368,40 @@ export function AdventureMap() {
     if (p.length < 2) return pos;
     movingRef.current = hero.id;
     setPath(p);
+    let message: string | null = null;
     try {
-      for (let i = 1; i < p.length; i++) {
-        facingRef.current.set(hero.id, facingFor(Math.sign(p[i].x - pos.x), Math.sign(p[i].y - pos.y)));
-        const res = await api.moveHero(hero.id, [p[i]]);
-        const updated = res.hero;
-        pos = { x: updated.x, y: updated.y };
-        setHero(updated);
-        setHeroes((hs) => hs.map((h) => (h.id === updated.id ? updated : h)));
-        setMap((m) => m ? {
-          ...m,
-          heroes: m.heroes.map((h) => h.id === updated.id
-            ? { ...h, x: updated.x, y: updated.y, movement: updated.movement } : h)
-        } : m);
-        setCam((c) => {
-          const m = map!;
-          // keep the walking hero in view, scrolling like the original
-          if (updated.x - c.x < 3 || updated.x - c.x > VIEW_TX - 4 || updated.y - c.y < 3 || updated.y - c.y > VIEW_TY - 4)
-            return centerCam(m, updated.x, updated.y);
-          return c;
-        });
-        // stepping up to a town enters it, as in HoMM3
-        const enter = /^(?:enter|visit)-town:(.+)$/.exec(res.message ?? '');
-        if (enter) {
-          movingRef.current = null;
-          setPath(null);
-          navigate(`/game/${gameId}/town/${enter[1]}`);
-          return pos;
-        }
-        if (res.message) toast(res.message);
-        // walking up to the Obelisk opens it, as in HoMM3
-        if (/^obelisk:/.test(res.message ?? '')) {
-          movingRef.current = null;
-          setPath(null);
-          navigate(`/game/${gameId}/obelisk`);
-          return pos;
-        }
-        if (updated.pendingEncounter) break;
-        if (updated.movement <= 0) break;
-        if (updated.x !== p[i].x || updated.y !== p[i].y) break;
-        await new Promise((r) => setTimeout(r, 90));
-      }
+      // one request for the whole route; the server stops at pickups, visits and when movement runs out
+      const res = await api.moveHero(hero.id, p.slice(1));
+      const updated = res.hero;
+      message = res.message ?? null;
+      pos = { x: updated.x, y: updated.y };
+      const k = Math.max(0, p.findIndex((q) => q.x === pos.x && q.y === pos.y));
+      await glide(hero.id, p.slice(0, k + 1));
+      // face the object the hero stopped next to
+      if (k < p.length - 1) facingRef.current.set(hero.id, facingFor(Math.sign(p[k + 1].x - p[k].x), Math.sign(p[k + 1].y - p[k].y)));
+      setHero(updated);
+      setHeroes((hs) => hs.map((h) => (h.id === updated.id ? updated : h)));
+      setMap((m) => m ? {
+        ...m,
+        heroes: m.heroes.map((h) => h.id === updated.id
+          ? { ...h, x: updated.x, y: updated.y, movement: updated.movement } : h)
+      } : m);
     } catch (e) {
       if (e instanceof ApiError) toast(e.message);
     } finally {
       movingRef.current = null;
+      glideRef.current = null;
       setPath(null);
-      await refresh();
     }
+    // stepping into a town's gate enters it, as in HoMM3
+    const enter = /^(?:enter|visit)-town:(.+)$/.exec(message ?? '');
+    if (enter) { navigate(`/game/${gameId}/town/${enter[1]}`); return pos; }
+    // walking up to the Obelisk opens it
+    if (message === 'obelisk:open') { navigate(`/game/${gameId}/obelisk`); return pos; }
+    if (message) toast(message);
+    await refresh();
     return pos;
   }
-
   async function endTurn(message: string) {
     if (!gameId) return;
     try {
@@ -435,8 +520,9 @@ export function AdventureMap() {
   const mm = Math.floor(remaining / 60);
   const ss = String(remaining % 60).padStart(2, '0');
 
-  const hoverTile = hover && map ? map.tiles[hover.y * map.width + hover.x] : null;
-  const hoverTown = hover ? map.towns.find((t) => t.x === hover.x && t.y === hover.y) : null;
+  const hoverAt = hover && map ? targetTile(map, hover.x, hover.y) : null;
+  const hoverTile = hoverAt && map ? map.tiles[hoverAt.y * map.width + hoverAt.x] : null;
+  const hoverTown = hoverAt ? map.towns.find((t) => t.x === hoverAt.x && t.y === hoverAt.y) : null;
   const hoverHero = hover ? map.heroes.find((h) => h.x === hover.x && h.y === hover.y) : null;
   const rollover = hoverHero ? hoverHero.name
     : hoverTown ? hoverTown.name
@@ -814,7 +900,7 @@ function terrainView(map: MapData, x: number, y: number, terrain: string): { ran
 
 function renderH3(ctx: CanvasRenderingContext2D, map: MapData, cam: { x: number; y: number }, tick: number,
   facing: Map<string, Facing>, moving: string | null,
-  notes: { x: number; y: number }[] = []) {
+  notes: { x: number; y: number }[] = [], glide: Glide | null = null) {
   const { startX, startY, cols, rows } = viewBounds(cam);
   const ox0 = (cam.x - startX) * TILE, oy0 = (cam.y - startY) * TILE;
   const at = (x: number, y: number) => map.tiles[y * map.width + x];
@@ -843,6 +929,25 @@ function renderH3(ctx: CanvasRenderingContext2D, map: MapData, cam: { x: number;
       } else {
         ctx.fillStyle = TERRAIN_COLOR[terrain] ?? '#5a8a3a';
         ctx.fillRect(sx, sy, TILE, TILE);
+      }
+    }
+  }
+
+  // fog of war — painted over the terrain, before objects/towns/heroes so they stay visible
+  for (let ry = 0; ry < rows; ry++) {
+    for (let rx = 0; rx < cols; rx++) {
+      const mx = startX + rx, my = startY + ry;
+      const sx = rx * TILE - ox0, sy = ry * TILE - oy0;
+      if (mx < 0 || my < 0 || mx >= map.width || my >= map.height) { ctx.fillStyle = '#000'; ctx.fillRect(sx, sy, TILE, TILE); continue; }
+      const t = at(mx, my);
+      if (t.fog === 0 || !t.terrain) {
+        const shroud = shroudFrame(map, mx, my);
+        const edge = getDef('TSHRE'), full = getDef('TSHRC');
+        if (shroud >= 0 && edge) {
+          drawFrame(ctx, edge, shroud < 34 ? shroud : SHROUD_ROT[shroud - 34], sx, sy, shroud >= 34);
+        } else if (shroud < 0 && full) {
+          drawFrame(ctx, full, (((mx * 997) ^ (my * 1009)) / 101 | 0) % full.count, sx, sy);
+        } else { ctx.fillStyle = '#000'; ctx.fillRect(sx, sy, TILE, TILE); }
       }
     }
   }
@@ -886,43 +991,27 @@ function renderH3(ctx: CanvasRenderingContext2D, map: MapData, cam: { x: number;
     list.push({ y: town.y, x: town.x + 2, draw: () => anchorDraw(ctx, s, 0, px, py, 2) });
   }
   for (const h of map.heroes) {
-    const px = (h.x - cam.x) * TILE, py = (h.y - cam.y) * TILE;
+    const g0 = glide && glide.id === h.id ? glide : null;
+    const hx = g0 ? g0.x : h.x, hy = g0 ? g0.y : h.y;
+    const px = (hx - cam.x) * TILE, py = (hy - cam.y) * TILE;
     if (px < -3 * TILE || py < -TILE || px > MAP_W + 3 * TILE || py > MAP_H + 2 * TILE) continue;
     const s = getDef(heroMapDef(h.name, h.faction)) ?? getDef('AH00_');
-    const fl = getDef(flagDef(h.faction));
     if (!s) continue;
+    const fl = getDef(flagDef(h.faction));
     const dir = facing.get(h.id) ?? { group: 2, mirror: false };
     const isMoving = moving === h.id;
+    // while gliding, the walking frames advance with the distance covered
+    const f = g0 ? g0.frame : tick;
     list.push({
-      y: h.y, x: 1e6 + h.x, draw: () => {
+      y: Math.ceil(hy), x: 1e6 + hx, draw: () => {
         const g = isMoving ? dir.group + 5 : dir.group;
-        anchorDraw(ctx, s, groupFrame(s, g, tick), px, py, 1, dir.mirror);
-        if (fl) anchorDraw(ctx, fl, groupFrame(fl, g, tick), px, py, 1, dir.mirror);
+        anchorDraw(ctx, s, groupFrame(s, g, f), px, py, 1, dir.mirror);
+        if (fl) anchorDraw(ctx, fl, groupFrame(fl, g, f), px, py, 1, dir.mirror);
       }
     });
   }
   list.sort((a, b) => a.y - b.y || a.x - b.x);
   for (const d of list) d.draw();
-
-  // fog of war
-  for (let ry = 0; ry < rows; ry++) {
-    for (let rx = 0; rx < cols; rx++) {
-      const mx = startX + rx, my = startY + ry;
-      const sx = rx * TILE - ox0, sy = ry * TILE - oy0;
-      if (mx < 0 || my < 0 || mx >= map.width || my >= map.height) { ctx.fillStyle = '#000'; ctx.fillRect(sx, sy, TILE, TILE); continue; }
-      const t = at(mx, my);
-      if (t.fog === 0 || !t.terrain) {
-        const shroud = shroudFrame(map, mx, my);
-        const edge = getDef('TSHRE'), full = getDef('TSHRC');
-        if (shroud >= 0 && edge) {
-          drawFrame(ctx, edge, shroud < 34 ? shroud : SHROUD_ROT[shroud - 34], sx, sy, shroud >= 34);
-        } else if (shroud < 0 && full) {
-          drawFrame(ctx, full, (((mx * 997) ^ (my * 1009)) / 101 | 0) % full.count, sx, sy);
-        } else { ctx.fillStyle = '#000'; ctx.fillRect(sx, sy, TILE, TILE); }
-      }
-      else if (t.fog === 1) { ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(sx, sy, TILE, TILE); }
-    }
-  }
 
   // map annotations: a small pin on each noted tile
   for (const a of notes) {
@@ -968,10 +1057,6 @@ function renderFallback(ctx: CanvasRenderingContext2D, map: MapData, cam: { x: n
         }
       }
       if (t.objectKind) drawObject(ctx, t, sx, sy);
-      if (t.fog === 1) {
-        ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        ctx.fillRect(sx, sy, TILE, TILE);
-      }
     }
   }
   for (const town of map.towns) {
@@ -1218,9 +1303,14 @@ function encounterStrength(creature: string, count: number): number {
   return (creatureAi.get(creature) ?? 100) * count;
 }
 
+const MINE_NAME: Record<string, string> = {
+  wood: 'Sawmill', ore: 'Ore Pit', gold: 'Gold Mine', gems: 'Gem Pond', crystal: 'Crystal Cavern',
+  sulfur: 'Sulfur Dune', mercury: "Alchemist's Lab"
+};
+
 function objectName(t: MapTile): string {
   switch (t.objectKind) {
-    case 'mine': return `${t.objectData} Mine${t.owner > 0 ? ' (claimed)' : ''}`;
+    case 'mine': return `${MINE_NAME[t.objectData ?? ''] ?? `${t.objectData} Mine`}${t.owner > 0 ? ' (claimed)' : ''}`;
     case 'resource': return `${(t.objectData ?? '').split(':')[1]} ${(t.objectData ?? '').split(':')[0]}`;
     case 'treasure': return 'Treasure Chest';
     case 'artifact': return 'Artifact';
@@ -1304,9 +1394,11 @@ function findPath(map: MapData, sx: number, sy: number, tx: number, ty: number):
   const open: { i: number; f: number }[] = [{ i: start, f: h(start) }];
   const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
   let iter = 0;
-  // mines, monsters, towns and heroes are reached by stepping "into" them from next door
+  // mines, monsters, towns, the Obelisk and heroes are reached by stepping "into" them from next door
   const visitable = (i: number) => occupied.has(i) ||
-    ['mine', 'monster', 'town'].includes(map.tiles[i].objectKind ?? '');
+    ['mine', 'monster', 'town', 'obelisk'].includes(map.tiles[i].objectKind ?? '');
+  // a diagonal step may not squeeze between natural obstacles; building footprints don't count (as the server)
+  const pinches = (t: MapTile) => !t.passable && !['block', 'town', 'mine'].includes(t.objectKind ?? '');
 
   while (open.length && iter++ < 20000) {
     let bi = 0;
@@ -1333,9 +1425,10 @@ function findPath(map: MapData, sx: number, sy: number, tx: number, ty: number):
       } else if (!t.passable || occupied.has(ni)) continue;
       if (dx && dy) {
         const a = map.tiles[key(cx + dx, cy)], b = map.tiles[key(cx, cy + dy)];
-        if (!a.passable || !b.passable) continue;
+        if (pinches(a) || pinches(b)) continue;
       }
-      const ng = g[cur.i] + 1;
+      // terrain cost, with a hair extra on diagonals so straight routes win ties
+      const ng = g[cur.i] + (ni === goal ? 1 : terrainCost(t.terrain) / 100) + (dx && dy ? 0.001 : 0);
       if (ng < g[ni]) {
         g[ni] = ng;
         came[ni] = cur.i;

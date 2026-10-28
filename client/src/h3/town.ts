@@ -34,7 +34,11 @@ export const TOWN_STRUCTURES: Record<string, Record<string, Structure>> = {
     upg4: ['TBCSUP_3', 176, 85, 0],
     upg5: ['TBCSUP_4', 563, 173, 1],
     upg6: ['TBCSUP_5', 160, 190, -1],
-    upg7: ['TBCSUP_6', 303, 0, -2]
+    upg7: ['TBCSUP_6', 303, 0, -2],
+    special2: ['TBCSEXT0', 384, 193, -2],
+    special3: ['TBCSEXT1', 0, 198, 2],
+    horde1: ['TBCSHRD1', 76, 53, -1],
+    horde1Upgr: ['TBCSHRD2', 76, 35, -1]
   },
   rampart: {
     extraAnimation: ['TBRMEXT2', 327, 236, 1],
@@ -71,7 +75,14 @@ export const TOWN_STRUCTURES: Record<string, Record<string, Structure>> = {
     upg4: ['TBRMUP_3', 287, 28, -1],
     upg5: ['TBRMUP_4', 63, 146, -1],
     upg6: ['TBRMUP_5', 362, 90, -2],
-    upg7: ['TBRMUP_6', 502, 5, -5]
+    upg7: ['TBRMUP_6', 502, 5, -5],
+    special1: ['TBRMSPEC', 555, 297, 2],
+    special2: ['TBRMEXT0', 555, 297, 2],
+    special3: ['TBRMEXT1', 0, 181, 1],
+    horde1: ['TBRMHRD1', 0, 154, -2],
+    horde1Upgr: ['TBRMHRD2', 0, 143, -2],
+    horde2: ['TBRMHRD3', 47, 142, -1],
+    horde2Upgr: ['TBRMHRD4', 47, 142, -1]
   },
   necropolis: {
     extraAnimation: ['TBNCEXT2', 25, 279, 9],
@@ -108,7 +119,12 @@ export const TOWN_STRUCTURES: Record<string, Record<string, Structure>> = {
     upg4: ['TBNCUP_3', 615, 193, 2],
     upg5: ['TBNCUP_4', 222, 171, 3],
     upg6: ['TBNCUP_5', 0, 30, -2],
-    upg7: ['TBNCUP_6', 662, 23, 0]
+    upg7: ['TBNCUP_6', 662, 23, 0],
+    special1: ['TBNCSPEC', 18, 0, -1],
+    special2: ['TBNCEXT0', 307, 61, -2],
+    special3: ['TBNCEXT1', 247, 275, 4],
+    horde1: ['TBNCHRD1', 80, 222, 5],
+    horde1Upgr: ['TBNCHRD2', 64, 222, 5]
   }
 };
 
@@ -125,7 +141,8 @@ export const HALL_DEF: Record<string, string> = { castle: 'HALLCSTL', rampart: '
 export function h3BuildingId(key: string): number {
   const fixed: Record<string, number> = {
     tavern: 5, fort: 7, citadel: 8, castle: 9, villageHall: 10, townHall: 11, cityHall: 12, capitol: 13,
-    marketplace: 14, resourceSilo: 15, blacksmith: 16, grail: 26
+    marketplace: 14, resourceSilo: 15, blacksmith: 16, special1: 17, horde1: 18, special2: 21, special3: 22,
+    horde2: 24, grail: 26
   };
   if (key in fixed) return fixed[key];
   let m = /^mageGuild(\d)$/.exec(key);
@@ -141,8 +158,14 @@ const CHAINS = [
   ['villageHall', 'townHall', 'cityHall', 'capitol'], ['fort', 'citadel', 'castle'],
   ['mageGuild1', 'mageGuild2', 'mageGuild3', 'mageGuild4', 'mageGuild5'],
   ['tavern'], ['blacksmith'], ['marketplace'], ['resourceSilo'], ['grail'],
+  ['special1'], ['special2'], ['special3'], ['horde1'], ['horde2'],
   ...[1, 2, 3, 4, 5, 6, 7].map((n) => [`dwelling${n}`, `upg${n}`])
 ];
+
+/** Dwelling tier each horde building belongs to; its upgraded art shows once that dwelling is upgraded. */
+export const HORDE_TIER: Record<string, Record<string, number>> = {
+  castle: { horde1: 3 }, rampart: { horde1: 2, horde2: 5 }, necropolis: { horde1: 1 }
+};
 
 /** Structures to paint for a town: the highest built tier of every chain plus decorative extras, in z order. */
 export function townStructures(faction: string, built: Set<string>): { key: string; s: Structure }[] {
@@ -150,7 +173,12 @@ export function townStructures(faction: string, built: Set<string>): { key: stri
   const out: { key: string; s: Structure }[] = [];
   for (const chain of CHAINS) {
     const k = [...chain].reverse().find((c) => built.has(c) && table[c]);
-    if (k) out.push({ key: k, s: table[k] });
+    if (!k) continue;
+    // Rampart's Fountain of Fortune is drawn over the Mystic Pond it grows out of
+    if (faction === 'rampart' && k === 'special1' && built.has('special2')) continue;
+    const tier = HORDE_TIER[faction]?.[k];
+    const upgr = tier && built.has(`upg${tier}`) ? table[`${k}Upgr`] : undefined;
+    out.push({ key: k, s: upgr ?? table[k] });
   }
   const extras: [string, string][] = [['extraAnimation', ''], ['extraTownHall', 'townHall'], ['extraCityHall', 'cityHall'], ['extraCapitol', 'capitol']];
   const hallRank = ['villageHall', 'townHall', 'cityHall', 'capitol'];

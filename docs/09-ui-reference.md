@@ -164,7 +164,8 @@ Six buttons, 68 × 28, two per row, starting at (648, 124):
 2. Noise texture (4 × 4 blocks, ±10% brightness).
 3. Terrain detail (grass tufts, water ripples, snow flecks).
 4. Object sprite.
-5. Fog overlay: unexplored `#07070a`; explored `rgba(0,0,0,0.5)`; visible none.
+5. Fog overlay: exactly two states — unexplored is the black shroud sprite (`TSHRC` interior, `TSHRE` dithered edge); explored draws the real map, identical to visible. No dimming or desaturation.
+6. Objects, towns and heroes are drawn **after** the fog pass. The fog loop repaints terrain, so anything drawn before it is erased.
 
 ### 2.9 Hero rendering
 
@@ -251,6 +252,17 @@ Seven rows, one per tier. Each: creature sprite, name, available count, cost,
 and `[1] [10] [Max]` buttons.
 
 ### 3.6 Market / Guild / Tavern / Garrison
+
+**Town screen creature bar** (measured from `townscrn.pcx`, which is 800×226 at y=374):
+
+| Element | Position |
+| --- | --- |
+| Hero portrait (`hps…`) | x=168, y=461, 58×64 |
+| Hero army row (7 slots) | x=234 + i×75.17, y=461, 58×64 each |
+| Garrison row (7 slots) | x=234 + i×75.17, y=553, 58×64 each |
+
+A hero enters its own town by stepping **onto** the town tile; `heroInTown` means the hero
+stands on that tile, and recruiting then goes to the hero's army rather than the garrison.
 
 As specified in `00-BUILD-SPEC.md` §2.6.4–2.6.7, restyled to 800 × 600.
 

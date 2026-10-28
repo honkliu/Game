@@ -24,6 +24,62 @@ public class AdventureMap
     public bool InBounds(int x, int y) => x >= 0 && y >= 0 && x < Width && y < Height;
 }
 
+/// <summary>
+/// Multi-tile object footprints, as in HoMM3: a town or mine sprite covers several tiles,
+/// but only its entrance (the anchor tile, bottom row) is visited. The other covered tiles
+/// are blocked and point back at the anchor ("block" tiles with ObjectData "x,y"), so
+/// clicking anywhere on the building targets the entrance.
+/// </summary>
+public static class Footprint
+{
+    public const string Block = "block";
+
+    /// <summary>Blocked offsets (dx, dy) around the anchor; matches the sprites the client draws.</summary>
+    public static IEnumerable<(int dx, int dy)> Offsets(string kind, string? data)
+    {
+        var (x0, x1, y0) = kind switch
+        {
+            "town" => (-2, 2, -2),                       // AVC*x0: 192×192, castle body 5 wide, 3 deep
+            "mine" when data == "wood" => (-3, 1, -1),   // AVMsawg0: 160×96, sawmill 5 wide
+            "mine" => (-1, 1, -1),                       // AVM*0: 96×64
+            _ => (0, 0, 0)
+        };
+        for (var dy = y0; dy <= 0; dy++)
+        for (var dx = x0; dx <= x1; dx++)
+            if (dx != 0 || dy != 0) yield return (dx, dy);
+    }
+
+    /// <summary>True when every footprint tile and the approach tile below the entrance are open ground.</summary>
+    public static bool Fits(AdventureMap map, int x, int y, string kind, string? data)
+    {
+        if (!map.InBounds(x, y + 1)) return false;
+        var front = map.At(x, y + 1);
+        if (!front.Passable || front.ObjectKind != null) return false;
+        foreach (var (dx, dy) in Offsets(kind, data))
+        {
+            if (!map.InBounds(x + dx, y + dy)) return false;
+            var t = map.At(x + dx, y + dy);
+            if (!t.Passable || t.ObjectKind != null) return false;
+        }
+        return true;
+    }
+
+    /// <summary>Marks the covered tiles impassable and links them to the anchor.</summary>
+    public static void Stamp(AdventureMap map, int x, int y, string kind, string? data)
+    {
+        foreach (var (dx, dy) in Offsets(kind, data))
+        {
+            if (!map.InBounds(x + dx, y + dy)) continue;
+            var t = map.At(x + dx, y + dy);
+            if (t.ObjectKind != null && t.ObjectKind != Block && t.ObjectKind is not ("tree" or "rock" or "mountain")) continue;
+            t.ObjectKind = Block;
+            t.ObjectData = $"{x},{y}";
+            t.Owner = -1;
+            t.Passable = false;
+        }
+    }
+}
+
 public static class MapGenerator
 {
     private static readonly string[] MineTypes = ["wood", "ore", "gold", "mercury", "sulfur", "crystal", "gems"];
@@ -152,17 +208,40 @@ public static class MapGenerator
         }
         Shuffle(free, rng);
         var fi = 0;
-        (int x, int y) Take() => free[fi++ % free.Count];
+        // approach tiles in front of mine entrances stay clear of other objects
+        var reserved = new HashSet<(int x, int y)>();
+        bool Open((int x, int y) p) => map.At(p.x, p.y) is { Passable: true, ObjectKind: null } && !reserved.Contains(p);
+        (int x, int y) Take()
+        {
+            for (var n = 0; n < free.Count; n++)
+            {
+                var p = free[fi++ % free.Count];
+                if (Open(p)) return p;
+            }
+            return free[fi++ % free.Count];
+        }
+        bool NearStart(int x, int y) => starts.Any(s => Math.Max(Math.Abs(s.x - x), Math.Abs(s.y - y)) <= 3);
 
-        // mines
+        // mines: multi-tile buildings entered from the tile below their entrance
         for (var i = 0; i < 28; i++)
         {
+            var type = MineTypes[i % MineTypes.Length];
             var (x, y) = Take();
+            for (var n = 0; n < free.Count; n++)
+            {
+                var (cx, cy) = (x, y);
+                if (Footprint.Fits(map, cx, cy, "mine", type) && !NearStart(cx, cy + 1)
+                    && Footprint.Offsets("mine", type).All(o => !NearStart(cx + o.dx, cy + o.dy) && !reserved.Contains((cx + o.dx, cy + o.dy))))
+                    break;
+                (x, y) = Take();
+            }
             var t = map.At(x, y);
             t.ObjectKind = "mine";
-            t.ObjectData = MineTypes[i % MineTypes.Length];
+            t.ObjectData = type;
             t.Owner = 0; // bitmask: no city works this mine yet
             t.Passable = false;
+            Footprint.Stamp(map, x, y, "mine", type);
+            reserved.Add((x, y + 1));
         }
 
         // resource piles
@@ -301,6 +380,9 @@ public static class MapGenerator
 /// <summary>A* pathfinding over the adventure map.</summary>
 public static class Pathfinder
 {
+    public static bool Pinches(MapTile t) =>
+        !t.Passable && t.ObjectKind is not (Footprint.Block or "town" or "mine");
+
     public static List<(int x, int y)>? FindPath(AdventureMap map, int sx, int sy, int tx, int ty)
     {
         if (!map.InBounds(sx, sy) || !map.InBounds(tx, ty)) return null;
@@ -362,10 +444,10 @@ public static class Pathfinder
                 var isGoal = ni == goal;
                 if (!t.Passable && !isGoal) continue;
 
-                // no corner cutting
+                // no squeezing diagonally between natural obstacles (building footprints don't count)
                 if (dx != 0 && dy != 0)
                 {
-                    if (!map.At(cx + dx, cy).Passable || !map.At(cx, cy + dy).Passable) continue;
+                    if (Pinches(map.At(cx + dx, cy)) || Pinches(map.At(cx, cy + dy))) continue;
                 }
 
                 var cost = isGoal ? 1.0 : Terrain.MoveCost(t.Terrain) / 100.0;

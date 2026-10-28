@@ -48,7 +48,8 @@ public class AiService
         if (town == null) return;
 
         var built = GameService.ParseStringArray(town.BuildingsJson).ToHashSet();
-        var candidates = TownBuildings.All.Values
+        var candidates = TownBuildings.For(town.Faction).Values
+            .Where(b => b.Key != "grail")
             .Where(b => !built.Contains(b.Key))
             .Where(b => b.Requires.All(built.Contains))
             .Where(b => CanAfford(player, b))
@@ -70,16 +71,12 @@ public class AiService
         town.BuildingsJson = JsonSerializer.Serialize(built.ToArray());
         player.BuiltThisTurn = true;
 
-        if (pick.Key.StartsWith("mageGuild"))
-        {
-            var level = int.TryParse(pick.Key.AsSpan("mageGuild".Length), out var lv) ? lv : 1;
-            var known = GameService.ParseStringArray(town.MageGuildJson).ToList();
-            foreach (var spell in Spells.ForGuild(level, Random.Shared))
-                if (!known.Contains(spell)) known.Add(spell);
-            town.MageGuildJson = JsonSerializer.Serialize(known);
-        }
+        var avail = JsonSerializer.Deserialize<Dictionary<string, int>>(town.AvailableJson) ?? [];
+        if (pick.Key.StartsWith("dwelling"))
+            avail[pick.Tier.ToString()] = TownBuildings.WeeklyGrowth(town.Faction, built, pick.Tier);
+        town.AvailableJson = JsonSerializer.Serialize(avail);
+        TownRules.StockGuild(town, pick.Key);
     }
-
     private async Task RecruitAsync(Game game, Player player)
     {
         var town = await _db.Towns.FirstOrDefaultAsync(t => t.PlayerId == player.Id);
@@ -95,18 +92,20 @@ public class AiService
         {
             if (!TownBuildings.HasDwelling(built, tier)) continue;
             var key = tiers[tier - 1];
+            if (TownBuildings.HasUpgrade(built, tier)) key = Creatures.UpgradeOf(key) ?? key;
             if (!avail.TryGetValue(tier.ToString(), out var count) || count <= 0) continue;
 
-            var cost = Creatures.All[key].Gold;
-            if (cost <= 0) continue;
-            var affordable = Math.Min(count, player.Gold / cost);
+            var affordable = Math.Min(count, TownRules.Affordable(player, Creatures.All[key]));
             if (affordable <= 0) continue;
 
-            var army = GameService.ParseArmy(hero.ArmyJson);
+            // like a human player: recruits join a hero standing in town, otherwise the garrison
+            var inTown = hero.X == town.X && hero.Y == town.Y;
+            var army = GameService.ParseArmy(inTown ? hero.ArmyJson : town.GarrisonJson);
             if (!GameService.AddToArmy(army, key, affordable)) continue;
 
-            hero.ArmyJson = GameService.SerializeArmy(army);
-            player.Gold -= affordable * cost;
+            if (inTown) hero.ArmyJson = GameService.SerializeArmy(army);
+            else town.GarrisonJson = GameService.SerializeArmy(army);
+            TownRules.Pay(player, TownRules.CostOf(Creatures.All[key], affordable));
             avail[tier.ToString()] = count - affordable;
             town.AvailableJson = JsonSerializer.Serialize(avail);
             return;

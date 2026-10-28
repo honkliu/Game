@@ -115,6 +115,10 @@ export interface HeroDetail {
   skills: Record<string, number>;
   spells: string[];
   artifacts: string[];
+  /** HoMM3 spellbook: needed to learn and cast spells. */
+  spellbook: boolean;
+  /** War machines bought at a Blacksmith: ballista, ammoCart, firstAidTent. */
+  warMachines: string[];
   pendingEncounter: string | null;
 }
 
@@ -151,9 +155,18 @@ export interface TownDetail {
   postSlots: number;
   goldIncome: number;
   growthMultiplier: number;
-  available: { tier: number; creature: string | null; count: number; dwellingBuilt: boolean }[];
+  /** Marketplaces the owner has across all their towns (HoMM3 trade rates improve with each). */
+  marketCount: number;
+  available: {
+    tier: number; creature: string | null; upgraded: string | null; count: number;
+    dwellingBuilt: boolean; upgradeBuilt: boolean; growth: number; dwellingName: string;
+  }[];
+  blacksmith: { machine: string; name: string; gold: number };
   garrison: ArmySlot[];
-  heroInTown: { id: string; name: string; army: ArmySlot[] } | null;
+  heroInTown: {
+    id: string; name: string; heroKey: string; army: ArmySlot[];
+    spellbook: boolean; warMachines: string[]; spells: string[]; wisdom: number;
+  } | null;
   tavern: string[];
   mageGuild: string[];
   resources: Resources;
@@ -172,6 +185,8 @@ export interface CreatureDef {
   speed: number;
   growth: number;
   gold: number;
+  /** Full HoMM3 price per creature, including rare resources. */
+  cost: Resources;
   shots: number;
   aiValue: number;
   abilities: string[];

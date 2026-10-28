@@ -89,23 +89,46 @@ public class GameService
 
     public static string SerializeFog(byte[] fog) => JsonSerializer.Serialize(fog);
 
-    public static void RecomputeFog(byte[] fog, int w, int h, IEnumerable<Hero> heroes)
+    /// <summary>Radius a town lets its owner see, and Cover of Darkness's shroud radius (VCMI DARKNESS 20).</summary>
+    public const int TownSight = 5;
+    public const int DarknessRadius = 20;
+
+    public static void RecomputeFog(byte[] fog, int w, int h, IEnumerable<Hero> heroes, IEnumerable<Town>? towns = null)
     {
         for (var i = 0; i < fog.Length; i++) if (fog[i] == 2) fog[i] = 1;
 
-        foreach (var hero in heroes)
+        var eyes = heroes.Select(hero =>
         {
             var skills = ParseSkills(hero.SkillsJson);
-            var radius = 5 + 2 * (skills.TryGetValue("scouting", out var sc) ? sc : 0);
-            for (var y = hero.Y - radius; y <= hero.Y + radius; y++)
-            for (var x = hero.X - radius; x <= hero.X + radius; x++)
+            return (hero.X, hero.Y, R: 5 + 2 * (skills.TryGetValue("scouting", out var sc) ? sc : 0));
+        }).Concat((towns ?? []).Select(t => (t.X, t.Y, R: TownSight)));
+
+        foreach (var (cx, cy, radius) in eyes)
+        {
+            for (var y = cy - radius; y <= cy + radius; y++)
+            for (var x = cx - radius; x <= cx + radius; x++)
             {
                 if (x < 0 || y < 0 || x >= w || y >= h) continue;
-                var dx = x - hero.X;
-                var dy = y - hero.Y;
+                var dx = x - cx;
+                var dy = y - cy;
                 if (dx * dx + dy * dy > radius * radius) continue;
                 fog[y * w + x] = 2;
             }
+        }
+    }
+
+    /// <summary>Necropolis Cover of Darkness: re-shrouds the land around the town for everyone else, except what they see now.</summary>
+    public static void ApplyDarkness(byte[] fog, int w, int h, Town dark)
+    {
+        var r = DarknessRadius;
+        for (var y = dark.Y - r; y <= dark.Y + r; y++)
+        for (var x = dark.X - r; x <= dark.X + r; x++)
+        {
+            if (x < 0 || y < 0 || x >= w || y >= h) continue;
+            var dx = x - dark.X;
+            var dy = y - dark.Y;
+            if (dx * dx + dy * dy > r * r) continue;
+            if (fog[y * w + x] == 1) fog[y * w + x] = 0;
         }
     }
 
@@ -143,7 +166,8 @@ public class GameService
             Y = y,
             SkillsJson = JsonSerializer.Serialize(skills, Json),
             SpellsJson = "[]",
-            ArtifactsJson = "[]"
+            // magic heroes start with a spellbook, as in HoMM3
+            ArtifactsJson = def.Might ? "[]" : JsonSerializer.Serialize(new[] { TownRules.Spellbook }, Json)
         };
         hero.MaxMana = 10 + hero.Knowledge * 10;
         hero.Mana = hero.MaxMana;
@@ -203,7 +227,8 @@ public class GameService
         {
             var gx = rng.Next(2, mapSize - 2);
             var gy = rng.Next(2, mapSize - 2);
-            if (map.At(gx, gy).Passable)
+            if (map.At(gx, gy) is { Passable: true, ObjectKind: null } && Math.Min(Math.Max(Math.Abs(gx - 8), Math.Abs(gy - 8)),
+                    Math.Min(Math.Max(Math.Abs(gx - (mapSize - 9)), Math.Abs(gy - 8)), Math.Max(Math.Abs(gx - 8), Math.Abs(gy - (mapSize - 9))))) > 3)
             {
                 game.GrailX = gx;
                 game.GrailY = gy;
@@ -233,6 +258,8 @@ public class GameService
             _db.Players.Add(player);
             await _db.SaveChangesAsync();
 
+            // a HoMM3 starting town: Village Hall, Fort, Tavern and the first two dwellings
+            string[] startBuildings = ["villageHall", "fort", "tavern", "dwelling1", "dwelling2"];
             var town = new Town
             {
                 GameId = game.Id,
@@ -241,8 +268,12 @@ public class GameService
                 Faction = sp.Faction,
                 X = sx,
                 Y = sy,
-                BuildingsJson = JsonSerializer.Serialize(new[] { "villageHall", "dwelling1", "dwelling2", "tavern", "marketplace" }, Json),
-                AvailableJson = JsonSerializer.Serialize(new Dictionary<string, int> { ["1"] = 28, ["2"] = 16 }, Json),
+                BuildingsJson = JsonSerializer.Serialize(startBuildings, Json),
+                AvailableJson = JsonSerializer.Serialize(new Dictionary<string, int>
+                {
+                    ["1"] = TownBuildings.WeeklyGrowth(sp.Faction, startBuildings, 1),
+                    ["2"] = TownBuildings.WeeklyGrowth(sp.Faction, startBuildings, 2)
+                }, Json),
                 GarrisonJson = SerializeArmy(Enumerable.Range(0, 7).Select(_ => new ArmySlot(null, 0)).ToArray()),
                 TavernJson = JsonSerializer.Serialize(
                     Heroes.ForFaction(sp.Faction).Where(h => h.Key != sp.HeroKey).Select(h => h.Key).Take(2).ToArray(), Json),
@@ -255,13 +286,17 @@ public class GameService
             tile.ObjectData = town.Id.ToString();
             tile.Owner = i;
             tile.Passable = false;
+            Footprint.Stamp(map, sx, sy, "town", null);
+            var gate = map.At(sx, sy + 1);
+            gate.ObjectKind = null;
+            gate.Passable = true;
 
-            var hx = sx + 1 < mapSize ? sx + 1 : sx - 1;
-            var hero = CreateHero(game.Id, player.Id, sp, hx, sy);
+            // the starting hero stands in the town's gate, as in HoMM3
+            var hero = CreateHero(game.Id, player.Id, sp, sx, sy);
             _db.Heroes.Add(hero);
 
             var fog = new byte[mapSize * mapSize];
-            RecomputeFog(fog, mapSize, mapSize, [hero]);
+            RecomputeFog(fog, mapSize, mapSize, [hero], [town]);
             player.FogJson = SerializeFog(fog);
         }
 
@@ -282,6 +317,37 @@ public class GameService
     }
 
     // ---------------------------------------------------------------- movement
+    /// <summary>
+    /// Where a hero appears at a town (hired, or Town Portal): inside the town if the gate is free,
+    /// else the nearest open tile outside it — two heroes never share a tile.
+    /// </summary>
+    public async Task<(int x, int y)> ArrivalSpotAsync(Game game, int tx, int ty, Guid? exceptHero = null)
+    {
+        var occupied = (await _db.Heroes.Where(h => h.GameId == game.Id && h.Id != exceptHero)
+            .Select(h => new { h.X, h.Y }).ToListAsync()).Select(h => (h.X, h.Y)).ToHashSet();
+        if (!occupied.Contains((tx, ty))) return (tx, ty);
+        var map = await LoadMapAsync(game);
+        var seen = new HashSet<(int, int)> { (tx, ty) };
+        var queue = new Queue<(int x, int y)>();
+        queue.Enqueue((tx, ty));
+        while (queue.Count > 0)
+        {
+            var (cx, cy) = queue.Dequeue();
+            foreach (var (dx, dy) in new[] { (0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1), (-1, -1), (1, -1) })
+            {
+                var n = (cx + dx, cy + dy);
+                if (!map.InBounds(n.Item1, n.Item2) || !seen.Add(n)) continue;
+                var t = map.At(n.Item1, n.Item2);
+                if (!t.Passable) { if (t.ObjectKind is Footprint.Block or "town") queue.Enqueue(n); continue; }
+                if (!occupied.Contains(n)) return n;
+                queue.Enqueue(n);
+            }
+        }
+        return (tx, ty);
+    }
+
+    private static bool Corner(MapTile t) => Pathfinder.Pinches(t);
+
     public async Task<(bool ok, string? error, Hero? hero)> MoveHeroAsync(Guid heroId, string playerId, List<(int x, int y)> path)
     {
         var hero = await _db.Heroes.FirstOrDefaultAsync(h => h.Id == heroId);
@@ -316,9 +382,28 @@ public class GameService
             var tile = map.At(x, y);
             var cost = Terrain.MoveCost(tile.Terrain);
 
-            // Mines, monster stacks and towns are visited from the neighbouring tile.
+            // Mines, monster stacks and obelisks are visited from the neighbouring tile. A town is
+// different: the hero steps onto its own town's tile and stands inside it, as in HoMM3.
             if (!tile.Passable && tile.ObjectKind is "mine" or "monster" or "town" or "obelisk")
             {
+                if (tile.ObjectKind == "town")
+                {
+                    var townId = Guid.TryParse(tile.ObjectData, out var tid) ? tid : (Guid?)null;
+                    var town = townId == null ? null : await _db.Towns.FirstOrDefaultAsync(t => t.Id == townId);
+                    var townOwner = town == null ? null : await _db.Players.FirstOrDefaultAsync(p => p.Id == town.PlayerId);
+                    if (town != null && townOwner != null && townOwner.Faction == player.Faction)
+                    {
+                        // own town: walk onto the tile so the hero is visibly inside
+                        if (hero.Movement < cost) { blocked = "Not enough movement left today."; break; }
+                        hero.Movement -= cost;
+                        hero.X = x;
+                        hero.Y = y;
+                        moved = true;
+                        LastMoveMessage = $"enter-town:{town.Id}";
+                        VisitOwnTown(game, hero, town);
+                        break;
+                    }
+                }
                 if (tile.ObjectKind != "town")
                 {
                     if (hero.Movement < cost) { blocked = "Not enough movement left today."; break; }
@@ -331,7 +416,7 @@ public class GameService
             }
 
             if (!tile.Passable) { blocked = "Cannot move there."; break; }
-            if (dx != 0 && dy != 0 && (!map.At(hero.X + dx, hero.Y).Passable || !map.At(hero.X, hero.Y + dy).Passable))
+            if (dx != 0 && dy != 0 && (Corner(map.At(hero.X + dx, hero.Y)) || Corner(map.At(hero.X, hero.Y + dy))))
             { blocked = "Cannot cut that corner."; break; }
             if (hero.Movement < cost) { blocked = "Not enough movement left today."; break; }
 
@@ -349,13 +434,21 @@ public class GameService
         {
             var fog = ParseFog(player.FogJson, map.Width * map.Height);
             var heroes = await _db.Heroes.Where(h => h.PlayerId == player.Id).ToListAsync();
-            RecomputeFog(fog, map.Width, map.Height, heroes);
+            var ownTowns = await _db.Towns.Where(t => t.PlayerId == player.Id).ToListAsync();
+            RecomputeFog(fog, map.Width, map.Height, heroes, ownTowns);
             player.FogJson = SerializeFog(fog);
             await SaveMapAsync(game, map);
             return (true, null, hero);
         }
 
         return (false, blocked ?? "Cannot move there.", hero);
+    }
+
+    /// <summary>A hero entering its own town learns the guild's spells and, in a Castle, visits the Stables.</summary>
+    public static void VisitOwnTown(Game game, Hero hero, Town town)
+    {
+        TownRules.LearnGuildSpells(hero, town);
+        TownRules.VisitStables(hero, game, ParseStringArray(town.BuildingsJson));
     }
 
     private async Task<(bool stop, string? message)> InteractAsync(Game game, AdventureMap map, Player player, Hero hero, MapTile tile, int tx, int ty)
@@ -396,7 +489,7 @@ public class GameService
             case "artifact":
             {
                 var arts = ParseStringArray(hero.ArtifactsJson).ToList();
-                if (arts.Count < 8) arts.Add(tile.ObjectData ?? "artifact");
+                if (arts.Count(a => !TownRules.IsGear(a)) < 8) arts.Add(tile.ObjectData ?? "artifact");
                 hero.ArtifactsJson = JsonSerializer.Serialize(arts, Json);
                 tile.ObjectKind = null;
                 tile.ObjectData = null;
@@ -404,6 +497,9 @@ public class GameService
             }
             case "shrine":
             {
+                // HoMM3: a shrine teaches nothing to a hero without a spellbook, and stays put
+                if (!TownRules.HasGear(hero, TownRules.Spellbook))
+                    return (false, (string?)"You need a spellbook to learn the shrine's spell.");
                 var spells = ParseStringArray(hero.SpellsJson).ToList();
                 var spell = tile.ObjectData ?? "spell";
                 if (!spells.Contains(spell)) spells.Add(spell);
@@ -435,11 +531,9 @@ public class GameService
             }
             case "obelisk":
             {
-                // visiting reveals the next fragment of the Grail riddle
-                var game2 = await _db.Games.FirstAsync(g => g.Id == game.Id);
-                var all = ParseStringArray(game2.FragmentsJson);
-                if (player.ObeliskVisits < all.Length) player.ObeliskVisits++;
-                return (true, (string?)$"obelisk:{player.ObeliskVisits}/{all.Length}");
+                // walking up opens the Obelisk; its Visit action (VisitObeliskAsync) reveals the
+                // next fragment, so a walk-up and a visit never count twice
+                return (true, (string?)"obelisk:open");
             }
             case "grail":
             {
@@ -505,7 +599,25 @@ public class GameService
     }
 
     // ---------------------------------------------------------------- turns
+    // TickAsync is called both by the background TurnTicker and by the _test/nextday
+    // endpoint. Two concurrent ticks load the same Game row and both write it, so the
+    // second SaveChanges finds 0 rows affected and throws DbUpdateConcurrencyException.
+    private static readonly SemaphoreSlim _tickLock = new(1, 1);
+
     public async Task<List<Guid>> TickAsync()
+    {
+        await _tickLock.WaitAsync();
+        try
+        {
+            return await TickCoreAsync();
+        }
+        finally
+        {
+            _tickLock.Release();
+        }
+    }
+
+    private async Task<List<Guid>> TickCoreAsync()
     {
         var now = DateTime.UtcNow;
         var advanced = new List<Guid>();
@@ -540,9 +652,8 @@ public class GameService
                     var built = ParseStringArray(town.BuildingsJson);
                     p.Gold += TownBuildings.GoldIncome(built);
                     if (built.Contains("resourceSilo"))
-                    {
-                        p.Wood++; p.Ore++; p.Mercury++; p.Sulfur++; p.Crystal++; p.Gems++;
-                    }
+                        foreach (var (r, v) in TownBuildings.SiloProduction(town.Faction))
+                            TownRules.Add(p, r, v);
                 }
 
                 var ownerIndex = Array.FindIndex(Seeded.Players, s => s.Faction == p.Faction);
@@ -564,9 +675,18 @@ public class GameService
                 var heroes = await _db.Heroes.Where(h => h.PlayerId == p.Id).ToListAsync();
                 foreach (var h in heroes)
                 {
-                    h.MaxMovement = MaxMovement(h);
+                    // Castle Stables' bonus lasts until the end of the week it was granted in
+                    h.MaxMovement = MaxMovement(h) + (TownRules.StabledThisWeek(h, game) ? 400 : 0);
                     h.Movement = h.MaxMovement;
                 }
+
+                // towns keep their surroundings in sight; Cover of Darkness re-shrouds rivals' land
+                var mapFog = ParseFog(p.FogJson, map.Width * map.Height);
+                RecomputeFog(mapFog, map.Width, map.Height, heroes, towns.Where(t => t.PlayerId == p.Id));
+                foreach (var dark in towns.Where(t => t.PlayerId != p.Id && ParseStringArray(t.BuildingsJson).Contains("special1")
+                                                      && t.Faction == "necropolis"))
+                    ApplyDarkness(mapFog, map.Width, map.Height, dark);
+                p.FogJson = SerializeFog(mapFog);
             }
 
             if (game.Day == 1)
@@ -574,18 +694,27 @@ public class GameService
                 foreach (var town in towns)
                 {
                     var built = ParseStringArray(town.BuildingsJson);
-                    var mult = TownBuildings.GrowthMultiplier(built);
                     var avail = JsonSerializer.Deserialize<Dictionary<string, int>>(town.AvailableJson, Json) ?? [];
-                    var tiers = Creatures.BaseTiers(town.Faction);
                     for (var tier = 1; tier <= 7; tier++)
                     {
                         if (!TownBuildings.HasDwelling(built, tier)) continue;
-                        var key = tiers[tier - 1];
-                        var growth = (int)Math.Floor(Creatures.All[key].Growth * mult) + (built.Contains("grail") ? 2 : 0);
                         var k = tier.ToString();
-                        avail[k] = (avail.TryGetValue(k, out var cur) ? cur : 0) + growth;
+                        avail[k] = (avail.TryGetValue(k, out var cur) ? cur : 0) + TownBuildings.WeeklyGrowth(town.Faction, built, tier);
                     }
                     town.AvailableJson = JsonSerializer.Serialize(avail, Json);
+
+                    var townOwner = players.FirstOrDefault(p => p.Id == town.PlayerId);
+                    if (townOwner != null && town.Faction == "rampart")
+                    {
+                        // Mystic Pond: 1-4 of a random rare resource each week
+                        if (built.Contains("special1"))
+                        {
+                            string[] rare = ["mercury", "sulfur", "crystal", "gems"];
+                            TownRules.Add(townOwner, rare[Random.Shared.Next(rare.Length)], Random.Shared.Next(1, 5));
+                        }
+                        // Treasury: +10% of the gold held at the start of the week
+                        if (built.Contains("special3")) townOwner.Gold += townOwner.Gold / 10;
+                    }
 
                     // the tavern offers two fresh heroes each day, never one already hired
                     if (built.Contains("tavern"))
@@ -608,7 +737,18 @@ public class GameService
             if (game.TurnLimit > 0 && game.CurrentTurn > game.TurnLimit)
                 game.State = GameState.Finished;
 
-            await _db.SaveChangesAsync();
+            try
+            {
+                await _db.SaveChangesAsync();
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                // the game was deleted or finished by another request while this tick ran;
+                // drop the pending changes for it and move on
+                foreach (var entry in _db.ChangeTracker.Entries().Where(e => e.State != EntityState.Unchanged).ToList())
+                    entry.State = EntityState.Detached;
+                continue;
+            }
 
             // computer seats take their turn after the day has rolled over
             if (game.State == GameState.InProgress && players.Any(p => p.IsAi))

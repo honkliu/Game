@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { useGameNavigate } from '../useGameNavigate';
-import { api } from '../api';
+import { api, ApiError } from '../api';
+import { toast } from '../ui/Toast';
+import { SplitDialog } from './TownWindows';
 import type { HeroDetail, CreatureDef } from '../types';
 import { Btn, Loading, Panel, Txt } from '../ui/Layout';
 import { HERO_CLASS, HeroPortrait } from '../ui/homm';
@@ -22,9 +24,41 @@ const ART_SLOTS: [number, number][] = [
   [318, 135], [334, 185], [350, 235], [366, 285], [316, 288]
 ];
 
+const MACHINE_SLOTS: { key: string; name: string; frame: number; x: number; y: number }[] = [
+  { key: 'ballista', name: 'Ballista', frame: 4, x: 499, y: 22 },
+  { key: 'ammoCart', name: 'Ammo Cart', frame: 5, x: 545, y: 22 },
+  { key: 'firstAidTent', name: 'First Aid Tent', frame: 6, x: 545, y: 68 },
+  { key: 'catapult', name: 'Catapult', frame: 3, x: 545, y: 114 }
+];
+
 /** HoMM3 hero window: HeroScr4.pcx (672×586) centred on the 800×600 screen, everything at the original offsets. */
-function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef>; onBack: () => void }) {
-  const { hero, creatures, onBack } = props;
+function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef>; onBack: () => void; onChanged: (h: HeroDetail) => void }) {
+  const { hero, creatures, onBack, onChanged } = props;
+  const [sel, setSel] = useState<number | null>(null);
+  const [split, setSplit] = useState<{ from: number; to: number } | null>(null);
+  // every HoMM3 hero carries a catapult; the others are bought at the Blacksmith
+  const machines = new Set([...(hero.warMachines ?? []), 'catapult']);
+
+  async function moveStack(from: number, to: number, count = 0) {
+    try {
+      const r = await api.moveHeroArmy(hero.id, from, to, count);
+      onChanged({ ...hero, army: r.army });
+    } catch (e) { toast(e instanceof ApiError ? e.message : 'Something went wrong.'); }
+  }
+  function clickSlot(i: number, shift: boolean) {
+    const here = hero.army[i]?.creature ? hero.army[i] : null;
+    if (sel === null) { if (here) setSel(i); return; }
+    if (sel === i) { setSel(null); return; }
+    const src = hero.army[sel];
+    setSel(null);
+    if (!src?.creature) return;
+    if (shift) {
+      if (here && here.creature !== src.creature) { toast('Split onto an empty slot or the same creature.'); return; }
+      setSplit({ from: sel, to: i });
+      return;
+    }
+    moveStack(sel, i);
+  }
   const [rollover, setRollover] = useState<string | null>(null);
   const secsk = useDef('SECSKILL');
   const ox = 64, oy = 7;
@@ -93,14 +127,33 @@ function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef
           </div>
         ))}
 
-        {/* army */}
-        {army.map((slot, i) => slot?.creature ? (
-          <div key={i} className="abs" style={{ left: 15 + 66 * i, top: 485, width: 58, height: 64 }}
-            {...tip(`${slot.count} ${creatures[slot.creature]?.name ?? slot.creature}`)}>
-            <DefImg name="TWCRPORT" frame={creaturePortraitFrame(slot.creature)} x={0} y={0} />
-            <div className="abs h3text" style={{ right: 3, bottom: 1, fontSize: 11 }}>{slot.count}</div>
+        {/* war machines and the spellbook */}
+        {MACHINE_SLOTS.filter((m) => machines.has(m.key)).map((m) => (
+          <div key={m.key} data-machine={m.key} {...tip(m.name)}>
+            <DefImg name="Artifact" frame={m.frame} x={m.x} y={m.y} />
           </div>
-        ) : null)}
+        ))}
+        {hero.spellbook && (
+          <div data-spellbook {...tip('Spellbook')}><DefImg name="Artifact" frame={0} x={545} y={302} /></div>
+        )}
+
+        {/* army: click a stack, then another slot to move / merge / swap; shift-click to split */}
+        {army.map((slot, i) => (
+          <div key={i} className="abs h3hit" data-hero-army-slot={i}
+            style={{ left: 15 + 66 * i, top: 485, width: 58, height: 64, cursor: 'pointer' }}
+            onClick={(e) => clickSlot(i, e.shiftKey)}
+            {...tip(slot?.creature ? `${slot.count} ${creatures[slot.creature]?.name ?? slot.creature}` : 'Empty')}>
+            {slot?.creature && <DefImg name="TWCRPORT" frame={creaturePortraitFrame(slot.creature)} x={0} y={0} />}
+            {slot?.creature && <div className="abs h3text" style={{ right: 3, bottom: 1, fontSize: 11 }}>{slot.count}</div>}
+            {sel === i && <div className="abs" style={{ left: 0, top: 0, right: 0, bottom: 0, border: '2px solid #f8d870', pointerEvents: 'none' }} />}
+          </div>
+        ))}
+        {split && hero.army[split.from]?.creature && (
+          <SplitDialog name={creatures[hero.army[split.from].creature!]?.name ?? hero.army[split.from].creature!}
+            total={hero.army[split.from].count} target={hero.army[split.to]?.count ?? 0}
+            onClose={() => setSplit(null)}
+            onSplit={(n) => { const s = split; setSplit(null); moveStack(s.from, s.to, n); }} />
+        )}
 
         {/* hero list + quit */}
         <img className="abs" src={pcxUrl(heroPortrait(hero.heroKey || hero.name, hero.faction, 'small'))} alt=""
@@ -176,6 +229,8 @@ function StatIcon({ kind }: { kind: string }) {
 export function HeroScreen() {
   const { gameId, heroId } = useParams<{ gameId: string; heroId: string }>();
   const navigate = useGameNavigate();
+  const [search] = useSearchParams();
+  const back = () => navigate(`/game/${gameId}${/^town\/[\w-]+$/.test(search.get('from') ?? '') ? `/${search.get('from')}` : ''}`);
   const [hero, setHero] = useState<HeroDetail | null>(null);
   const [creatures, setCreatures] = useState<Record<string, CreatureDef>>({});
   const h3 = useH3();
@@ -191,7 +246,7 @@ export function HeroScreen() {
   }, [heroId]);
 
   if (!hero) return <Loading />;
-  if (h3) return <HeroH3 hero={hero} creatures={creatures} onBack={() => navigate(`/game/${gameId}`)} />;
+  if (h3) return <HeroH3 hero={hero} creatures={creatures} onBack={back} onChanged={setHero} />;
 
   const xpPct = hero.nextLevel > 0 ? Math.min(100, (hero.experience / hero.nextLevel) * 100) : 0;
   const skills = Object.entries(hero.skills);
@@ -202,7 +257,7 @@ export function HeroScreen() {
     <>
       <Panel x={0} y={0} w={800} h={40} style={{ borderRadius: 0, borderLeft: 'none', borderRight: 'none', borderTop: 'none' }}>
         <Txt x={0} y={10} w={800} size={16} bold align="center" className="heading">{hero.name.toUpperCase()}</Txt>
-        <Btn x={704} y={6} w={84} h={28} label="Back" size={12} onClick={() => navigate(`/game/${gameId}`)} />
+        <Btn x={704} y={6} w={84} h={28} label="Back" size={12} onClick={back} />
       </Panel>
 
       {/* left: portrait, primary stats, xp/mana, secondary skills */}

@@ -230,6 +230,8 @@ public static class Endpoints
             var tiers = Creatures.BaseTiers(town.Faction);
             var owner = Seeded.Players.FirstOrDefault(p => p.Faction == player.Faction);
             var selected = Seeded.Find(ctx.Request.Headers["X-Player-Id"]);
+            var tree = TownBuildings.For(town.Faction);
+            var (machine, machinePrice) = TownBuildings.Blacksmith.TryGetValue(town.Faction, out var bs) ? bs : ("ballista", 2500);
 
             return Results.Ok(new
             {
@@ -246,13 +248,19 @@ public static class Endpoints
                 postSlots = SocialService.TowerSlots(built),
                 goldIncome = TownBuildings.GoldIncome(built),
                 growthMultiplier = TownBuildings.GrowthMultiplier(built),
+                marketCount = await MarketCountAsync(db, town.GameId, town.PlayerId),
                 available = Enumerable.Range(1, 7).Select(tier => new
                 {
                     tier,
                     creature = tiers.Length >= tier ? tiers[tier - 1] : null,
+                    upgraded = tiers.Length >= tier ? Creatures.UpgradeOf(tiers[tier - 1]) : null,
                     count = avail.TryGetValue(tier.ToString(), out var c) ? c : 0,
-                    dwellingBuilt = TownBuildings.HasDwelling(built, tier)
+                    dwellingBuilt = TownBuildings.HasDwelling(built, tier),
+                    upgradeBuilt = TownBuildings.HasUpgrade(built, tier),
+                    growth = TownBuildings.WeeklyGrowth(town.Faction, built, tier),
+                    dwellingName = tree.TryGetValue((TownBuildings.HasUpgrade(built, tier) ? "upg" : "dwelling") + tier, out var dn) ? dn.Name : ""
                 }),
+                blacksmith = new { machine, name = TownBuildings.MachineNames[machine], gold = machinePrice },
                 garrison = GameService.ParseArmy(town.GarrisonJson),
                 heroInTown = await HeroInTownAsync(db, player.Id, town.X, town.Y),
                 tavern = GameService.ParseStringArray(town.TavernJson),
@@ -281,7 +289,8 @@ public static class Endpoints
             if (player.BuiltThisTurn) return Results.BadRequest(new { error = "You have already built this turn." });
 
             var key = req.BuildingKey ?? "";
-            if (!TownBuildings.All.TryGetValue(key, out var def)) return Results.BadRequest(new { error = "Unknown building." });
+            var tree = TownBuildings.For(town.Faction);
+            if (!tree.TryGetValue(key, out var def)) return Results.BadRequest(new { error = "Unknown building." });
             if (key == "grail" && !player.Precious)
                 return Results.BadRequest(new { error = "Requires the Grail. Dig it up first." });
 
@@ -290,7 +299,7 @@ public static class Endpoints
 
             foreach (var r in def.Requires)
                 if (!built.Contains(r))
-                    return Results.BadRequest(new { error = "Requires: " + (TownBuildings.All.TryGetValue(r, out var rd) ? rd.Name : r) + "." });
+                    return Results.BadRequest(new { error = "Requires: " + (tree.TryGetValue(r, out var rd) ? rd.Name : r) + "." });
 
             if (player.Gold < def.Gold || player.Wood < def.Wood || player.Ore < def.Ore ||
                 player.Mercury < def.Mercury || player.Sulfur < def.Sulfur ||
@@ -309,23 +318,17 @@ public static class Endpoints
             town.BuildingsJson = JsonSerializer.Serialize(built, Json);
             player.BuiltThisTurn = true;
 
-            if (def.Tier > 0 && key.StartsWith("dwelling"))
-            {
-                var avail = JsonSerializer.Deserialize<Dictionary<string, int>>(town.AvailableJson, Json) ?? [];
-                var k = def.Tier.ToString();
-                if (!avail.ContainsKey(k)) avail[k] = 0;
-                town.AvailableJson = JsonSerializer.Serialize(avail, Json);
-            }
+            // HoMM3: a new dwelling opens with its first week's creatures; a horde adds its bonus at once
+            var avail = JsonSerializer.Deserialize<Dictionary<string, int>>(town.AvailableJson, Json) ?? [];
+            if (key.StartsWith("dwelling"))
+                avail[def.Tier.ToString()] = TownBuildings.WeeklyGrowth(town.Faction, built, def.Tier);
+            else if (TownBuildings.Hordes.TryGetValue(town.Faction, out var hordes) && hordes.TryGetValue(key, out var horde))
+                avail[horde.Tier.ToString()] = (avail.TryGetValue(horde.Tier.ToString(), out var cur) ? cur : 0) + horde.Bonus;
+            town.AvailableJson = JsonSerializer.Serialize(avail, Json);
 
-            // a Mage Guild teaches one spell per level it reaches
-            if (key.StartsWith("mageGuild"))
-            {
-                var level = int.TryParse(key.AsSpan("mageGuild".Length), out var lv) ? lv : 1;
-                var known = GameService.ParseStringArray(town.MageGuildJson).ToList();
-                foreach (var spell in Spells.ForGuild(level, Random.Shared))
-                    if (!known.Contains(spell)) known.Add(spell);
-                town.MageGuildJson = JsonSerializer.Serialize(known, Json);
-            }
+            TownRules.StockGuild(town, key);
+            var visitor = await db.Heroes.FirstOrDefaultAsync(h => h.PlayerId == player.Id && h.X == town.X && h.Y == town.Y);
+            if (visitor != null) GameService.VisitOwnTown(game, visitor, town);
 
             await db.SaveChangesAsync();
             return Results.NoContent();
@@ -343,8 +346,18 @@ public static class Endpoints
             if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "You can only recruit in your own town." });
 
             var built = GameService.ParseStringArray(town.BuildingsJson);
-            if (!TownBuildings.HasDwelling(built, req.Tier))
+            if (req.Tier is < 1 or > 7 || !TownBuildings.HasDwelling(built, req.Tier))
                 return Results.BadRequest(new { error = "That dwelling is not built." });
+
+            // an upgraded dwelling recruits either form from the same weekly pool
+            var tiers = Creatures.BaseTiers(town.Faction);
+            var baseKey = tiers[req.Tier - 1];
+            var upgKey = Creatures.UpgradeOf(baseKey);
+            var creatureKey = string.IsNullOrEmpty(req.Creature) ? baseKey : req.Creature;
+            if (creatureKey != baseKey && creatureKey != upgKey)
+                return Results.BadRequest(new { error = "That dwelling does not house that creature." });
+            if (creatureKey == upgKey && !TownBuildings.HasUpgrade(built, req.Tier))
+                return Results.BadRequest(new { error = "Upgrade the dwelling first." });
 
             var avail = JsonSerializer.Deserialize<Dictionary<string, int>>(town.AvailableJson, Json) ?? [];
             var k = req.Tier.ToString();
@@ -352,32 +365,27 @@ public static class Endpoints
             var count = Math.Min(req.Count, have);
             if (count <= 0) return Results.BadRequest(new { error = "No creatures available." });
 
-            var tiers = Creatures.BaseTiers(town.Faction);
-            var creatureKey = tiers[req.Tier - 1];
             var def = Creatures.All[creatureKey];
-            var cost = def.Gold * count;
-            if (player.Gold < cost) return Results.BadRequest(new { error = "Not enough gold." });
-
-            player.Gold -= cost;
-            avail[k] = have - count;
-            town.AvailableJson = JsonSerializer.Serialize(avail, Json);
+            var cost = TownRules.CostOf(def, count);
+            if (!TownRules.CanAfford(player, cost)) return Results.BadRequest(new { error = "Not enough resources." });
 
             var hero = await db.Heroes.FirstOrDefaultAsync(h =>
-                h.PlayerId == player.Id && Math.Abs(h.X - town.X) <= 1 && Math.Abs(h.Y - town.Y) <= 1);
-            if (hero != null)
-            {
-                var army = GameService.ParseArmy(hero.ArmyJson);
-                if (!GameService.AddToArmy(army, creatureKey, count))
-                    return Results.BadRequest(new { error = "The hero's army is full." });
-                hero.ArmyJson = GameService.SerializeArmy(army);
-            }
+                h.PlayerId == player.Id && h.X == town.X && h.Y == town.Y);
+            // HoMM3 recruits into the garrison; a visiting hero takes them only if the garrison is full
+            var garrison = GameService.ParseArmy(town.GarrisonJson);
+            if (GameService.AddToArmy(garrison, creatureKey, count))
+                town.GarrisonJson = GameService.SerializeArmy(garrison);
             else
             {
-                var garrison = GameService.ParseArmy(town.GarrisonJson);
-                if (!GameService.AddToArmy(garrison, creatureKey, count))
-                    return Results.BadRequest(new { error = "The garrison is full." });
-                town.GarrisonJson = GameService.SerializeArmy(garrison);
+                var army = hero == null ? null : GameService.ParseArmy(hero.ArmyJson);
+                if (army == null || !GameService.AddToArmy(army, creatureKey, count))
+                    return Results.BadRequest(new { error = "There is no room for them in the garrison." });
+                hero!.ArmyJson = GameService.SerializeArmy(army);
             }
+
+            TownRules.Pay(player, cost);
+            avail[k] = have - count;
+            town.AvailableJson = JsonSerializer.Serialize(avail, Json);
 
             await db.SaveChangesAsync();
             return Results.Ok(new { recruited = count, creature = creatureKey });
@@ -398,40 +406,23 @@ public static class Endpoints
 
             var from = req.From ?? "";
             var to = req.To ?? "";
-            var amount = Math.Max(1, req.Amount);
-            string[] valid = ["gold", "wood", "ore", "mercury", "sulfur", "crystal", "gems"];
-            if (!valid.Contains(from) || !valid.Contains(to)) return Results.BadRequest(new { error = "Unknown resource." });
+            var lots = Math.Max(1, req.Amount);
+            if (!TownRules.IsResource(from) || !TownRules.IsResource(to)) return Results.BadRequest(new { error = "Unknown resource." });
             if (from == to) return Results.BadRequest(new { error = "Cannot trade a resource for itself." });
 
-            // amount is always the number of non-gold units bought or sold
-            if (from == "gold")
-            {
-                var cost = 500 * amount;
-                if (player.Gold < cost) return Results.BadRequest(new { error = "Not enough gold." });
-                player.Gold -= cost;
-                SetRes(player, to, GetRes(player, to) + amount);
-            }
-            else if (to == "gold")
-            {
-                var have = GetRes(player, from);
-                if (have < amount) return Results.BadRequest(new { error = "Not enough " + from + "." });
-                SetRes(player, from, have - amount);
-                player.Gold += 250 * amount;
-            }
-            else
-            {
-                var give = 2 * amount;
-                var have = GetRes(player, from);
-                if (have < give) return Results.BadRequest(new { error = "Not enough " + from + "." });
-                SetRes(player, from, have - give);
-                SetRes(player, to, GetRes(player, to) + amount);
-            }
+            // amount is the number of lots at the HoMM3 rate, which depends on how many Marketplaces the player owns
+            var markets = await MarketCountAsync(db, town.GameId, town.PlayerId);
+            var (give, get) = TownRules.MarketRate(from, to, markets);
+            var have = GetRes(player, from);
+            if (have < give * lots) return Results.BadRequest(new { error = "Not enough " + from + "." });
+            SetRes(player, from, have - give * lots);
+            SetRes(player, to, GetRes(player, to) + get * lots);
 
             await db.SaveChangesAsync();
             return Results.NoContent();
         });
 
-        app.MapPost("/api/towns/{townId:guid}/hire", async (Guid townId, HireReq req, AppDb db, HttpContext ctx) =>
+        app.MapPost("/api/towns/{townId:guid}/hire", async (Guid townId, HireReq req, AppDb db, GameService games, HttpContext ctx) =>
         {
             var sp = Seeded.Find(ctx.Request.Headers["X-Player-Id"]);
             if (sp == null) return Results.BadRequest(new { error = "Unknown player." });
@@ -456,7 +447,10 @@ public static class Endpoints
             pool.Remove(key);
             town.TavernJson = JsonSerializer.Serialize(pool, Json);
 
-            var hero = GameService.CreateHero(town.GameId, player.Id, sp with { HeroKey = key }, town.X, town.Y);
+            var hireGame = await db.Games.FirstAsync(g => g.Id == town.GameId);
+            var (hx, hy) = await games.ArrivalSpotAsync(hireGame, town.X, town.Y);
+            var hero = GameService.CreateHero(town.GameId, player.Id, sp with { HeroKey = key }, hx, hy);
+            if (hx == town.X && hy == town.Y) GameService.VisitOwnTown(hireGame, hero, town);
             db.Heroes.Add(hero);
             await db.SaveChangesAsync();
             return Results.Ok(new { heroId = hero.Id });
@@ -474,7 +468,7 @@ public static class Endpoints
             if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your town." });
 
             var hero = await db.Heroes.FirstOrDefaultAsync(h =>
-                h.PlayerId == player.Id && Math.Abs(h.X - town.X) <= 1 && Math.Abs(h.Y - town.Y) <= 1);
+                h.PlayerId == player.Id && h.X == town.X && h.Y == town.Y);
             if (hero == null) return Results.BadRequest(new { error = "No hero is in town." });
 
             var direction = req.Direction ?? "";
@@ -497,11 +491,143 @@ public static class Endpoints
 
             from[req.Slot] = stack with { Count = stack.Count - count };
             if (from[req.Slot].Count <= 0) from[req.Slot] = new GameService.ArmySlot(null, 0);
+            if (direction == "toGarrison" && heroArmy.All(s => s.Creature == null || s.Count <= 0))
+                return Results.BadRequest(new { error = "A hero must keep at least one stack." });
 
             hero.ArmyJson = GameService.SerializeArmy(heroArmy);
             town.GarrisonJson = GameService.SerializeArmy(garrison);
             await db.SaveChangesAsync();
             return Results.Ok(new { moved = count, creature = stack.Creature });
+        });
+
+        // HoMM3 army exchange between the visiting hero and the garrison (or within either):
+        // move, merge, swap or split a stack into a chosen slot.
+        app.MapPost("/api/towns/{townId:guid}/army", async (Guid townId, ArmyMoveReq req, AppDb db, HttpContext ctx) =>
+        {
+            var (town, player, err) = await OwnTownAsync(db, ctx, townId);
+            if (err != null) return err;
+            var hero = await db.Heroes.FirstOrDefaultAsync(h => h.PlayerId == player!.Id && h.X == town!.X && h.Y == town.Y);
+            if ((req.FromArmy == "hero" || req.ToArmy == "hero") && hero == null)
+                return Results.BadRequest(new { error = "No hero is in town." });
+            if (req.FromArmy is not ("hero" or "garrison") || req.ToArmy is not ("hero" or "garrison"))
+                return Results.BadRequest(new { error = "Unknown army." });
+
+            var heroArmy = hero == null ? null : GameService.ParseArmy(hero.ArmyJson);
+            var garrison = GameService.ParseArmy(town!.GarrisonJson);
+            var from = req.FromArmy == "hero" ? heroArmy! : garrison;
+            var to = req.ToArmy == "hero" ? heroArmy! : garrison;
+            var error = TownRules.Transfer(from, req.FromSlot, to, req.ToSlot, req.Count,
+                req.FromArmy == "hero", req.ToArmy == "hero");
+            if (error != null) return Results.BadRequest(new { error });
+
+            if (hero != null) hero.ArmyJson = GameService.SerializeArmy(heroArmy!);
+            town.GarrisonJson = GameService.SerializeArmy(garrison);
+            await db.SaveChangesAsync();
+            return Results.Ok(new { hero = heroArmy, garrison });
+        });
+
+        // Rearrange or split stacks within a hero's own army (the hero screen).
+        app.MapPost("/api/heroes/{heroId:guid}/army", async (Guid heroId, ArmyMoveReq req, AppDb db, HttpContext ctx) =>
+        {
+            var sp = Seeded.Find(ctx.Request.Headers["X-Player-Id"]);
+            if (sp == null) return Results.BadRequest(new { error = "Unknown player." });
+            var hero = await db.Heroes.FirstOrDefaultAsync(h => h.Id == heroId);
+            if (hero == null) return Results.NotFound();
+            var player = await db.Players.FirstAsync(p => p.Id == hero.PlayerId);
+            if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your hero." });
+
+            var army = GameService.ParseArmy(hero.ArmyJson);
+            var error = TownRules.Transfer(army, req.FromSlot, army, req.ToSlot, req.Count, true, true);
+            if (error != null) return Results.BadRequest(new { error });
+            hero.ArmyJson = GameService.SerializeArmy(army);
+            await db.SaveChangesAsync();
+            return Results.Ok(new { army });
+        });
+
+        // Upgrade a stack in the hero's army or the garrison (needs the upgraded dwelling; costs the price difference).
+        app.MapPost("/api/towns/{townId:guid}/upgrade", async (Guid townId, StackReq req, AppDb db, HttpContext ctx) =>
+        {
+            var (town, player, err) = await OwnTownAsync(db, ctx, townId);
+            if (err != null) return err;
+            var hero = await db.Heroes.FirstOrDefaultAsync(h => h.PlayerId == player!.Id && h.X == town!.X && h.Y == town.Y);
+            if (req.Army == "hero" && hero == null) return Results.BadRequest(new { error = "No hero is in town." });
+            var army = req.Army == "hero" ? GameService.ParseArmy(hero!.ArmyJson) : GameService.ParseArmy(town!.GarrisonJson);
+            if (req.Slot is < 0 or > 6) return Results.BadRequest(new { error = "Unknown slot." });
+            var stack = army[req.Slot];
+            if (stack.Creature == null || !Creatures.All.TryGetValue(stack.Creature, out var from))
+                return Results.BadRequest(new { error = "That slot is empty." });
+            var upKey = Creatures.UpgradeOf(stack.Creature);
+            if (upKey == null || from.Faction != town!.Faction)
+                return Results.BadRequest(new { error = "This town cannot upgrade that creature." });
+            if (!TownBuildings.HasUpgrade(GameService.ParseStringArray(town.BuildingsJson), from.Tier))
+                return Results.BadRequest(new { error = "Build the upgraded dwelling first." });
+
+            var cost = TownRules.UpgradeCost(from, Creatures.All[upKey], stack.Count);
+            if (!TownRules.CanAfford(player!, cost)) return Results.BadRequest(new { error = "Not enough resources." });
+            TownRules.Pay(player!, cost);
+            army[req.Slot] = stack with { Creature = upKey };
+            if (req.Army == "hero") hero!.ArmyJson = GameService.SerializeArmy(army);
+            else town.GarrisonJson = GameService.SerializeArmy(army);
+            await db.SaveChangesAsync();
+            return Results.Ok(new { creature = upKey, cost });
+        });
+
+        // Blacksmith: sell the faction's war machine to the visiting hero.
+        app.MapPost("/api/towns/{townId:guid}/blacksmith", async (Guid townId, AppDb db, HttpContext ctx) =>
+        {
+            var (town, player, err) = await OwnTownAsync(db, ctx, townId);
+            if (err != null) return err;
+            if (!GameService.ParseStringArray(town!.BuildingsJson).Contains("blacksmith"))
+                return Results.BadRequest(new { error = "No Blacksmith built." });
+            var hero = await db.Heroes.FirstOrDefaultAsync(h => h.PlayerId == player!.Id && h.X == town.X && h.Y == town.Y);
+            if (hero == null) return Results.BadRequest(new { error = "A hero must visit the town to buy a war machine." });
+            var (machine, price) = TownBuildings.Blacksmith[town.Faction];
+            if (TownRules.HasGear(hero, machine))
+                return Results.BadRequest(new { error = $"{hero.Name} already has a {TownBuildings.MachineNames[machine]}." });
+            if (player!.Gold < price) return Results.BadRequest(new { error = "Not enough gold." });
+            player.Gold -= price;
+            TownRules.AddGear(hero, machine);
+            await db.SaveChangesAsync();
+            return Results.Ok(new { machine });
+        });
+
+        // Mage Guild: a visiting hero without a spellbook may buy one for 500 gold.
+        app.MapPost("/api/towns/{townId:guid}/spellbook", async (Guid townId, AppDb db, HttpContext ctx) =>
+        {
+            var (town, player, err) = await OwnTownAsync(db, ctx, townId);
+            if (err != null) return err;
+            if (!GameService.ParseStringArray(town!.BuildingsJson).Contains("mageGuild1"))
+                return Results.BadRequest(new { error = "No Mage Guild built." });
+            var hero = await db.Heroes.FirstOrDefaultAsync(h => h.PlayerId == player!.Id && h.X == town.X && h.Y == town.Y);
+            if (hero == null) return Results.BadRequest(new { error = "No hero is in town." });
+            if (TownRules.HasGear(hero, TownRules.Spellbook)) return Results.BadRequest(new { error = "The hero already has a spellbook." });
+            if (player!.Gold < 500) return Results.BadRequest(new { error = "Not enough gold (500)." });
+            player.Gold -= 500;
+            TownRules.AddGear(hero, TownRules.Spellbook);
+            var learned = TownRules.LearnGuildSpells(hero, town);
+            await db.SaveChangesAsync();
+            return Results.Ok(new { learned });
+        });
+
+        // Necropolis Skeleton Transformer: turns a living stack into as many Skeletons.
+        app.MapPost("/api/towns/{townId:guid}/transform", async (Guid townId, StackReq req, AppDb db, HttpContext ctx) =>
+        {
+            var (town, player, err) = await OwnTownAsync(db, ctx, townId);
+            if (err != null) return err;
+            if (town!.Faction != "necropolis" || !GameService.ParseStringArray(town.BuildingsJson).Contains("special3"))
+                return Results.BadRequest(new { error = "No Skeleton Transformer built." });
+            var hero = await db.Heroes.FirstOrDefaultAsync(h => h.PlayerId == player!.Id && h.X == town.X && h.Y == town.Y);
+            if (hero == null) return Results.BadRequest(new { error = "A hero must visit the town." });
+            if (req.Slot is < 0 or > 6) return Results.BadRequest(new { error = "Unknown slot." });
+            var army = GameService.ParseArmy(hero.ArmyJson);
+            var stack = army[req.Slot];
+            if (stack.Creature == null || !Creatures.All.TryGetValue(stack.Creature, out var c))
+                return Results.BadRequest(new { error = "That slot is empty." });
+            if (c.Faction == "necropolis" || c.Abilities.Contains("undead")) return Results.BadRequest(new { error = "The undead cannot be transformed." });
+            army[req.Slot] = stack with { Creature = "skeleton" };
+            hero.ArmyJson = GameService.SerializeArmy(army);
+            await db.SaveChangesAsync();
+            return Results.Ok(new { creature = "skeleton", count = stack.Count });
         });
 
         // Cast a spell the hero knows. Adventure-map spells have real effects; the rest
@@ -520,6 +646,7 @@ public static class Endpoints
             if (!Spells.All.TryGetValue(key, out var spell)) return Results.BadRequest(new { error = "Unknown spell." });
             var known = GameService.ParseStringArray(hero.SpellsJson);
             if (!known.Contains(key)) return Results.BadRequest(new { error = "Your hero does not know that spell." });
+            if (!TownRules.HasGear(hero, TownRules.Spellbook)) return Results.BadRequest(new { error = "Your hero has no spellbook." });
             if (hero.Mana < spell.Cost) return Results.BadRequest(new { error = "Not enough spell points." });
 
             var game = await db.Games.FirstAsync(g => g.Id == hero.GameId);
@@ -532,8 +659,7 @@ public static class Endpoints
                 {
                     var town = await db.Towns.FirstOrDefaultAsync(t => t.PlayerId == player.Id);
                     if (town == null) return Results.BadRequest(new { error = "You have no town." });
-                    hero.X = town.X;
-                    hero.Y = town.Y;
+                    (hero.X, hero.Y) = await games.ArrivalSpotAsync(game, town.X, town.Y, hero.Id);
                     hero.Movement = 0;
                     message = $"You return to {town.Name}.";
                     break;
@@ -643,7 +769,7 @@ public static class Endpoints
         });
 
         // ------------------------------------------------------------ catalogue
-        app.MapGet("/api/buildings", () => Results.Ok(TownBuildings.All.Values.Select(b => new
+        app.MapGet("/api/buildings", (string? faction) => Results.Ok(TownBuildings.For(faction ?? "castle").Values.Select(b => new
         {
             key = b.Key, name = b.Name, category = b.Category,
             cost = new { gold = b.Gold, wood = b.Wood, ore = b.Ore, mercury = b.Mercury, sulfur = b.Sulfur, crystal = b.Crystal, gems = b.Gems },
@@ -655,6 +781,7 @@ public static class Endpoints
             key = c.Key, name = c.Name, faction = c.Faction, tier = c.Tier,
             attack = c.Attack, defense = c.Defense, damageMin = c.DamageMin, damageMax = c.DamageMax,
             health = c.Health, speed = c.Speed, growth = c.Growth, gold = c.Gold, shots = c.Shots,
+            cost = TownRules.CostOf(c),
             aiValue = c.AiValue, abilities = c.Abilities, upgradeOf = c.UpgradeOf
         })));
 
@@ -884,6 +1011,13 @@ public static class Endpoints
         if (town != null) await ws.BroadcastAsync(town.GameId, type, new { townId });
     }
 
+    /// <summary>Marketplaces the player owns across all their towns (HoMM3 trade rates improve with each).</summary>
+    private static async Task<int> MarketCountAsync(AppDb db, Guid gameId, Guid playerId)
+    {
+        var towns = await db.Towns.Where(t => t.GameId == gameId && t.PlayerId == playerId).Select(t => t.BuildingsJson).ToListAsync();
+        return towns.Count(b => GameService.ParseStringArray(b).Contains("marketplace"));
+    }
+
     /// <summary>True when the caller is a player in the town's game who has not yet explored its tile.</summary>
     private static async Task<bool> TownHiddenAsync(AppDb db, Guid townId, string? playerId)
     {
@@ -899,14 +1033,32 @@ public static class Endpoints
         return i < 0 || i >= fog.Length || fog[i] == 0;
     }
 
+    /// <summary>Loads a town and checks the caller owns it.</summary>
+    private static async Task<(Town? town, Player? player, IResult? error)> OwnTownAsync(AppDb db, HttpContext ctx, Guid townId)
+    {
+        var sp = Seeded.Find(ctx.Request.Headers["X-Player-Id"]);
+        if (sp == null) return (null, null, Results.BadRequest(new { error = "Unknown player." }));
+        var town = await db.Towns.FirstOrDefaultAsync(t => t.Id == townId);
+        if (town == null) return (null, null, Results.NotFound());
+        var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
+        if (player.Faction != sp.Faction) return (null, null, Results.BadRequest(new { error = "Not your town." }));
+        return (town, player, null);
+    }
+
     private static async Task<object?> HeroInTownAsync(AppDb db, Guid playerId, int x, int y)
     {
-        // towns are entered from an adjacent tile, so "in town" means standing next to it
+        // the hero steps onto its own town's tile, so "in town" means standing on it
         var hero = await db.Heroes.FirstOrDefaultAsync(h =>
-            h.PlayerId == playerId &&
-            Math.Abs(h.X - x) <= 1 && Math.Abs(h.Y - y) <= 1);
+            h.PlayerId == playerId && h.X == x && h.Y == y);
         if (hero == null) return null;
-        return new { id = hero.Id, name = hero.Name, army = GameService.ParseArmy(hero.ArmyJson) };
+        return new
+        {
+            id = hero.Id, name = hero.Name, heroKey = hero.HeroKey, army = GameService.ParseArmy(hero.ArmyJson),
+            spellbook = TownRules.HasGear(hero, TownRules.Spellbook),
+            warMachines = TownRules.WarMachines(hero),
+            spells = GameService.ParseStringArray(hero.SpellsJson),
+            wisdom = GameService.ParseSkills(hero.SkillsJson).TryGetValue("wisdom", out var w) ? w : 0
+        };
     }
 
     private static object HeroDto(CityOfTowers.Domain.Hero h) => new
@@ -930,9 +1082,11 @@ public static class Endpoints
         y = h.Y,
         army = GameService.ParseArmy(h.ArmyJson),
         strength = GameService.ArmyStrength(GameService.ParseArmy(h.ArmyJson)),
-        skills = GameService.ParseSkills(h.SkillsJson),
+        skills = GameService.ParseSkills(h.SkillsJson).Where(kv => !kv.Key.StartsWith('_')).ToDictionary(kv => kv.Key, kv => kv.Value),
         spells = GameService.ParseStringArray(h.SpellsJson),
-        artifacts = GameService.ParseStringArray(h.ArtifactsJson),
+        artifacts = TownRules.Artifacts(h),
+        spellbook = TownRules.HasGear(h, TownRules.Spellbook),
+        warMachines = TownRules.WarMachines(h),
         pendingEncounter = h.PendingEncounterJson
     };
 
@@ -962,7 +1116,9 @@ public record CreateGameReq(string? Name, int Capacity, int TurnSeconds, int Tur
 public record MoveReq(List<Point>? Path);
 public record Point(int X, int Y);
 public record BuildReq(string? BuildingKey);
-public record RecruitReq(int Tier, int Count);
+public record RecruitReq(int Tier, int Count, string? Creature = null);
+public record ArmyMoveReq(string? FromArmy, int FromSlot, string? ToArmy, int ToSlot, int Count);
+public record StackReq(string? Army, int Slot);
 public record TradeReq(string? From, string? To, int Amount);
 public record HireReq(string? HeroKey);
 public record GarrisonReq(string? Direction, int Slot, int Count);

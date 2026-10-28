@@ -1,8 +1,7 @@
 namespace CityOfTowers.Domain;
 
 /// <summary>
-/// Spell catalogue. Levels 1-5 match the Mage Guild tiers; each guild level teaches
-/// one spell from its own tier, so a level-3 guild holds three spells.
+/// Spell catalogue. Levels 1-5 match the Mage Guild tiers.
 /// </summary>
 public record SpellDef(string Key, string Name, int Level, string School, int Cost, string Description);
 
@@ -49,15 +48,16 @@ public static class Spells
     public static SpellDef[] OfLevel(int level) =>
         All.Values.Where(s => s.Level == level).OrderBy(s => s.Key, StringComparer.Ordinal).ToArray();
 
-    /// <summary>Spells a guild of the given level teaches: one per level, 1..level.</summary>
-    public static string[] ForGuild(int guildLevel, Random rng)
+    /// <summary>
+    /// Spells a newly built guild level adds, as in HoMM3: 5 level-1 spells, 4 level-2,
+    /// 3 level-3, 2 level-4 and 1 level-5, chosen at random from that level.
+    /// </summary>
+    public static string[] ForGuildLevel(int level, Random rng)
     {
-        var picked = new List<string>();
-        for (var lvl = 1; lvl <= Math.Clamp(guildLevel, 0, 5); lvl++)
-        {
-            var pool = OfLevel(lvl);
-            if (pool.Length > 0) picked.Add(pool[rng.Next(pool.Length)].Key);
-        }
-        return picked.ToArray();
+        if (level is < 1 or > 5) return [];
+        return OfLevel(level).OrderBy(_ => rng.Next()).Take(6 - level).Select(s => s.Key).ToArray();
     }
+
+    /// <summary>Highest spell level a hero can learn: 2 without Wisdom, then 3/4/5 for Basic/Advanced/Expert.</summary>
+    public static int MaxLearnable(int wisdom) => 2 + Math.Clamp(wisdom, 0, 3);
 }

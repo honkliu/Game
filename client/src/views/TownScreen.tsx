@@ -2,13 +2,14 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { useGameNavigate } from '../useGameNavigate';
 import { api, ApiError } from '../api';
-import type { TownDetail, BuildingDef, CreatureDef, HeroDef, ArmySlot, SpellDef } from '../types';
+import type { TownDetail, BuildingDef, CreatureDef, HeroDef, ArmySlot } from '../types';
 import { Btn, Loading, Modal, Panel, Txt } from '../ui/Layout';
 import { toast } from '../ui/Toast';
 import { FACTION_LABEL, RES_ORDER, ResIcon, buildingName } from '../ui/homm';
 import { DefImg, Pcx, ScreenBackdrop, alphaAt, drawFrame, getDef, onAssetLoaded, useH3 } from '../h3/assets';
-import { creaturePortraitFrame, heroPortrait, townListFrame } from '../h3/catalog';
-import { TOWN_BACK, townStructures } from '../h3/town';
+import { FACTION_PLAYER_COLOR, creaturePortraitFrame, heroPortrait, townListFrame } from '../h3/catalog';
+import { HORDE_TIER, TOWN_BACK, townStructures } from '../h3/town';
+import { BlacksmithWindow, BuildingDialog, CreatureInfo, DefButton, FortWindow, GuildWindow, HallWindow, MarketWindow, SplitDialog, TransformerWindow } from './TownWindows';
 
 const HERO_COST = 2000;
 
@@ -22,15 +23,11 @@ const SKILL_NAMES: Record<string, string> = {
 };
 const skillName = (k: string) => SKILL_NAMES[k] ?? k;
 
-/** Asset file for a building key; Mage Guild levels reuse the magic tower art. */
-function assetFor(key: string): string {
-  const m = /^mageGuild(\d)$/.exec(key);
-  if (m) return `/assets/buildings/magicTower${m[1]}.svg`;
-  const u = /^upg(\d)$/.exec(key);
-  return `/assets/buildings/${u ? 'dwelling' + u[1] : key}.svg`;
-}
-
-type Tab = 'build' | 'recruit' | 'market' | 'guild' | 'tavern' | 'garrison' | 'tower' | 'wall';
+/** Which window is open over the town screen. */
+type View =
+  | { kind: 'hall' | 'fort' | 'market' | 'guild' | 'tavern' | 'smith' | 'transform' | 'tower' | 'wall' }
+  | { kind: 'recruit'; tier: number }
+  | { kind: 'info'; key: string };
 
 export function TownScreen() {
   const { gameId, townId } = useParams<{ gameId: string; townId: string }>();
@@ -38,7 +35,7 @@ export function TownScreen() {
   const [town, setTown] = useState<TownDetail | null>(null);
   const [buildings, setBuildings] = useState<BuildingDef[]>([]);
   const [creatures, setCreatures] = useState<Record<string, CreatureDef>>({});
-  const [tab, setTab] = useState<Tab | null>(null);
+  const [view, setView] = useState<View | null>(null);
 
   const refresh = useCallback(async () => {
     if (!townId) return;
@@ -46,64 +43,77 @@ export function TownScreen() {
     catch (e) { if (e instanceof ApiError) toast(e.message); }
   }, [townId]);
 
+  useEffect(() => { refresh(); }, [refresh]);
+  const faction = town?.faction;
   useEffect(() => {
-    refresh();
-    api.getBuildings().then(setBuildings).catch(() => {});
+    if (!faction) return;
+    api.getBuildings(faction).then(setBuildings).catch(() => {});
     api.getCreatures().then((cs) => {
       const m: Record<string, CreatureDef> = {};
       for (const c of cs) m[c.key] = c;
       setCreatures(m);
     }).catch(() => {});
-  }, [refresh]);
+  }, [faction]);
 
   if (!town) return <Loading />;
   return (
     <>
-      <TownH3 town={town} buildings={buildings} creatures={creatures}
-        onTab={setTab} onExit={() => navigate(`/game/${gameId}`)} />
-      {panels(town, buildings, creatures, tab, setTab, refresh)}
+      <TownH3 town={town} buildings={buildings} creatures={creatures} onView={setView} onChanged={refresh}
+        onHero={(id) => navigate(`/game/${gameId}/hero/${id}?from=town/${townId}`)}
+        onExit={() => navigate(`/game/${gameId}`)} />
+      {view && windowFor(town, buildings, creatures, view, setView, refresh)}
     </>
   );
 }
 
-function panels(town: TownDetail, buildings: BuildingDef[], creatures: Record<string, CreatureDef>,
-  tab: Tab | null, setTab: (t: Tab | null) => void, refresh: () => void) {
-  const built = new Set(town.buildings);
-  return (
-    <>
-      {tab === 'build' && <BuildPanel town={town} buildings={buildings} built={built} onBuilt={refresh} onClose={() => setTab(null)} />}
-      {tab === 'recruit' && <RecruitPanel town={town} creatures={creatures} onRecruited={refresh} onClose={() => setTab(null)} />}
-      {tab === 'market' && <MarketPanel town={town} onTraded={refresh} onClose={() => setTab(null)} />}
-      {tab === 'guild' && <GuildPanel town={town} onClose={() => setTab(null)} />}
-      {tab === 'tavern' && <TavernPanel town={town} onHired={refresh} onClose={() => setTab(null)} />}
-      {tab === 'garrison' && <GarrisonPanel town={town} creatures={creatures} onChanged={refresh} onClose={() => setTab(null)} />}
-      {tab === 'tower' && <TowerPanel town={town} onClose={() => setTab(null)} />}
-      {tab === 'wall' && <WallPanel town={town} onClose={() => setTab(null)} />}
-    </>
-  );
+function windowFor(town: TownDetail, buildings: BuildingDef[], creatures: Record<string, CreatureDef>,
+  view: View, setView: (v: View | null) => void, refresh: () => void) {
+  const close = () => setView(null);
+  switch (view.kind) {
+    case 'hall': return <HallWindow town={town} buildings={buildings} onBuilt={refresh} onClose={close} />;
+    case 'fort': return <FortWindow town={town} creatures={creatures} onRecruit={(tier) => setView({ kind: 'recruit', tier })} onClose={close} />;
+    case 'recruit': return <RecruitPanel key={view.tier} town={town} creatures={creatures} tier={view.tier} onRecruited={refresh} onClose={close} />;
+    case 'market': return <MarketWindow town={town} onTraded={refresh} onClose={close} />;
+    case 'guild': return <GuildWindow town={town} onChanged={refresh} onClose={close} />;
+    case 'tavern': return <TavernPanel town={town} onHired={refresh} onClose={close} />;
+    case 'smith': return <BlacksmithWindow town={town} onChanged={refresh} onClose={close} />;
+    case 'transform': return <TransformerWindow town={town} creatures={creatures} onChanged={refresh} onClose={close} />;
+    case 'tower': return <TowerPanel town={town} onClose={close} />;
+    case 'wall': return <WallPanel town={town} onClose={close} />;
+    case 'info': {
+      const b = buildings.find((d) => d.key === view.key);
+      return b ? <BuildingDialog town={town} building={b} byKey={new Map(buildings.map((d) => [d.key, d]))}
+        state={town.buildings.includes(b.key) ? 'built' : undefined} onClose={close} /> : null;
+    }
+  }
 }
 
 const lastBuilt = (chain: string[], built: Set<string>) => chain.reduce((acc, k, i) => (built.has(k) ? i : acc), -1);
 const RES_X: Record<string, number> = { wood: 37, mercury: 121, ore: 205, sulfur: 289, crystal: 373, gems: 457, gold: 541 };
 
-/** Which panel a clicked structure opens. */
-const KEY_TAB: Record<string, Tab> = {
-  fort: 'garrison', citadel: 'garrison', castle: 'garrison',
-  dwelling1: 'recruit', dwelling2: 'recruit', dwelling3: 'recruit', dwelling4: 'recruit',
-  dwelling5: 'recruit', dwelling6: 'recruit', dwelling7: 'recruit',
-  grail: 'build', resourceSilo: 'market', marketplace: 'market',
-  mageGuild1: 'guild', mageGuild2: 'guild', mageGuild3: 'guild', mageGuild4: 'guild', mageGuild5: 'guild',
-  blacksmith: 'build', tavern: 'tavern',
-  villageHall: 'build', townHall: 'build', cityHall: 'build', capitol: 'build'
-};
-const tabFor = (key: string): Tab => KEY_TAB[key] ?? KEY_TAB[key.replace(/^upg/, 'dwelling')] ?? 'build';
-
+/** The window a clicked structure opens, as in HoMM3. */
+function viewFor(key: string, faction: string): View {
+  if (/^(villageHall|townHall|cityHall|capitol)$/.test(key)) return { kind: 'hall' };
+  if (/^(fort|citadel|castle)$/.test(key)) return { kind: 'fort' };
+  const d = /^(?:dwelling|upg)(\d)$/.exec(key);
+  if (d) return { kind: 'recruit', tier: +d[1] };
+  const horde = HORDE_TIER[faction]?.[key];
+  if (horde) return { kind: 'recruit', tier: horde };
+  if (key.startsWith('mageGuild')) return { kind: 'guild' };
+  if (key === 'blacksmith') return { kind: 'smith' };
+  if (key === 'marketplace') return { kind: 'market' };
+  // Castle's Brotherhood of the Sword is part of the tavern
+  if (key === 'tavern' || (faction === 'castle' && key === 'special3')) return { kind: 'tavern' };
+  if (faction === 'necropolis' && key === 'special3') return { kind: 'transform' };
+  return { kind: 'info', key };
+}
 /** HoMM3 town screen: the painted 800×374 scene with the original structures, over the townscrn.pcx panel. */
 function TownH3(props: {
   town: TownDetail; buildings: BuildingDef[]; creatures: Record<string, CreatureDef>;
-  onTab: (t: Tab) => void; onExit: () => void;
+  onView: (v: View) => void; onChanged: () => void; onHero: (id: string) => void; onExit: () => void;
 }) {
-  const { town, buildings, creatures, onTab, onExit } = props;
+  const { town, buildings, creatures, onView, onChanged, onHero, onExit } = props;
+  const open = (v: View) => onView(town.isOwner ? v : { kind: 'tower' });
   const canvas = useRef<HTMLCanvasElement>(null);
   const [tick, setTick] = useState(0);
   const [, setLoaded] = useState(0);
@@ -152,7 +162,6 @@ function TownH3(props: {
   const hallLevel = Math.max(0, lastBuilt(['villageHall', 'townHall', 'cityHall', 'capitol'], built));
   const fortLevel = lastBuilt(['fort', 'citadel', 'castle'], built);
   const growth = town.available.filter((a) => a.creature);
-  const garrison = (town.garrison ?? []).slice(0, 7);
   const label = (text: string) => setRollover(text);
 
   return (
@@ -160,13 +169,13 @@ function TownH3(props: {
       <div className="town-scene" style={{ position: 'absolute', left: 0, top: 0, width: 800, height: 374, cursor: hover ? 'pointer' : 'default' }}
         onMouseMove={(e) => { const k = hit(e); setHover(k); setRollover(k ? name(k) : null); }}
         onMouseLeave={() => { setHover(null); setRollover(null); }}
-        onClick={(e) => { const k = hit(e); if (k) onTab(town.isOwner ? tabFor(k) : 'tower'); }}>
+        onClick={(e) => { const k = hit(e); if (k) open(viewFor(k, town.faction)); }}>
         <Pcx name={TOWN_BACK[town.faction] ?? 'tbcsback'} x={0} y={0} alt={`${FACTION_LABEL[town.faction]} town`} />
         <canvas ref={canvas} width={800} height={374} style={{ position: 'absolute', left: 0, top: 0 }} />
         {structures.filter((s) => !s.key.startsWith('extra')).map(({ key, s }) => (
           <button key={key} className="abs h3hit" data-building-slot={key} aria-label={`Open ${name(key)}`}
             style={{ left: s[1], top: s[2], width: 1, height: 1, opacity: 0 }}
-            onClick={(e) => { e.stopPropagation(); onTab(town.isOwner ? tabFor(key) : 'tower'); }} />
+            onClick={(e) => { e.stopPropagation(); open(viewFor(key, town.faction)); }} />
         ))}
       </div>
 
@@ -176,12 +185,12 @@ function TownH3(props: {
       <div className="abs h3text" style={{ left: 79, top: 389, width: 147, textAlign: 'center', fontSize: 13 }}>{town.name}</div>
       <button className="abs h3hit" style={{ left: 80, top: 413, width: 38, height: 38 }} aria-label="Hall"
         onMouseEnter={() => label(name(['villageHall', 'townHall', 'cityHall', 'capitol'][hallLevel]))} onMouseLeave={() => setRollover(null)}
-        onClick={() => onTab(town.isOwner ? 'build' : 'tower')}>
+        onClick={() => open({ kind: 'hall' })}>
         <DefImg name="ITMTL" frame={hallLevel} x={0} y={0} />
       </button>
       <button className="abs h3hit" style={{ left: 122, top: 413, width: 38, height: 38 }} aria-label="Fort"
         onMouseEnter={() => label(fortLevel >= 0 ? name(['fort', 'citadel', 'castle'][fortLevel]) : 'No fort')} onMouseLeave={() => setRollover(null)}
-        onClick={() => onTab(town.isOwner ? 'garrison' : 'tower')}>
+        onClick={() => open({ kind: 'fort' })}>
         <DefImg name="ITMCL" frame={fortLevel >= 0 ? fortLevel : 3} x={0} y={0} />
       </button>
       <div className="abs h3text" title={`Creature growth ×${town.growthMultiplier}`}
@@ -193,20 +202,16 @@ function TownH3(props: {
           title={`${creatures[a.creature!]?.name ?? a.creature}: ${a.count} available`}
           style={{ left: 14 + 55 * (i % 4), top: 459 + 46 * Math.floor(i / 4), width: 48, height: 32 }}
           onMouseEnter={() => label(`${creatures[a.creature!]?.name ?? a.creature}: ${a.count} available`)} onMouseLeave={() => setRollover(null)}
-          onClick={() => onTab(town.isOwner ? 'recruit' : 'tower')}>
+          onClick={() => open({ kind: 'recruit', tier: a.tier })}>
           <DefImg name="CPRSMALL" frame={creaturePortraitFrame(a.creature!)} x={8} y={0} />
           <div className="abs h3text" style={{ right: 1, bottom: -1, fontSize: 10 }}>{a.count}</div>
         </button>
       ))}
 
-      {/* garrison row */}
-      {garrison.map((g, i) => g && g.creature ? (
-        <div key={i} className="abs" style={{ left: 305 + 62 * i, top: 387, width: 58, height: 64 }}
-          onMouseEnter={() => label(`${creatures[g.creature!]?.name ?? g.creature} ×${g.count}`)} onMouseLeave={() => setRollover(null)}>
-          <DefImg name="TWCRPORT" frame={creaturePortraitFrame(g.creature)} x={0} y={0} />
-          <div className="abs h3text" style={{ right: 3, bottom: 1, fontSize: 11 }}>{g.count}</div>
-        </div>
-      ) : null)}
+      {/* Creature slots, as in HoMM3's townscrn.pcx: a portrait box at x=241 then 7 slots at
+          x=305+62·i; the garrison row is on top (y=387), the visiting hero's army below (y=483). */}
+      <DefImg name="CREST58" frame={FACTION_PLAYER_COLOR[town.faction] ?? 0} x={241} y={387} title="Town garrison" />
+      <ArmyBar town={town} creatures={creatures} label={label} clear={() => setRollover(null)} onChanged={onChanged} onHero={onHero} />
 
       {/* town list + exit */}
       <DefImg name="ITPA" frame={townListFrame(town.faction)} x={747} y={430} />
@@ -217,11 +222,11 @@ function TownH3(props: {
       <button className="abs h3hit" style={{ left: 747, top: 430, width: 48, height: 48 }} aria-label="Tower"
         title="Magic Tower — the town's visitor board"
         onMouseEnter={() => label('Magic Tower')} onMouseLeave={() => setRollover(null)}
-        onClick={() => onTab('tower')} />
+        onClick={() => onView({ kind: 'tower' })} />
       <button className="abs h3hit" style={{ left: 747, top: 482, width: 48, height: 48 }} aria-label="Wall"
         title="City Wall — leave a message"
         onMouseEnter={() => label('City Wall')} onMouseLeave={() => setRollover(null)}
-        onClick={() => onTab('wall')} />
+        onClick={() => onView({ kind: 'wall' })} />
 
       <div className="abs h3text" style={{ left: 7, top: 556, width: 737, height: 18, textAlign: 'center', fontSize: 12, lineHeight: '18px' }}>
         {rollover ?? `${FACTION_LABEL[town.faction]} · ${town.ownerName}${town.isOwner ? '' : ' · visiting'}`}
@@ -234,335 +239,232 @@ function TownH3(props: {
   );
 }
 
-/** HoMM3 Hall of the town: one card per building chain, showing the next structure to raise. */
-const CHAINS: string[][] = [
-  ['villageHall', 'townHall', 'cityHall', 'capitol'],
-  ['fort', 'citadel', 'castle'],
-  ['mageGuild1', 'mageGuild2', 'mageGuild3', 'mageGuild4', 'mageGuild5'],
-  ['tavern'], ['blacksmith'], ['marketplace'], ['resourceSilo'], ['grail'],
-  ['dwelling1', 'upg1'], ['dwelling2', 'upg2'], ['dwelling3', 'upg3'], ['dwelling4', 'upg4'],
-  ['dwelling5', 'upg5'], ['dwelling6', 'upg6'], ['dwelling7', 'upg7']
-];
+type Army = 'hero' | 'garrison';
+type SlotRef = { army: Army; slot: number };
 
-type CardState = 'built' | 'ready' | 'locked' | 'poor';
-const STATE_COLOR: Record<CardState, string> = {
-  built: '#8a6c14', ready: '#2a7a2a', locked: '#7a1a14', poor: '#7a4a14'
-};
-
-function BuildPanel(props: {
-  town: TownDetail; buildings: BuildingDef[]; built: Set<string>;
-  onBuilt: () => void; onClose: () => void;
+/**
+ * The garrison (top) and visiting hero (bottom) rows of the HoMM3 town screen. Click a stack to
+ * select it, then click another slot to move it there, merge with the same creature, or swap.
+ * Click the selected stack again for its info and upgrade; Split (or shift-click) divides a stack.
+ */
+function ArmyBar(props: {
+  town: TownDetail; creatures: Record<string, CreatureDef>;
+  label: (t: string) => void; clear: () => void; onChanged: () => void; onHero: (id: string) => void;
 }) {
-  const { town, buildings, built, onBuilt, onClose } = props;
-  const [selected, setSelected] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const res = town.resources;
-  const byKey = new Map(buildings.map((b) => [b.key, b]));
-  const sel = (selected && byKey.get(selected)) || null;
-  const name = (b: BuildingDef) => buildingName(b.key, town.faction, b.name);
+  const { town, creatures, label, clear, onChanged, onHero } = props;
+  const [sel, setSel] = useState<SlotRef | null>(null);
+  const [splitting, setSplitting] = useState(false);
+  const [split, setSplit] = useState<{ from: SlotRef; to: SlotRef } | null>(null);
+  const [info, setInfo] = useState<SlotRef | null>(null);
+  const hero = town.heroInTown;
+  const rows: Record<Army, ArmySlot[]> = { garrison: town.garrison ?? [], hero: hero?.army ?? [] };
+  const stackAt = (r: SlotRef): ArmySlot | null => {
+    const s = rows[r.army][r.slot];
+    return s && s.creature && s.count > 0 ? s : null;
+  };
+  const cname = (s: ArmySlot) => creatures[s.creature!]?.name ?? s.creature!;
 
-  const canAfford = (b: BuildingDef) => RES_ORDER.every((r) => res[r] >= b.cost[r]);
-  const prereqMet = (b: BuildingDef) => b.requires.every((r) => built.has(r));
-  const stateOf = (b: BuildingDef): CardState =>
-    built.has(b.key) ? 'built' : !prereqMet(b) ? 'locked' : !canAfford(b) ? 'poor' : 'ready';
-
-  // one card per chain: the next structure to raise, or the top tier once the chain is complete
-  const cards = CHAINS
-    .map((chain) => chain.map((k) => byKey.get(k)).filter((b): b is BuildingDef => !!b))
-    .filter((chain) => chain.length > 0)
-    .map((chain) => chain.find((b) => !built.has(b.key)) ?? chain[chain.length - 1]);
-
-  const builtCount = buildings.filter((b) => built.has(b.key)).length;
-
-  async function doBuild() {
-    if (!sel) return;
-    setBusy(true);
-    try {
-      await api.build(town.id, sel.key);
-      toast('Built ' + name(sel) + '.');
-      onBuilt();
-    } catch (e) {
-      toast(e instanceof ApiError ? e.message : 'Something went wrong.');
-    } finally { setBusy(false); }
+  async function move(from: SlotRef, to: SlotRef, count = 0) {
+    try { await api.moveArmy(town.id, from.army, from.slot, to.army, to.slot, count); onChanged(); }
+    catch (e) { toast(e instanceof ApiError ? e.message : 'Something went wrong.'); }
   }
 
+  function click(r: SlotRef, shift: boolean) {
+    if (!town.isOwner) return;
+    if (r.army === 'hero' && !hero) return;
+    const here = stackAt(r);
+    if (!sel) {
+      if (here) { setSel(r); setSplitting(shift); }
+      return;
+    }
+    if (sel.army === r.army && sel.slot === r.slot) {
+      setSel(null); setSplitting(false); setInfo(r);
+      return;
+    }
+    const src = stackAt(sel);
+    setSel(null);
+    if (!src) return;
+    if (splitting || shift) {
+      setSplitting(false);
+      if (here && here.creature !== src.creature) { toast('Split onto an empty slot or the same creature.'); return; }
+      setSplit({ from: sel, to: r });
+      return;
+    }
+    move(sel, r);
+  }
+
+  const hint = (r: SlotRef) => {
+    const here = stackAt(r);
+    const src = sel && stackAt(sel);
+    if (src && !(sel!.army === r.army && sel!.slot === r.slot)) {
+      if (!here) return `Move ${cname(src)}`;
+      return here.creature === src.creature ? `Combine ${cname(src)}` : `Swap ${cname(src)} with ${cname(here)}`;
+    }
+    if (here) return sel ? `View ${cname(here)}` : `Select ${cname(here)} (×${here.count})`;
+    return r.army === 'hero' ? (hero ? 'Empty' : 'No hero visiting') : 'Empty';
+  };
+
+  const slot = (army: Army, i: number, y: number) => {
+    const r = { army, slot: i };
+    const s = stackAt(r);
+    const on = sel?.army === army && sel.slot === i;
+    return (
+      <div key={`${army}-${i}`} className="abs h3hit" data-army={army} data-slot={i}
+        {...(army === 'hero' ? { 'data-hero-slot': i } : { 'data-garrison-slot': i })}
+        style={{ left: 305 + i * 62, top: y, width: 58, height: 64,         cursor: town.isOwner ? 'pointer' : 'default' }}
+        onMouseEnter={() => label(hint(r))} onMouseLeave={clear}
+        onClick={(e) => click(r, e.shiftKey)}>
+        {s && <DefImg name="TWCRPORT" frame={creaturePortraitFrame(s.creature!)} x={0} y={0} />}
+        {s && <div className="abs h3text" style={{ right: 3, bottom: 1, fontSize: 11 }}>{s.count}</div>}
+        {on && <div className="abs" data-selected style={{ left: 0, top: 0, right: 0, bottom: 0, border: '2px solid #f8d870', pointerEvents: 'none' }} />}
+      </div>
+    );
+  };
+
+  const splitSrc = split && stackAt(split.from);
+  const splitDst = split && stackAt(split.to);
+  const infoStack = info && stackAt(info);
+
   return (
-    <Modal w={780} h={570} onClose={onClose}>
-      <Txt x={0} y={8} w={780} size={16} bold align="center" className="heading">HALL OF {town.name.toUpperCase()}</Txt>
-      <Txt x={0} y={30} w={780} size={10} align="center" color="var(--text-dim)">
-        {builtCount} structures built · {town.builtThisTurn ? 'already built this turn' : 'one structure per turn'}
-      </Txt>
-
-      {cards.map((b, i) => {
-        const st = stateOf(b);
-        return (
-          <div key={b.key} data-building={b.key} className={'card' + (selected === b.key ? ' selected' : '')}
-            title={name(b)}
-            style={{ left: 14 + (i % 5) * 152, top: 48 + Math.floor(i / 5) * 116, width: 144, height: 110 }}
-            onClick={() => setSelected(b.key)}>
-            <div className="frame" />
-            <img src={assetFor(b.key)} alt="" width={120} height={84}
-              style={{ position: 'absolute', left: 12, top: 3, objectFit: 'contain' }}
-              onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }} />
-            <div className="bar" style={{ background: STATE_COLOR[st] }}>{name(b)}</div>
-          </div>
-        );
-      })}
-
-      <Panel x={14} y={402} w={752} h={154}>
-        {sel ? (
-          <>
-            <Txt x={14} y={10} w={500} size={14} bold>{name(sel)}</Txt>
-            <Txt x={14} y={32} w={500} size={11} color="var(--text-dim)" style={{ lineHeight: 1.4 }}>{sel.description}</Txt>
-            <Txt x={14} y={68} w={500} size={11}>
-              <span className="muted">Requires: </span>
-              {sel.requires.length
-                ? sel.requires.map((r) => {
-                    const d = byKey.get(r);
-                    return <span key={r} style={{ color: built.has(r) ? 'var(--text)' : '#e06050' }}>{d ? name(d) : r} </span>;
-                  })
-                : '—'}
-            </Txt>
-            <div style={{ position: 'absolute', left: 14, top: 96, display: 'flex', gap: 14 }}>
-              {RES_ORDER.filter((r) => sel.cost[r] > 0).map((r) => (
-                <div key={r} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, fontWeight: 'bold',
-                  color: res[r] >= sel.cost[r] ? 'var(--text)' : '#e06050' }}>
-                  <ResIcon r={r} size={22} />{sel.cost[r]}
-                </div>
-              ))}
-              {RES_ORDER.every((r) => !sel.cost[r]) && <span className="muted">Free</span>}
-            </div>
-            <Btn x={596} y={100} w={140} h={36}
-              label={busy ? '…' : built.has(sel.key) ? 'Built' : 'Build'}
-              disabled={busy || built.has(sel.key) || !prereqMet(sel) || !canAfford(sel)}
-              onClick={doBuild} />
-          </>
-        ) : (
-          <Txt x={0} y={66} w={752} size={11} align="center" color="var(--text-mute)">
-            Choose a structure. Gold bar: built · green: can build · red: needs other buildings · brown: not enough resources.
-          </Txt>
-        )}
-      </Panel>
-    </Modal>
+    <>
+      <DefImg name="CREST58" frame={FACTION_PLAYER_COLOR[town.faction] ?? 0} x={241} y={387} title="Town garrison" />
+      {hero && (
+        <button className="abs h3hit" data-hero-portrait style={{ left: 241, top: 483, width: 58, height: 64, padding: 0, border: 0, background: 'none' }}
+          aria-label={`View ${hero.name}`}
+          onMouseEnter={() => label(`View ${hero.name}`)} onMouseLeave={clear}
+          onClick={() => onHero(hero.id)}>
+          <Pcx name={heroPortrait(hero.heroKey || hero.name, town.faction, 'large')} x={0} y={0} alt={hero.name} />
+        </button>
+      )}
+      {[0, 1, 2, 3, 4, 5, 6].map((i) => slot('garrison', i, 387))}
+      {[0, 1, 2, 3, 4, 5, 6].map((i) => slot('hero', i, 483))}
+      {town.isOwner && (
+        <DefButton def="TSBTNS" x={744} y={382} w={48} h={28} label="Split"
+          disabled={!sel} onHover={(on) => (on ? label('Split: select a stack, then the slot to move part of it to') : clear())}
+          onClick={() => setSplitting(true)} />
+      )}
+      {split && splitSrc && (
+        <SplitDialog name={cname(splitSrc)} total={splitSrc.count} target={splitDst?.count ?? 0}
+          onClose={() => setSplit(null)}
+          onSplit={(n) => { const s = split; setSplit(null); move(s.from, s.to, n); }} />
+      )}
+      {info && infoStack && (
+        <CreatureInfo town={town} creatures={creatures} army={info.army} slot={info.slot} stack={infoStack}
+          onChanged={onChanged} onClose={() => setInfo(null)} />
+      )}
+    </>
   );
 }
+
+/**
+ * HoMM3 recruit window (TPRCRT.pcx, 485×395) for one dwelling: the base creature and, once the
+ * dwelling is upgraded, the upgraded one; cost per troop / available / recruit / total cost,
+ * a slider, and Max · Buy · Cancel. Recruits join the garrison (or the visiting hero if it is full).
+ */
 function RecruitPanel(props: {
-  town: TownDetail; creatures: Record<string, CreatureDef>;
+  town: TownDetail; creatures: Record<string, CreatureDef>; tier: number;
   onRecruited: () => void; onClose: () => void;
 }) {
   const { town, creatures, onRecruited, onClose } = props;
   const [busy, setBusy] = useState(false);
-  const [tier, setTier] = useState(1);
-  const [qty, setQty] = useState(1);
-  const gold = town.resources.gold;
+  const row = town.available.find((a) => a.tier === props.tier) ?? town.available[0];
+  const choices = [row?.creature, row?.upgradeBuilt ? row.upgraded : null].filter((k): k is string => !!k);
+  const [pick, setPick] = useState(choices[choices.length - 1] ?? '');
+  const [qty, setQty] = useState(0);
+  const res = town.resources;
 
-  const row = town.available.find((a) => a.tier === tier) ?? town.available[0];
-  const c = row?.creature ? creatures[row.creature] : null;
-  const unit = c?.gold ?? 0;
-  const affordable = unit > 0 ? Math.floor(gold / unit) : 0;
-  const max = Math.min(row?.count ?? 0, affordable);
-  const total = unit * qty;
-  const canBuy = !!row?.dwellingBuilt && (row?.count ?? 0) > 0 && qty > 0 && qty <= max;
+  const c = creatures[pick] ?? null;
+  const cost = c?.cost ?? null;
+  const costRes = cost ? RES_ORDER.filter((r) => cost[r] > 0) : [];
+  const affordable = cost && costRes.length ? Math.min(...costRes.map((r) => Math.floor(res[r] / cost[r]))) : 0;
+  const max = row?.dwellingBuilt ? Math.min(row.count, affordable) : 0;
+  const n = Math.min(qty, max);
+  const canBuy = !!row?.dwellingBuilt && n > 0;
 
-  useEffect(() => { setQty(1); }, [tier]);
+  // HoMM3 sends recruits to the garrison; if it has no room they join the visiting hero
+  const fits = (army: ArmySlot[] | undefined) => !!army && army.slice(0, 7).some((s) => !s.creature || s.count <= 0 || s.creature === pick);
+  const dest = fits(town.garrison) ? 'Joins the town garrison'
+    : town.heroInTown && fits(town.heroInTown.army) ? `Garrison is full: joins ${town.heroInTown.name}'s army`
+    : 'No free slot in the garrison';
+
+  useEffect(() => { setQty(0); }, [pick]);
 
   async function recruit() {
-    if (!row) return;
+    if (!row || n < 1) return;
     setBusy(true);
     try {
-      const r = await api.recruit(town.id, row.tier, qty);
+      const r = await api.recruit(town.id, row.tier, n, pick);
       toast(`Recruited ${r.recruited} ${creatures[r.creature]?.name ?? r.creature}.`);
+      setQty(0);
       onRecruited();
     } catch (e) {
       toast(e instanceof ApiError ? e.message : 'Something went wrong.');
     } finally { setBusy(false); }
   }
 
-  // The recruit PCX is a dark interior too: light text, buttons on the light band at y≈492.
   const ink = '#f0e0b0';
-  const dim = '#c0a878';
-
-  return (
-    <Modal w={395} h={521} onClose={onClose}>
-      <ScreenBackdrop name="tpubuild" w={395} h={521} alt="Recruit" />
-
-      {/* creature portrait */}
-      <div style={{ position: 'absolute', left: 22, top: 18, width: 64, height: 64, overflow: 'hidden' }}>
-        {c && <DefImg name="CPRSMALL" frame={creaturePortraitFrame(c.key)} x={0} y={0} />}
-      </div>
-
-      <Txt x={96} y={22} w={270} size={14} bold color={ink}>{c?.name ?? '—'}</Txt>
-      <Txt x={96} y={44} w={270} size={10} color={dim}>
-        {c ? `Tier ${c.tier} · ${c.gold} gold each` : ''}
-      </Txt>
-
-      <Txt x={24} y={100} w={120} size={10} color={dim}>Available</Txt>
-      <Txt x={150} y={100} w={80} size={11} bold color={ink}>{row?.count ?? 0}</Txt>
-      <Txt x={24} y={120} w={120} size={10} color={dim}>Attack</Txt>
-      <Txt x={150} y={120} w={80} size={11} bold color={ink}>{c?.attack ?? '—'}</Txt>
-      <Txt x={24} y={140} w={120} size={10} color={dim}>Defense</Txt>
-      <Txt x={150} y={140} w={80} size={11} bold color={ink}>{c?.defense ?? '—'}</Txt>
-      <Txt x={24} y={160} w={120} size={10} color={dim}>Damage</Txt>
-      <Txt x={150} y={160} w={80} size={11} bold color={ink}>{c ? `${c.damageMin}-${c.damageMax}` : '—'}</Txt>
-      <Txt x={24} y={180} w={120} size={10} color={dim}>Health</Txt>
-      <Txt x={150} y={180} w={80} size={11} bold color={ink}>{c?.health ?? '—'}</Txt>
-      <Txt x={24} y={200} w={120} size={10} color={dim}>Speed</Txt>
-      <Txt x={150} y={200} w={80} size={11} bold color={ink}>{c?.speed ?? '—'}</Txt>
-
-      {/* tier selector */}
-      <Txt x={24} y={236} w={340} size={10} color={dim}>Creature</Txt>
-      {town.available.map((a, i) => {
-        const cc = a.creature ? creatures[a.creature] : null;
-        const on = a.tier === tier;
-        return (
-          <button key={a.tier} data-tier={a.tier}
-            className={'abs h3hit' + (on ? ' h3slot' : '')}
-            style={{ left: 24 + i * 50, top: 254, width: 44, height: 44, overflow: 'hidden',
-              border: on ? '2px solid #f0d060' : '1px solid #6a5030', background: 'rgba(0,0,0,0.45)' }}
-            title={cc?.name ?? `Tier ${a.tier}`}
-            onClick={() => setTier(a.tier)}>
-            {cc && <DefImg name="CPRSMALL" frame={creaturePortraitFrame(cc.key)} x={0} y={0} />}
-          </button>
-        );
-      })}
-
-      {/* quantity */}
-      <Txt x={24} y={314} w={340} size={10} color={dim}>Quantity</Txt>
-      <Btn x={24} y={332} w={44} h={28} label="1" size={11} disabled={busy} onClick={() => setQty(1)} />
-      <Btn x={72} y={332} w={44} h={28} label="10" size={11} disabled={busy} onClick={() => setQty(Math.min(10, Math.max(1, max)))} />
-      <Btn x={120} y={332} w={60} h={28} label="Max" size={11} disabled={busy || max < 1} onClick={() => setQty(Math.max(1, max))} />
-      <Txt x={192} y={338} w={180} size={11} bold color={ink}>{qty}</Txt>
-
-      {/* cost */}
-      <div style={{ position: 'absolute', left: 24, top: 380, display: 'flex', alignItems: 'center', gap: 6 }}>
-        <ResIcon r="gold" size={22} />
-        <span style={{ fontSize: 14, fontWeight: 'bold', color: total <= gold ? ink : '#e06050' }}>{total}</span>
-      </div>
-
-      {!row?.dwellingBuilt && (
-        <Txt x={24} y={410} w={340} size={10} color={dim}>Dwelling not built.</Txt>
-      )}
-
-      {/* buttons on the light band at y≈492 */}
-      <Btn x={24} y={496} w={120} h={34} label={busy ? '…' : 'Buy'} size={12}
-        disabled={busy || !canBuy} onClick={recruit} />
-      <Btn x={251} y={496} w={120} h={34} label="Exit" size={12} onClick={onClose} />
-    </Modal>
-  );
-}
-
-function MarketPanel(props: { town: TownDetail; onTraded: () => void; onClose: () => void }) {
-  const { town, onTraded, onClose } = props;
-  const res = town.resources;
-  const resources = ['wood', 'ore', 'mercury', 'sulfur', 'crystal', 'gems'] as const;
-  const [busy, setBusy] = useState(false);
-  const [qty, setQty] = useState(1);
-  const [sel, setSel] = useState<typeof resources[number]>('wood');
-
-  async function trade(from: string, to: string) {
-    setBusy(true);
-    try { await api.trade(town.id, from, to, qty); onTraded(); }
-    catch (e) { toast(e instanceof ApiError ? e.message : 'Something went wrong.'); }
-    finally { setBusy(false); }
-  }
-
-  const buyCost = 500 * qty;
-  const sellGain = 250 * qty;
-
-  // The trade PCX is a dark interior: light text throughout.
-  const ink = '#f0e0b0';
-  const dim = '#c0a878';
-
-  return (
-    <Modal w={800} h={600} onClose={onClose}>
-      <ScreenBackdrop name="trade" w={800} h={600} alt="Marketplace" />
-
-      <Txt x={0} y={16} w={800} size={16} bold align="center" color={ink}>MARKETPLACE</Txt>
-
-      {/* resource grid: pick what to trade */}
-      {resources.map((r, i) => {
-        const on = sel === r;
-        return (
-          <button key={r} data-resource={r} className="abs h3hit"
-            style={{ left: 60 + i * 112, top: 60, width: 96, height: 96,
-              border: on ? '2px solid #f0d060' : '1px solid #6a5030',
-              background: on ? 'rgba(200,160,80,0.25)' : 'rgba(0,0,0,0.45)' }}
-            title={r} onClick={() => setSel(r)}>
-            <div style={{ position: 'absolute', left: 28, top: 8 }}><ResIcon r={r} size={40} /></div>
-            <div style={{ position: 'absolute', left: 0, right: 0, bottom: 6, textAlign: 'center', fontSize: 11, fontWeight: 'bold', color: ink }}>
-              {res[r]}
-            </div>
-          </button>
-        );
-      })}
-
-      {/* quantity */}
-      <Txt x={60} y={180} w={200} size={11} color={dim}>Quantity</Txt>
-      {[1, 5, 10].map((n, i) => (
-        <Btn key={n} x={60 + i * 60} y={200} w={52} h={30} label={String(n)} size={11}
-          disabled={busy} onClick={() => setQty(n)} />
+  const gilt = '#f8d870';
+  const costBox = (mult: number, x: number) => (
+    <div className="abs" style={{ left: x, top: 244, width: 96, display: 'flex', justifyContent: 'center', gap: 6 }}>
+      {costRes.map((r) => (
+        <div key={r} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', fontSize: 12, fontWeight: 'bold',
+          color: res[r] >= cost![r] * Math.max(1, mult) ? ink : '#e06050' }}>
+          <ResIcon r={r} size={26} /><span style={{ marginTop: 8 }}>{cost![r] * mult}</span>
+        </div>
       ))}
-      <Txt x={250} y={208} w={200} size={12} bold color={ink}>{qty} {sel}</Txt>
-
-      {/* gold on hand */}
-      <div style={{ position: 'absolute', left: 60, top: 250, display: 'flex', alignItems: 'center', gap: 8 }}>
-        <ResIcon r="gold" size={26} />
-        <span style={{ fontSize: 16, fontWeight: 'bold', color: ink }}>{res.gold}</span>
-      </div>
-
-      {/* the two trades */}
-      <Btn x={60} y={300} w={200} h={40} label={`Sell ${qty} for ${sellGain}g`} size={12}
-        disabled={busy || res[sel] < qty} onClick={() => trade(sel, 'gold')} />
-      <Btn x={280} y={300} w={200} h={40} label={`Buy ${qty} for ${buyCost}g`} size={12}
-        disabled={busy || res.gold < buyCost} onClick={() => trade('gold', sel)} />
-
-      <Txt x={60} y={356} w={420} size={10} color={dim}>
-        Sell rate 250 gold · Buy rate 500 gold per unit.
-      </Txt>
-
-      <Btn x={640} y={540} w={120} h={34} label="Exit" size={12} onClick={onClose} />
-    </Modal>
+    </div>
   );
-}
-
-function GuildPanel(props: { town: TownDetail; onClose: () => void }) {
-  const { town, onClose } = props;
-  const [spells, setSpells] = useState<Record<string, SpellDef>>({});
-
-  useEffect(() => {
-    api.getSpells().then((ss) => {
-      const m: Record<string, SpellDef> = {};
-      for (const s of ss) m[s.key] = s;
-      setSpells(m);
-    }).catch(() => {});
-  }, []);
-
-  const known = town.mageGuild.map((k) => spells[k]).filter((s): s is SpellDef => !!s);
 
   return (
-    <Modal w={600} h={420} onClose={onClose}>
-      <Txt x={0} y={10} w={600} size={16} bold align="center" className="heading">MAGE GUILD</Txt>
-      {town.mageGuild.length === 0 ? (
-        <Txt x={0} y={180} w={600} size={11} align="center" color="var(--text-mute)">
-          No Mage Guild built yet.
+    <Modal w={485} h={395} onClose={onClose}>
+      <ScreenBackdrop name="TPRCRT" w={485} h={395} alt="Recruit" />
+      <Txt x={0} y={22} w={485} size={14} bold align="center" color={gilt}>
+        {c ? `Recruit ${c.name}` : 'Recruit Creatures'}
+      </Txt>
+
+      {/* the dwelling's creatures: base and (once built) upgraded */}
+      {choices.map((k, i) => {
+        const cc = creatures[k];
+        const on = k === pick;
+        const x = Math.round(485 / 2 - (choices.length * 110) / 2 + i * 110 + 20);
+        return (
+          <button key={k} data-recruit-creature={k} className="abs h3hit"
+            style={{ left: x, top: 50, width: 70, height: 92, padding: 0,
+              border: on ? `2px solid ${gilt}` : '1px solid #6a5030', background: 'rgba(0,0,0,0.35)' }}
+            title={cc?.name ?? k} onClick={() => setPick(k)}>
+            {cc && <DefImg name="TWCRPORT" frame={creaturePortraitFrame(cc.key)} x={5} y={4} />}
+            <div className="abs h3text" style={{ left: 0, top: 72, width: 66, textAlign: 'center', fontSize: 10 }}>{cc?.name ?? k}</div>
+          </button>
+        );
+      })}
+
+      {c && (
+        <Txt x={20} y={152} w={445} size={11} align="center" color={ink}>
+          {`Attack ${c.attack} · Defense ${c.defense} · Damage ${c.damageMin}-${c.damageMax} · Health ${c.health} · Speed ${c.speed}`}
         </Txt>
-      ) : (
-        <>
-          <Txt x={24} y={40} w={552} size={10} color="var(--text-dim)">
-            {known.length} spell{known.length === 1 ? '' : 's'} known
-          </Txt>
-          {known.map((s, i) => (
-            <Panel key={s.key} x={24} y={62 + i * 62} w={552} h={56}>
-              <Txt x={12} y={8} size={12} bold>{s.name}</Txt>
-              <Txt x={12} y={26} w={400} size={10} color="var(--text-dim)">{s.description}</Txt>
-              <Txt x={12} y={42} w={400} size={9} color="var(--text-mute)">
-                Level {s.level} · {s.school} · {s.cost} spell points
-              </Txt>
-            </Panel>
-          ))}
-        </>
       )}
-      <Btn x={456} y={368} w={120} h={34} label="Exit" size={12} onClick={onClose} />
+      <Txt x={20} y={172} w={445} size={11} align="center" color={ink}>
+        {!row?.dwellingBuilt ? `${row?.dwellingName ?? 'Dwelling'} is not built.` : `${dest} · ${row.growth} per week`}
+      </Txt>
+
+      <Txt x={65} y={226} w={96} size={11} align="center" color={ink}>Cost Per Troop</Txt>
+      {costBox(1, 65)}
+
+      <Txt x={174} y={226} w={64} size={11} align="center" color={ink}>Available</Txt>
+      <Txt x={174} y={246} w={64} size={12} bold align="center" color={ink}>{row?.count ?? 0}</Txt>
+      <Txt x={248} y={226} w={64} size={11} align="center" color={ink}>Recruit</Txt>
+      <Txt x={248} y={246} w={64} size={12} bold align="center" color={ink} data-recruit-count>{n}</Txt>
+
+      <Txt x={323} y={226} w={96} size={11} align="center" color={ink}>Total Cost</Txt>
+      {costBox(n, 323)}
+
+      <input type="range" aria-label="Recruit count" min={0} max={Math.max(0, max)} value={n} disabled={max < 1}
+        onChange={(e) => setQty(Number(e.target.value))}
+        style={{ position: 'absolute', left: 176, top: 279, width: 135, height: 16, margin: 0, accentColor: gilt }} />
+
+      <DefButton def="IRCBTNS" x={134} y={313} label="Max" disabled={busy || max < 1} onClick={() => setQty(max)} />
+      <DefButton def="IBY6432" x={212} y={313} label="Buy" disabled={busy || !canBuy} onClick={recruit} />
+      <DefButton def="ICN6432" x={290} y={313} label="Cancel" onClick={onClose} />
     </Modal>
   );
 }
@@ -601,8 +503,8 @@ function TavernPanel(props: { town: TownDetail; onHired: () => void; onClose: ()
     } finally { setBusy(false); }
   }
 
-  // The tavern PCX is a dark wooden interior: text must be light, and the
-  // portrait sits in the upper-left window.
+  // tptavern is a dark wooden interior (mean luminance 16-57): text must be
+  // light, and the portrait sits in the upper-left window.
   const ink = '#f0e0b0';
   const dim = '#c0a878';
 
@@ -654,85 +556,13 @@ function TavernPanel(props: { town: TownDetail; onHired: () => void; onClose: ()
               disabled={busy} onClick={() => setIndex((i) => (i + 1) % pool.length)} />
           )}
 
-          {/* buttons sit on the light band at y≈428 */}
+          {/* buttons sit on the light band at y≈432 */}
           <Btn x={24} y={432} w={120} h={34} label={busy ? '…' : 'Hire'} size={12}
             disabled={busy || !canAfford} onClick={hire} />
         </>
       )}
 
       <Btn x={251} y={432} w={120} h={34} label="Exit" size={12} onClick={onClose} />
-    </Modal>
-  );
-}
-
-function GarrisonPanel(props: {
-  town: TownDetail; creatures: Record<string, CreatureDef>;
-  onChanged: () => void; onClose: () => void;
-}) {
-  const { town, creatures, onChanged, onClose } = props;
-  const [busy, setBusy] = useState(false);
-  const hero = town.heroInTown;
-
-  async function move(direction: 'toGarrison' | 'toHero', slot: number, count: number) {
-    setBusy(true);
-    try {
-      const r = await api.moveGarrison(town.id, direction, slot, count);
-      toast(`Moved ${r.moved} ${creatures[r.creature]?.name ?? r.creature}.`);
-      onChanged();
-    } catch (e) {
-      toast(e instanceof ApiError ? e.message : 'Something went wrong.');
-    } finally { setBusy(false); }
-  }
-
-  const row = (slots: ArmySlot[], direction: 'toGarrison' | 'toHero', y: number) =>
-    slots.map((s, i) => {
-      const c = s.creature ? creatures[s.creature] : null;
-      const x = 24 + i * 76;
-      return (
-        <div key={i} data-slot={`${direction}-${i}`}
-          style={{ position: 'absolute', left: x, top: y, width: 70, height: 76,
-            border: '1px solid var(--gold-0)', background: 'rgba(0,0,0,0.35)' }}>
-          {c && <DefImg name="CPRSMALL" frame={creaturePortraitFrame(c.key)} x={12} y={4} />}
-          <div style={{ position: 'absolute', left: 0, right: 0, bottom: 20, textAlign: 'center', fontSize: 11, fontWeight: 'bold' }}>
-            {s.count > 0 ? s.count : ''}
-          </div>
-          {s.creature && s.count > 0 && (
-            <button className="abs h3hit" disabled={busy}
-              style={{ left: 4, bottom: 2, width: 62, height: 16, fontSize: 9 }}
-              title={`Move ${c?.name ?? s.creature} ${direction === 'toGarrison' ? 'to garrison' : 'to hero'}`}
-              onClick={() => move(direction, i, s.count)}>
-              {direction === 'toGarrison' ? '▼' : '▲'}
-            </button>
-          )}
-        </div>
-      );
-    });
-
-  return (
-    <Modal w={600} h={420} onClose={onClose}>
-      <Txt x={0} y={10} w={600} size={16} bold align="center" className="heading">GARRISON</Txt>
-
-      <Txt x={24} y={44} w={552} size={11} color="var(--text-dim)">
-        {hero ? `${hero.name} in town` : 'No hero in town — troops stay in the garrison.'}
-      </Txt>
-
-      {hero && (
-        <>
-          <Txt x={24} y={68} w={552} size={10} color="var(--text-mute)">Hero army</Txt>
-          {row(hero.army, 'toGarrison', 86)}
-        </>
-      )}
-
-      <Txt x={24} y={hero ? 180 : 86} w={552} size={10} color="var(--text-mute)">Garrison</Txt>
-      {row(town.garrison, 'toHero', hero ? 198 : 104)}
-
-      {!hero && (
-        <Txt x={24} y={200} w={552} size={10} color="var(--text-mute)">
-          Bring a hero into town to move troops between the army and the garrison.
-        </Txt>
-      )}
-
-      <Btn x={456} y={368} w={120} h={34} label="Exit" size={12} onClick={onClose} />
     </Modal>
   );
 }

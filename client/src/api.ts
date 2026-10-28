@@ -87,8 +87,19 @@ export const api = {
   endTurn: (id: string) =>
     request<{ day: number; week: number; month: number; turn: number }>('POST', `/api/games/${id}/endturn`),
   getTown: (id: string) => request<import('./types').TownDetail>('GET', `/api/towns/${id}`),
-  recruit: (id: string, tier: number, count: number) =>
-    request<{ recruited: number; creature: string }>('POST', `/api/towns/${id}/recruit`, { tier, count }),
+  recruit: (id: string, tier: number, count: number, creature?: string) =>
+    request<{ recruited: number; creature: string }>('POST', `/api/towns/${id}/recruit`, { tier, count, creature }),
+  moveArmy: (id: string, fromArmy: 'hero' | 'garrison', fromSlot: number, toArmy: 'hero' | 'garrison', toSlot: number, count = 0) =>
+    request<{ hero: import('./types').ArmySlot[] | null; garrison: import('./types').ArmySlot[] }>(
+      'POST', `/api/towns/${id}/army`, { fromArmy, fromSlot, toArmy, toSlot, count }),
+  moveHeroArmy: (heroId: string, fromSlot: number, toSlot: number, count = 0) =>
+    request<{ army: import('./types').ArmySlot[] }>('POST', `/api/heroes/${heroId}/army`, { fromSlot, toSlot, count }),
+  upgradeStack: (id: string, army: 'hero' | 'garrison', slot: number) =>
+    request<{ creature: string }>('POST', `/api/towns/${id}/upgrade`, { army, slot }),
+  buyWarMachine: (id: string) => request<{ machine: string }>('POST', `/api/towns/${id}/blacksmith`),
+  buySpellbook: (id: string) => request<{ learned: string[] }>('POST', `/api/towns/${id}/spellbook`),
+  transformStack: (id: string, slot: number) =>
+    request<{ creature: string; count: number }>('POST', `/api/towns/${id}/transform`, { army: 'hero', slot }),
   trade: (id: string, from: string, to: string, amount: number) =>
     request<void>('POST', `/api/towns/${id}/trade`, { from, to, amount }),
   hire: (id: string, heroKey: string) =>
@@ -137,7 +148,7 @@ export const api = {
     request<{ correct: boolean }>('POST', `/api/games/${gameId}/obelisk/solve`, { body: answer }),
 
   // catalogue
-  getBuildings: () => request<import('./types').BuildingDef[]>('GET', '/api/buildings'),
+  getBuildings: (faction: string) => request<import('./types').BuildingDef[]>('GET', `/api/buildings?faction=${encodeURIComponent(faction)}`),
   getCreatures: () => request<import('./types').CreatureDef[]>('GET', '/api/creatures'),
   getHeroCatalog: () => request<import('./types').HeroDef[]>('GET', '/api/heroes'),
   getSpells: () => request<import('./types').SpellDef[]>('GET', '/api/spells'),
