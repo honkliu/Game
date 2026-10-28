@@ -146,6 +146,29 @@ test.describe('City of Towers', () => {
     }
   });
 
+  test('S9a artifacts sit in their own paper-doll slot', async ({ page }) => {
+    await choosePlayer(page, 'Alice');
+    await createGame(page, 'Artifact Slots Test');
+    // a shield picked up first used to land on the head; give a shield, a helm and a second shield
+    const heroId = await page.evaluate(async () => {
+      const g = (await (await fetch('/api/games', { headers: { 'X-Player-Id': 'alice' } })).json())
+        .find((x: { name: string }) => x.name === 'Artifact Slots Test');
+      const h = (await (await fetch(`/api/games/${g.id}/heroes`, { headers: { 'X-Player-Id': 'alice' } })).json())[0];
+      await fetch(`/api/heroes/${h.id}/_test/artifacts`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(['artifact1', 'artifact2', 'artifact10']) });
+      return h.id as string;
+    });
+    expect(heroId).toBeTruthy();
+    await page.getByRole('button', { name: 'Hero', exact: true }).click();
+
+    const shield = page.locator('[data-art-slot="leftHand"]');
+    await expect(shield).toHaveAttribute('data-art-id', '14');
+    await expect(page.locator('[data-art-slot="head"]')).toHaveAttribute('data-art-id', '21');
+    await expect(page.locator('[data-backpack="0"]')).toHaveAttribute('data-art-id', '17');
+    await shield.hover();
+    await expect(page.getByText('Shield of the Yawning Dead (+3 Defense)').first()).toBeVisible();
+  });
+
   test('S9b tavern shows hero details and hires', async ({ page }) => {
     await choosePlayer(page, 'Alice');
     await createGame(page, 'Tavern Test');

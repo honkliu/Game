@@ -489,11 +489,14 @@ public class GameService
             case "artifact":
             {
                 var arts = ParseStringArray(hero.ArtifactsJson).ToList();
-                if (arts.Count(a => !TownRules.IsGear(a)) < 8) arts.Add(tile.ObjectData ?? "artifact");
+                var found = tile.ObjectData ?? "artifact";
+                // HoMM3 holds 14 paper-doll artifacts (excluding war machines/spellbook) plus a 64-item backpack
+                if (arts.Count(a => !TownRules.IsGear(a)) >= 14 + 64) return (false, (string?)"The backpack is full.");
+                arts.Add(found);
                 hero.ArtifactsJson = JsonSerializer.Serialize(arts, Json);
                 tile.ObjectKind = null;
                 tile.ObjectData = null;
-                return (false, (string?)"Found an artifact.");
+                return (false, (string?)$"Found the {Artifacts.Of(found).Name}.");
             }
             case "shrine":
             {

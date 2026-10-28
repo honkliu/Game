@@ -4,11 +4,11 @@ import { useGameNavigate } from '../useGameNavigate';
 import { api, ApiError } from '../api';
 import { toast } from '../ui/Toast';
 import { SplitDialog } from './TownWindows';
-import type { HeroDetail, CreatureDef } from '../types';
+import type { ArtifactInfo, HeroDetail, CreatureDef } from '../types';
 import { Btn, Loading, Panel, Txt } from '../ui/Layout';
 import { HERO_CLASS, HeroPortrait } from '../ui/homm';
 import { DefImg, Pcx, pcxUrl, useDef, useH3 } from '../h3/assets';
-import { FACTION_PLAYER_COLOR, artifactIconFrame, creaturePortraitFrame, heroPortrait } from '../h3/catalog';
+import { FACTION_PLAYER_COLOR, creaturePortraitFrame, heroPortrait } from '../h3/catalog';
 
 // Original secondary-skill ids (SECSKILL.def index = 3 + id * 3 + level - 1).
 const SKILL_ID: Record<string, number> = {
@@ -18,17 +18,25 @@ const SKILL_ID: Record<string, number> = {
   sorcery: 25, resistance: 26, firstAid: 27
 };
 
-// Paper-doll slot positions inside HeroScr4.pcx (VCMI CArtifactsOfHeroBase, minus the window offset).
-const ART_SLOTS: [number, number][] = [
-  [444, 22], [444, 72], [444, 123], [318, 61], [497, 176], [366, 61], [545, 176], [450, 287], [503, 234],
-  [318, 135], [334, 185], [350, 235], [366, 285], [316, 288]
-];
+// Paper-doll slot positions inside HeroScr4.pcx (VCMI CArtifactsOfHeroBase::slotPos minus the 64,7 window offset).
+const ART_SLOTS: Record<string, [number, number]> = {
+  head: [445, 23], shoulders: [504, 235], neck: [445, 73], rightHand: [319, 61], leftHand: [500, 176], torso: [445, 123],
+  ring1: [367, 61], ring2: [546, 176], feet: [451, 288],
+  misc1: [319, 136], misc2: [335, 187], misc3: [351, 238], misc4: [367, 289], misc5: [317, 289]
+};
+const BACKPACK_X = 339, BACKPACK_Y = 358, BACKPACK_SIZE = 5;
+
+function artifactTip(a: ArtifactInfo): string {
+  const bonus = ([['Attack', a.attack], ['Defense', a.defense], ['Power', a.power], ['Knowledge', a.knowledge]] as [string, number][])
+    .filter(([, v]) => v).map(([n, v]) => `${v > 0 ? '+' : ''}${v} ${n}`).join(', ');
+  return bonus ? `${a.name} (${bonus})` : a.name;
+}
 
 const MACHINE_SLOTS: { key: string; name: string; frame: number; x: number; y: number }[] = [
-  { key: 'ballista', name: 'Ballista', frame: 4, x: 499, y: 22 },
-  { key: 'ammoCart', name: 'Ammo Cart', frame: 5, x: 545, y: 22 },
-  { key: 'firstAidTent', name: 'First Aid Tent', frame: 6, x: 545, y: 68 },
-  { key: 'catapult', name: 'Catapult', frame: 3, x: 545, y: 114 }
+  { key: 'ballista', name: 'Ballista', frame: 4, x: 500, y: 23 },
+  { key: 'ammoCart', name: 'Ammo Cart', frame: 5, x: 546, y: 23 },
+  { key: 'firstAidTent', name: 'First Aid Tent', frame: 6, x: 546, y: 69 },
+  { key: 'catapult', name: 'Catapult', frame: 3, x: 546, y: 115 }
 ];
 
 /** HoMM3 hero window: HeroScr4.pcx (672×586) centred on the 800×600 screen, everything at the original offsets. */
@@ -60,6 +68,7 @@ function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef
     moveStack(sel, i);
   }
   const [rollover, setRollover] = useState<string | null>(null);
+  const [bpOffset, setBpOffset] = useState(0);
   const secsk = useDef('SECSKILL');
   const ox = 64, oy = 7;
   const tip = (text: string) => ({ onMouseEnter: () => setRollover(text), onMouseLeave: () => setRollover(null), title: text });
@@ -120,21 +129,36 @@ function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef
           );
         })}
 
-        {/* artifacts on the paper doll */}
-        {hero.artifacts.slice(0, ART_SLOTS.length).map((a, i) => (
-          <div key={i} {...tip(prettify(a))}>
-            <DefImg name="Artifact" frame={artifactIconFrame(a)} x={ART_SLOTS[i][0]} y={ART_SLOTS[i][1]} />
+        {/* artifacts on the paper doll, each in its own body slot */}
+        {Object.entries(hero.worn ?? {}).filter(([slot]) => ART_SLOTS[slot]).map(([slot, a]) => (
+          <div key={slot} className="abs" data-art-slot={slot} data-art-id={a.id} {...tip(artifactTip(a))}
+            style={{ left: ART_SLOTS[slot][0], top: ART_SLOTS[slot][1], width: 44, height: 44 }}>
+            <DefImg name="Artifact" frame={a.id} x={0} y={0} />
           </div>
         ))}
 
+        {/* backpack: five visible places with scroll arrows */}
+        {(hero.backpack ?? []).slice(bpOffset, bpOffset + BACKPACK_SIZE).map((a, i) => (
+          <div key={bpOffset + i} className="abs" data-backpack={bpOffset + i} data-art-id={a.id} {...tip(artifactTip(a))}
+            style={{ left: BACKPACK_X + 46 * i, top: BACKPACK_Y, width: 44, height: 44 }}>
+            <DefImg name="Artifact" frame={a.id} x={0} y={0} />
+          </div>
+        ))}
+        {(hero.backpack?.length ?? 0) > BACKPACK_SIZE && <>
+          <button className="abs h3hit" aria-label="Backpack left" style={{ left: BACKPACK_X - 24, top: BACKPACK_Y - 1, width: 18, height: 46 }}
+            onClick={() => setBpOffset((o) => Math.max(0, o - 1))}><DefImg name="hsbtns3" frame={0} x={0} y={0} /></button>
+          <button className="abs h3hit" aria-label="Backpack right" style={{ left: BACKPACK_X + 46 * BACKPACK_SIZE - 2, top: BACKPACK_Y - 1, width: 18, height: 46 }}
+            onClick={() => setBpOffset((o) => Math.min(hero.backpack.length - BACKPACK_SIZE, o + 1))}><DefImg name="hsbtns5" frame={0} x={0} y={0} /></button>
+        </>}
+
         {/* war machines and the spellbook */}
         {MACHINE_SLOTS.filter((m) => machines.has(m.key)).map((m) => (
-          <div key={m.key} data-machine={m.key} {...tip(m.name)}>
-            <DefImg name="Artifact" frame={m.frame} x={m.x} y={m.y} />
+          <div key={m.key} className="abs" data-machine={m.key} {...tip(m.name)} style={{ left: m.x, top: m.y, width: 44, height: 44 }}>
+            <DefImg name="Artifact" frame={m.frame} x={0} y={0} />
           </div>
         ))}
         {hero.spellbook && (
-          <div data-spellbook {...tip('Spellbook')}><DefImg name="Artifact" frame={0} x={545} y={302} /></div>
+          <div className="abs" data-spellbook {...tip('Spellbook')} style={{ left: 546, top: 303, width: 44, height: 44 }}><DefImg name="Artifact" frame={0} x={0} y={0} /></div>
         )}
 
         {/* army: click a stack, then another slot to move / merge / swap; shift-click to split */}
@@ -181,38 +205,23 @@ const SKILL_NAMES: Record<string, string> = {
 
 const SKILL_LEVELS = ['None', 'Basic', 'Advanced', 'Expert'];
 
-/** Paper-doll slots (HoMM3 hero screen), positioned around the silhouette. */
-const DOLL: { id: string; label: string; x: number; y: number; match: RegExp }[] = [
-  { id: 'head', label: 'Helm', x: 160, y: 30, match: /helm|crown|hat|hood|circlet/i },
-  { id: 'neck', label: 'Neck', x: 160, y: 82, match: /necklace|amulet|pendant|collar/i },
-  { id: 'shoulders', label: 'Cape', x: 96, y: 70, match: /cape|cloak|mantle/i },
-  { id: 'torso', label: 'Armor', x: 160, y: 134, match: /armor|mail|plate|breast|robe/i },
-  { id: 'right', label: 'Weapon', x: 70, y: 150, match: /sword|axe|blade|club|staff|bow|spear|mace|sceptre|scepter/i },
-  { id: 'left', label: 'Shield', x: 250, y: 150, match: /shield|buckler|targe/i },
-  { id: 'ring1', label: 'Ring', x: 84, y: 220, match: /ring|band/i },
-  { id: 'ring2', label: 'Ring', x: 236, y: 220, match: /ring|band/i },
-  { id: 'feet', label: 'Boots', x: 160, y: 300, match: /boot|shoe|sandal|greave/i },
-  { id: 'misc1', label: 'Misc', x: 20, y: 300, match: /$^/ },
-  { id: 'misc2', label: 'Misc', x: 70, y: 300, match: /$^/ },
-  { id: 'misc3', label: 'Misc', x: 250, y: 300, match: /$^/ },
-  { id: 'misc4', label: 'Misc', x: 300, y: 300, match: /$^/ }
+/** Paper-doll slots of the fallback (non-H3) screen, positioned around the silhouette. */
+const DOLL: { id: string; label: string; x: number; y: number }[] = [
+  { id: 'head', label: 'Helm', x: 160, y: 30 },
+  { id: 'neck', label: 'Neck', x: 160, y: 82 },
+  { id: 'shoulders', label: 'Cape', x: 96, y: 70 },
+  { id: 'torso', label: 'Armor', x: 160, y: 134 },
+  { id: 'rightHand', label: 'Weapon', x: 70, y: 150 },
+  { id: 'leftHand', label: 'Shield', x: 250, y: 150 },
+  { id: 'ring1', label: 'Ring', x: 84, y: 220 },
+  { id: 'ring2', label: 'Ring', x: 236, y: 220 },
+  { id: 'feet', label: 'Boots', x: 160, y: 300 },
+  { id: 'misc1', label: 'Misc', x: 10, y: 300 },
+  { id: 'misc2', label: 'Misc', x: 60, y: 300 },
+  { id: 'misc3', label: 'Misc', x: 110, y: 300 },
+  { id: 'misc4', label: 'Misc', x: 250, y: 300 },
+  { id: 'misc5', label: 'Misc', x: 300, y: 300 }
 ];
-
-function prettify(key: string): string {
-  return key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]/g, ' ').replace(/^./, (c) => c.toUpperCase());
-}
-
-function placeArtifacts(artifacts: string[]): { placed: Record<string, string>; backpack: string[] } {
-  const placed: Record<string, string> = {};
-  const backpack: string[] = [];
-  for (const a of artifacts) {
-    const slot = DOLL.find((s) => !placed[s.id] && s.match.test(a))
-      ?? DOLL.find((s) => !placed[s.id] && s.id.startsWith('misc'));
-    if (slot) placed[slot.id] = a; else backpack.push(a);
-  }
-  return { placed, backpack };
-}
-
 function StatIcon({ kind }: { kind: string }) {
   const bg = '#2a1e10';
   return (
@@ -250,7 +259,8 @@ export function HeroScreen() {
 
   const xpPct = hero.nextLevel > 0 ? Math.min(100, (hero.experience / hero.nextLevel) * 100) : 0;
   const skills = Object.entries(hero.skills);
-  const { placed, backpack } = placeArtifacts(hero.artifacts);
+  const placed = hero.worn ?? {};
+  const backpack = hero.backpack ?? [];
   const army = Array.from({ length: 7 }, (_, i) => hero.army[i]);
 
   return (
@@ -318,10 +328,10 @@ export function HeroScreen() {
         {DOLL.map((s) => {
           const a = placed[s.id];
           return (
-            <div key={s.id} className="slot" title={a ? prettify(a) : s.label}
+            <div key={s.id} className="slot" data-art-slot={s.id} title={a ? artifactTip(a) : s.label}
               style={{ left: s.x, top: s.y + 20, width: 46, height: 46, textAlign: 'center' }}>
               {a
-                ? <div style={{ fontSize: 9, color: 'var(--gold-3)', padding: 2, lineHeight: '10px', overflow: 'hidden', height: 42 }}>{prettify(a)}</div>
+                ? <div style={{ fontSize: 9, color: 'var(--gold-3)', padding: 2, lineHeight: '10px', overflow: 'hidden', height: 42 }}>{a.name}</div>
                 : <div style={{ fontSize: 9, color: 'var(--text-mute)', lineHeight: '46px' }}>{s.label}</div>}
             </div>
           );
@@ -330,7 +340,7 @@ export function HeroScreen() {
           <Txt x={0} y={414} w={372} size={10} align="center" color="var(--text-mute)">No artifacts yet — find them on the map.</Txt>
         )}
         {backpack.length > 0 && (
-          <Txt x={10} y={414} w={352} size={10} color="var(--text-dim)">Backpack: {backpack.map(prettify).join(', ')}</Txt>
+          <Txt x={10} y={414} w={352} size={10} color="var(--text-dim)">Backpack: {backpack.map((a) => a.name).join(', ')}</Txt>
         )}
       </Panel>
 

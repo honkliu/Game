@@ -18,7 +18,7 @@ async function call(method, path, playerId, body) {
   const text = await res.text();
   let json = null;
   if (text) { try { json = JSON.parse(text); } catch { json = text; } }
-  return { status: res.status, body: json };
+  return { status: res.status, body: json, headers: res.headers };
 }
 
 (async () => {
@@ -297,6 +297,77 @@ async function call(method, path, playerId, body) {
     const hs = (await call('GET', `/api/games/${gameId}/heroes`, 'alice')).body[0];
     check('hero dto hides gear from artifacts', hs.spellbook && hs.warMachines.includes('ballista') && !hs.artifacts.includes('ballista'),
       JSON.stringify({ a: hs.artifacts, w: hs.warMachines }));
+  }
+
+  // ---------------------------------------------------------------- artifacts
+  console.log('\nArtifacts');
+  {
+    // map keys artifact{n} are HoMM3 id 7 + (7n % 60): 0 Centaur's Axe, 1 Shield of the Yawning Dead,
+    // 2 Helm of Chaos, 3 Tunic of the Cyclops King, 10 Shield of the Damned, 17 Statesman's Medal, 38 Celestial Necklace
+    const carol = (await call('GET', `/api/games/${gameId}/heroes`, 'carol')).body[0];
+    const give = keys => call('POST', `/api/heroes/${carol.id}/_test/artifacts`, null, keys).then(x => x.body);
+    let h = await give(['artifact1']);
+    check('a shield goes to the shield hand, not the head',
+      h.worn.leftHand?.id === 14 && h.worn.leftHand.name === 'Shield of the Yawning Dead' && !h.worn.head && Object.keys(h.worn).length === 1,
+      JSON.stringify(h.worn));
+    check('shield adds its defense', h.defense === h.baseStats.defense + 3 && h.attack === h.baseStats.attack, JSON.stringify([h.attack, h.defense, h.baseStats]));
+    h = await give(['artifact1', 'artifact2', 'artifact0', 'artifact3', 'artifact10']);
+    check('helm on the head, axe in the weapon hand, tunic on the torso',
+      h.worn.head?.id === 21 && h.worn.rightHand?.id === 7 && h.worn.torso?.id === 28 && h.worn.leftHand?.id === 14, JSON.stringify(h.worn));
+    check('a second shield goes to the backpack', h.backpack.length === 1 && h.backpack[0].id === 17 && h.backpack[0].slot === 'leftHand',
+      JSON.stringify(h.backpack));
+    check('backpack artifacts give no bonus', h.defense === h.baseStats.defense + 3 && h.attack === h.baseStats.attack + 2
+      && h.knowledge === h.baseStats.knowledge + 3 && h.power === h.baseStats.power + 4, JSON.stringify([h.attack, h.defense, h.power, h.knowledge, h.baseStats]));
+    h = await give(['artifact17', 'artifact38']);
+    check('two neck artifacts: one worn, one in the backpack', h.worn.neck?.id === 66 && h.backpack.length === 1 && h.backpack[0].id === 33,
+      JSON.stringify({ w: h.worn, b: h.backpack }));
+    h = await give([]);
+
+    // walk carol's hero to the nearest artifact on the map and pick it up
+    await call('POST', `/api/games/${gameId}/_test/explore`, 'carol');
+    let picked = null, target = null;
+    for (let day = 0; day < 20 && !picked; day++) {
+      const m = (await call('GET', `/api/games/${gameId}/map`, 'carol')).body;
+      const me = (await call('GET', `/api/games/${gameId}/heroes`, 'carol')).body[0];
+      const W = m.width, H = m.height;
+      const prev = new Map([[me.y * W + me.x, -1]]);
+      let q = [me.y * W + me.x], goal = null;
+      while (q.length && goal == null) {
+        const nq = [];
+        for (const k of q) {
+          const cx = k % W, cy = Math.floor(k / W);
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const x = cx + dx, y = cy + dy;
+            if (x < 0 || y < 0 || x >= W || y >= H || prev.has(y * W + x)) continue;
+            const t = m.tiles[y * W + x];
+            if (t.objectKind === 'artifact') { prev.set(y * W + x, k); goal = y * W + x; break; }
+            if (!t.passable || t.objectKind || m.heroes.some(o => o.x === x && o.y === y)) continue;
+            prev.set(y * W + x, k);
+            nq.push(y * W + x);
+          }
+          if (goal != null) break;
+        }
+        q = nq;
+      }
+      if (goal == null) break;
+      target = { x: goal % W, y: Math.floor(goal / W), key: m.tiles[goal].objectData };
+      const path = [];
+      for (let k = goal; k !== me.y * W + me.x; k = prev.get(k)) path.unshift({ x: k % W, y: Math.floor(k / W) });
+      r = await call('POST', `/api/heroes/${carol.id}/move`, 'carol', { path });
+      const msg = r.headers.get('x-move-message');
+      if (msg && msg.startsWith('Found the')) picked = { msg, hero: r.body };
+      else await call('POST', `/api/games/${gameId}/_test/nextday`);
+    }
+    if (picked) {
+      const art = [...Object.values(picked.hero.worn), ...picked.hero.backpack].find(a => a.key === target.key);
+      check('picking up names the artifact', art && picked.msg === `Found the ${art.name}.`, picked.msg);
+      check('picked-up artifact is worn in its own slot', art && picked.hero.worn[art.slot === 'ring' ? 'ring1' : art.slot === 'misc' ? 'misc1' : art.slot]?.key === target.key,
+        JSON.stringify(picked.hero.worn));
+      const m = (await call('GET', `/api/games/${gameId}/map`, 'carol')).body;
+      check('artifact removed from the map', m.tiles[target.y * m.width + target.x].objectKind !== 'artifact');
+    } else {
+      check('walk to a map artifact (none reachable on this map)', !target, JSON.stringify(target));
+    }
   }
 
   // ---------------------------------------------------------------- obelisk

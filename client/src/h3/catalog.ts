@@ -173,4 +173,3 @@ export function artifactSeed(key: string | null | undefined): number {
   for (const c of key ?? '') h = (h * 31 + c.charCodeAt(0)) >>> 0;
   return h;
 }
-export const artifactIconFrame = (key: string) => 7 + (artifactSeed(key) % 60);

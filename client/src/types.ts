@@ -92,6 +92,12 @@ export interface ArmySlot {
   count: number;
 }
 
+/** A HoMM3 artifact: id is its frame in Artifact.def; slot is the body part it fits. */
+export interface ArtifactInfo {
+  key: string; id: number; name: string; slot: string;
+  attack: number; defense: number; power: number; knowledge: number;
+}
+
 export interface HeroDetail {
   id: string;
   name: string;
@@ -115,6 +121,10 @@ export interface HeroDetail {
   skills: Record<string, number>;
   spells: string[];
   artifacts: string[];
+  /** Artifacts on the paper doll keyed by slot (head, shoulders, neck, rightHand, leftHand, torso, ring1-2, feet, misc1-5). */
+  worn: Record<string, ArtifactInfo>;
+  /** Artifacts whose slot is taken, in pickup order. */
+  backpack: ArtifactInfo[];
   /** HoMM3 spellbook: needed to learn and cast spells. */
   spellbook: boolean;
   /** War machines bought at a Blacksmith: ballista, ammoCart, firstAidTent. */

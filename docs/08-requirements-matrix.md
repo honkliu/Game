@@ -7,10 +7,10 @@ column is incomplete.
 **Status legend:** ✅ implemented and tested · ⚠️ partial · ❌ missing
 
 **Test suites:**
-- `test/adventure.js` — 77 checks (map, fog, step-by-step movement, encounters, town, market, obelisk)
+- `test/adventure.js` — 90 checks (map, fog, step-by-step movement, encounters, town, market, artifacts, obelisk)
 - `test/social.js` — 37 checks (messages, trades, annotations, wall, tower, project rewards, town discovery)
 - `test/creatures.js` — 126 creatures verified against HoMM3 values
-- `e2e/game.spec.ts` — 18 Playwright browser tests
+- `e2e/game.spec.ts` — 19 Playwright browser tests
 - `build/*.js` — 20 audit scripts, listed with counts in §5
 
 ---
@@ -26,7 +26,7 @@ column is incomplete.
 | P-5 | Secondary skills | `Hero.SkillsJson` | `hero.skills` | Hero screen | adventure.js | ✅ |
 | P-6 | Movement points per day | `Hero.Movement` | `hero.movement` | Status window | adventure.js, e2e S4 | ✅ |
 | P-7 | 7-slot army | `ParseArmy` | `hero.army` | Status window | adventure.js, e2e S4 | ✅ |
-| P-8 | Artifacts | `Hero.ArtifactsJson` | `hero.artifacts` | Hero screen | e2e S9 | ✅ |
+| P-8 | Artifacts | `Domain/Artifacts.cs`: HoMM3 catalogue (ids 7-66, name, body slot, primary-skill bonus). Pickup names the artifact; each one auto-equips into the first free slot of its kind (head, shoulders, neck, weapon hand, shield hand, torso, 2 rings, feet, 5 misc), otherwise it goes to the backpack. Worn artifacts add to the shown stats | `hero.worn`, `hero.backpack`, `hero.baseStats`; dev `POST /heroes/{id}/_test/artifacts` | Hero screen paper doll at the HeroScr4 slot boxes, 5-place backpack with scroll arrows, name and bonus in the status bar | adventure.js, e2e S9a | ✅ |
 | P-9 | Spellbook | `Hero.SpellsJson`; 25-spell catalogue, `POST /heroes/{id}/cast` | `hero.spells`, `GET /spells` | Hero screen, spellbook panel (sidebar `Spells`) | audit-gaps.js, audit-spells.js (API only) | ⚠️ panel untested |
 | P-10 | Seven resources | `Player.Wood..Gold` | `player.resources` | Resource bar | adventure.js, e2e S3 | ✅ |
 | P-11 | Daily mine yield | `TickAsync` | — | Resource bar | — | ⚠️ implemented, no test |
@@ -154,10 +154,10 @@ they stay ⚠️ and are listed in §4.
 
 | Suite | Checks | Result |
 | --- | --- | --- |
-| `test/adventure.js` | 54 | all pass |
+| `test/adventure.js` | 90 | all pass |
 | `test/social.js` | 37 | all pass |
 | `test/creatures.js` | 126 creatures | all pass |
-| `e2e/game.spec.ts` | 18 | all pass |
+| `e2e/game.spec.ts` | 19 | all pass |
 | `build/scenarios.js` | 60 | all pass |
 | `build/audit-all.js` | 43 | all pass |
 | `build/audit-rules.js` | 20 | all pass |

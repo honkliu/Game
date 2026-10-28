@@ -991,6 +991,18 @@ public static class Endpoints
             return Results.NoContent();
         });
 
+        // gives a hero map artifacts by key (artifact{n}) so API tests can check the paper-doll rules
+        app.MapPost("/api/heroes/{id:guid}/_test/artifacts", async (Guid id, string[] keys, AppDb db, IHostEnvironment env) =>
+        {
+            if (!env.IsDevelopment()) return Results.NotFound();
+            var hero = await db.Heroes.FirstOrDefaultAsync(h => h.Id == id);
+            if (hero == null) return Results.NotFound();
+            var gear = GameService.ParseStringArray(hero.ArtifactsJson).Where(TownRules.IsGear);
+            hero.ArtifactsJson = System.Text.Json.JsonSerializer.Serialize(gear.Concat(keys).ToList());
+            await db.SaveChangesAsync();
+            return Results.Ok(HeroDto(hero));
+        });
+
         // advances every game one day so API tests can walk long distances
         app.MapPost("/api/games/{id:guid}/_test/nextday", async (Guid id, AppDb db, GameService games, IHostEnvironment env) =>
         {
@@ -1061,34 +1073,50 @@ public static class Endpoints
         };
     }
 
-    private static object HeroDto(CityOfTowers.Domain.Hero h) => new
+    private static object ArtifactDto(string key)
     {
-        id = h.Id,
-        name = h.Name,
-        heroKey = h.HeroKey,
-        faction = h.Faction,
-        level = h.Level,
-        experience = h.Experience,
-        nextLevel = Experience.NextThreshold(h.Level),
-        attack = h.Attack,
-        defense = h.Defense,
-        power = h.Power,
-        knowledge = h.Knowledge,
-        mana = h.Mana,
-        maxMana = h.MaxMana,
-        movement = h.Movement,
-        maxMovement = h.MaxMovement,
-        x = h.X,
-        y = h.Y,
-        army = GameService.ParseArmy(h.ArmyJson),
-        strength = GameService.ArmyStrength(GameService.ParseArmy(h.ArmyJson)),
-        skills = GameService.ParseSkills(h.SkillsJson).Where(kv => !kv.Key.StartsWith('_')).ToDictionary(kv => kv.Key, kv => kv.Value),
-        spells = GameService.ParseStringArray(h.SpellsJson),
-        artifacts = TownRules.Artifacts(h),
-        spellbook = TownRules.HasGear(h, TownRules.Spellbook),
-        warMachines = TownRules.WarMachines(h),
-        pendingEncounter = h.PendingEncounterJson
-    };
+        var d = Artifacts.Of(key);
+        return new { key, id = d.Id, name = d.Name, slot = d.Slot, attack = d.Attack, defense = d.Defense, power = d.Power, knowledge = d.Knowledge };
+    }
+
+    private static object HeroDto(CityOfTowers.Domain.Hero h)
+    {
+        var arts = TownRules.Artifacts(h);
+        var (worn, backpack) = Artifacts.Arrange(arts);
+        var bonus = Artifacts.Bonus(arts);
+        // HoMM3 shows the totals including worn artifacts; attack/defense floor at 0, power/knowledge at 1
+        return new
+        {
+            id = h.Id,
+            name = h.Name,
+            heroKey = h.HeroKey,
+            faction = h.Faction,
+            level = h.Level,
+            experience = h.Experience,
+            nextLevel = Experience.NextThreshold(h.Level),
+            attack = Math.Max(0, h.Attack + bonus.Attack),
+            defense = Math.Max(0, h.Defense + bonus.Defense),
+            power = Math.Max(1, h.Power + bonus.Power),
+            knowledge = Math.Max(1, h.Knowledge + bonus.Knowledge),
+            baseStats = new { attack = h.Attack, defense = h.Defense, power = h.Power, knowledge = h.Knowledge },
+            mana = h.Mana,
+            maxMana = h.MaxMana,
+            movement = h.Movement,
+            maxMovement = h.MaxMovement,
+            x = h.X,
+            y = h.Y,
+            army = GameService.ParseArmy(h.ArmyJson),
+            strength = GameService.ArmyStrength(GameService.ParseArmy(h.ArmyJson)),
+            skills = GameService.ParseSkills(h.SkillsJson).Where(kv => !kv.Key.StartsWith('_')).ToDictionary(kv => kv.Key, kv => kv.Value),
+            spells = GameService.ParseStringArray(h.SpellsJson),
+            artifacts = arts,
+            worn = worn.ToDictionary(kv => kv.Key, kv => ArtifactDto(kv.Value)),
+            backpack = backpack.Select(ArtifactDto),
+            spellbook = TownRules.HasGear(h, TownRules.Spellbook),
+            warMachines = TownRules.WarMachines(h),
+            pendingEncounter = h.PendingEncounterJson
+        };
+    }
 
     private static int GetRes(Player p, string r) => r switch
     {
