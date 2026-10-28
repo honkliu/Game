@@ -122,17 +122,17 @@ public class AiService
         if (target == null) return;
 
         // step one tile toward the target; the move endpoint handles the rest
-        var step = StepToward(map, hero.X, hero.Y, target.Value.x, target.Value.y);
+        var step = StepToward(map, hero.X, hero.Y, target.Value.x, target.Value.y,
+            GameService.ParseSkills(hero.SkillsJson).GetValueOrDefault("pathfinding"));
         if (step == null) return;
-        await _games.MoveHeroAsync(hero.Id, player.Faction, [step.Value]);
+        var playerId = Seeded.Players.First(p => p.Faction == player.Faction).Id;
+        await _games.MoveHeroAsync(hero.Id, playerId, [step.Value]);
     }
 
     private static (int x, int y)? NearestMine(AdventureMap map, Player player, Hero hero)
     {
         var seat = Array.FindIndex(Seeded.Players, p => p.Faction == player.Faction);
         if (seat < 0) return null;
-        var bit = 1 << seat;
-
         (int x, int y)? best = null;
         var bestDist = int.MaxValue;
         for (var y = 0; y < map.Height; y++)
@@ -140,7 +140,7 @@ public class AiService
             for (var x = 0; x < map.Width; x++)
             {
                 var t = map.At(x, y);
-                if (t.ObjectKind != "mine" || (t.Owner & bit) != 0) continue;
+                if (t.ObjectKind != "mine" || t.Owner != 0) continue;
                 var d = Math.Abs(x - hero.X) + Math.Abs(y - hero.Y);
                 if (d < bestDist) { bestDist = d; best = (x, y); }
             }
@@ -148,18 +148,10 @@ public class AiService
         return best;
     }
 
-    private static (int x, int y)? StepToward(AdventureMap map, int sx, int sy, int tx, int ty)
+    private static (int x, int y)? StepToward(AdventureMap map, int sx, int sy, int tx, int ty, int pathfinding)
     {
-        var dx = Math.Sign(tx - sx);
-        var dy = Math.Sign(ty - sy);
-        foreach (var (nx, ny) in new[] { (sx + dx, sy + dy), (sx + dx, sy), (sx, sy + dy) })
-        {
-            if (nx == sx && ny == sy) continue;
-            if (!map.InBounds(nx, ny)) continue;
-            var t = map.At(nx, ny);
-            if (t.Passable || t.ObjectKind is "mine" or "monster" or "town" or "obelisk") return (nx, ny);
-        }
-        return null;
+        var path = Pathfinder.FindPath(map, sx, sy, tx, ty, pathfinding);
+        return path is { Count: > 1 } ? path[1] : null;
     }
 
     private static bool CanAfford(Player p, TownBuildingDef b) =>

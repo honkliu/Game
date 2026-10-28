@@ -130,15 +130,18 @@ public static class Terrain
     public static readonly string[] Types =
         ["dirt", "sand", "grass", "snow", "swamp", "rough", "subterranean", "lava", "water", "rock"];
 
-    public static int MoveCost(string t) => t switch
+    public static int MoveCost(string t, int pathfinding = 0)
     {
-        "rough" => 125,
-        "snow" => 150,
-        "swamp" => 175,
-        "water" => 0,
-        "rock" => 0,
-        _ => 100
-    };
+        var cost = t switch
+        {
+            "rough" => 125,
+            "snow" or "sand" => 150,
+            "swamp" => 175,
+            "water" or "rock" => 0,
+            _ => 100
+        };
+        return cost == 0 ? 0 : Math.Max(100, cost - 25 * Math.Clamp(pathfinding, 0, 3));
+    }
 
     public static bool Passable(string t) => t != "water" && t != "rock";
 }

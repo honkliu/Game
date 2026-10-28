@@ -11,6 +11,7 @@ column is incomplete.
 - `test/social.js` — 37 checks (messages, trades, annotations, wall, tower, project rewards, town discovery)
 - `test/creatures.js` — 126 creatures verified against HoMM3 values
 - `e2e/game.spec.ts` — 19 Playwright browser tests
+- `node test\movement.js` — deterministic client pathfinding and in-memory server collision checks (no running server required)
 - `build/*.js` — 20 audit scripts, listed with counts in §5
 
 ---
@@ -48,7 +49,7 @@ column is incomplete.
 | P-27 | Marketplace trades | `POST /towns/{id}/trade` with `amount` in lots at the HoMM3 rate `TownRules.MarketRate` (effectiveness (markets+1)/20, max 0.5; one market: wood 2500 gold to buy / 25 to sell, 5 mercury → 1 wood) | `town.resources`, `town.marketCount` | TPMRKRES window (kingdom resources / available for trade, slider, Max, Trade) | adventure.js | ✅ |
 | P-28 | Mage Guild | `town.MageGuildJson`; each level stocks HoMM3 counts (5/4/3/2/1) of that level; a visiting hero with a spellbook learns them up to the Wisdom limit; a spellbook costs 500 | `town.mageGuild`, `POST /towns/{id}/spellbook` | TPMAGE window with SPELLSCR scrolls | adventure.js | ✅ |
 | P-29 | HoMM3 UI composition | — | — | 640×480 map + sidebar + bottom bar | e2e S3 | ✅ |
-| P-30 | Step-by-step movement | `MoveHeroAsync`: adjacent steps only, impassable and occupied tiles block, no corner-cutting | `tiles[].passable` | Map pathing | adventure.js | ✅ |
+| P-30 | Step-by-step movement | `MoveHeroAsync`: adjacent steps only; solid footprints and occupied tiles block both walking and diagonal corner-cutting, including visits. Own towns stop movement at the gate; creatures and persistent shrines are visited from beside them | `tiles[].passable` | Map pathing | adventure.js, movement.js | ✅ |
 | P-31 | Grail Structure needs the Grail | Build check on `player.Precious`; +5000 gold/day, +2 growth | — | Build panel | adventure.js | ✅ |
 | P-32 | Load / unload creatures between hero and town | `TownRules.Transfer`: move, merge, swap, split (split only into an empty slot or the same creature); a hero keeps at least one stack | `POST /towns/{id}/army`, `POST /heroes/{id}/army` | Town army bar (click a stack, click a slot; Split button or shift-click opens the split slider); hero screen army row | adventure.js | ✅ |
 | P-33 | Upgrade creatures | `POST /towns/{id}/upgrade` charges the cost difference × count when the upgraded dwelling is built | `town.available[].upgradeBuilt` | Creature info (CRSTKPU) Upgrade button | adventure.js | ✅ |

@@ -173,29 +173,35 @@ public static class TownRules
         if (same && fromSlot == toSlot) return null;
         var src = from[fromSlot];
         if (src.Creature == null || src.Count <= 0) return "That slot is empty.";
+        if (count < 0 || count > src.Count) return "Invalid creature count.";
         var dst = to[toSlot];
         var n = count <= 0 || count >= src.Count ? src.Count : count;
         var whole = n == src.Count;
+        var source = from.ToArray();
+        var destination = same ? source : to.ToArray();
 
         if (dst.Creature == null || dst.Count <= 0)
         {
-            to[toSlot] = new ArmySlot(src.Creature, n);
-            from[fromSlot] = whole ? new ArmySlot(null, 0) : src with { Count = src.Count - n };
+            destination[toSlot] = new ArmySlot(src.Creature, n);
+            source[fromSlot] = whole ? new ArmySlot(null, 0) : src with { Count = src.Count - n };
         }
         else if (dst.Creature == src.Creature)
         {
-            to[toSlot] = dst with { Count = dst.Count + n };
-            from[fromSlot] = whole ? new ArmySlot(null, 0) : src with { Count = src.Count - n };
+            if ((long)dst.Count + n > int.MaxValue) return "That stack would be too large.";
+            destination[toSlot] = dst with { Count = dst.Count + n };
+            source[fromSlot] = whole ? new ArmySlot(null, 0) : src with { Count = src.Count - n };
         }
         else
         {
             if (!whole) return "Split a stack only onto an empty slot or the same creature.";
-            to[toSlot] = src;
-            from[fromSlot] = dst;
+            destination[toSlot] = src;
+            source[fromSlot] = dst;
         }
 
-        if (fromIsHero && from.All(s => s.Creature == null || s.Count <= 0)) return "A hero must keep at least one stack.";
-        if (toIsHero && to.All(s => s.Creature == null || s.Count <= 0)) return "A hero must keep at least one stack.";
+        if (fromIsHero && source.All(s => s.Creature == null || s.Count <= 0)) return "A hero must keep at least one stack.";
+        if (toIsHero && destination.All(s => s.Creature == null || s.Count <= 0)) return "A hero must keep at least one stack.";
+        Array.Copy(source, from, source.Length);
+        if (!same) Array.Copy(destination, to, destination.Length);
         return null;
     }
 }

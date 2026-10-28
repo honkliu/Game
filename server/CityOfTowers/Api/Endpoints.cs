@@ -317,6 +317,7 @@ public static class Endpoints
             built.Add(key);
             town.BuildingsJson = JsonSerializer.Serialize(built, Json);
             player.BuiltThisTurn = true;
+            if (key == "grail") player.Precious = false;
 
             // HoMM3: a new dwelling opens with its first week's creatures; a horde adds its bonus at once
             var avail = JsonSerializer.Deserialize<Dictionary<string, int>>(town.AvailableJson, Json) ?? [];
@@ -344,6 +345,7 @@ public static class Endpoints
 
             var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
             if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "You can only recruit in your own town." });
+            if (await InactiveGameAsync(db, town.GameId) is { } inactive) return inactive;
 
             var built = GameService.ParseStringArray(town.BuildingsJson);
             if (req.Tier is < 1 or > 7 || !TownBuildings.HasDwelling(built, req.Tier))
@@ -362,7 +364,8 @@ public static class Endpoints
             var avail = JsonSerializer.Deserialize<Dictionary<string, int>>(town.AvailableJson, Json) ?? [];
             var k = req.Tier.ToString();
             var have = avail.TryGetValue(k, out var c) ? c : 0;
-            var count = Math.Min(req.Count, have);
+            if (req.Count > have) return Results.BadRequest(new { error = "Not that many creatures are available." });
+            var count = req.Count;
             if (count <= 0) return Results.BadRequest(new { error = "No creatures available." });
 
             var def = Creatures.All[creatureKey];
@@ -400,13 +403,15 @@ public static class Endpoints
             if (town == null) return Results.NotFound();
             var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
             if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your town." });
+            if (await InactiveGameAsync(db, town.GameId) is { } inactive) return inactive;
 
             var built = GameService.ParseStringArray(town.BuildingsJson);
             if (!built.Contains("marketplace")) return Results.BadRequest(new { error = "No Marketplace built." });
 
             var from = req.From ?? "";
             var to = req.To ?? "";
-            var lots = Math.Max(1, req.Amount);
+            var lots = req.Amount;
+            if (lots <= 0) return Results.BadRequest(new { error = "Trade amount must be positive." });
             if (!TownRules.IsResource(from) || !TownRules.IsResource(to)) return Results.BadRequest(new { error = "Unknown resource." });
             if (from == to) return Results.BadRequest(new { error = "Cannot trade a resource for itself." });
 
@@ -414,9 +419,12 @@ public static class Endpoints
             var markets = await MarketCountAsync(db, town.GameId, town.PlayerId);
             var (give, get) = TownRules.MarketRate(from, to, markets);
             var have = GetRes(player, from);
-            if (have < give * lots) return Results.BadRequest(new { error = "Not enough " + from + "." });
-            SetRes(player, from, have - give * lots);
-            SetRes(player, to, GetRes(player, to) + get * lots);
+            var totalGive = (long)give * lots;
+            var totalGet = (long)get * lots;
+            if (have < totalGive) return Results.BadRequest(new { error = "Not enough " + from + "." });
+            if ((long)GetRes(player, to) + totalGet > int.MaxValue) return Results.BadRequest(new { error = "That trade is too large." });
+            SetRes(player, from, have - (int)totalGive);
+            SetRes(player, to, GetRes(player, to) + (int)totalGet);
 
             await db.SaveChangesAsync();
             return Results.NoContent();
@@ -431,9 +439,12 @@ public static class Endpoints
             if (town == null) return Results.NotFound();
             var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
             if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your town." });
+            if (await InactiveGameAsync(db, town.GameId) is { } inactive) return inactive;
 
             var built = GameService.ParseStringArray(town.BuildingsJson);
             if (!built.Contains("tavern")) return Results.BadRequest(new { error = "No Tavern built." });
+            if (await db.Heroes.AnyAsync(h => h.GameId == town.GameId && h.X == town.X && h.Y == town.Y))
+                return Results.BadRequest(new { error = "A hero is already visiting this town." });
             if (player.Gold < 2000) return Results.BadRequest(new { error = "Not enough gold (2000)." });
 
             var pool = GameService.ParseStringArray(town.TavernJson).ToList();
@@ -466,6 +477,7 @@ public static class Endpoints
             if (town == null) return Results.NotFound();
             var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
             if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your town." });
+            if (await InactiveGameAsync(db, town.GameId) is { } inactive) return inactive;
 
             var hero = await db.Heroes.FirstOrDefaultAsync(h =>
                 h.PlayerId == player.Id && h.X == town.X && h.Y == town.Y);
@@ -535,6 +547,7 @@ public static class Endpoints
             if (hero == null) return Results.NotFound();
             var player = await db.Players.FirstAsync(p => p.Id == hero.PlayerId);
             if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your hero." });
+            if (await InactiveGameAsync(db, hero.GameId) is { } inactive) return inactive;
 
             var army = GameService.ParseArmy(hero.ArmyJson);
             var error = TownRules.Transfer(army, req.FromSlot, army, req.ToSlot, req.Count, true, true);
@@ -549,6 +562,7 @@ public static class Endpoints
         {
             var (town, player, err) = await OwnTownAsync(db, ctx, townId);
             if (err != null) return err;
+            if (req.Army is not ("hero" or "garrison")) return Results.BadRequest(new { error = "Unknown army." });
             var hero = await db.Heroes.FirstOrDefaultAsync(h => h.PlayerId == player!.Id && h.X == town!.X && h.Y == town.Y);
             if (req.Army == "hero" && hero == null) return Results.BadRequest(new { error = "No hero is in town." });
             var army = req.Army == "hero" ? GameService.ParseArmy(hero!.ArmyJson) : GameService.ParseArmy(town!.GarrisonJson);
@@ -671,6 +685,11 @@ public static class Endpoints
                     var map = await games.LoadMapAsync(game);
                     if (!map.InBounds(tx, ty) || !map.At(tx, ty).Passable)
                         return Results.BadRequest(new { error = "You cannot appear there." });
+                    if (await db.Heroes.AnyAsync(h => h.GameId == game.Id && h.Id != hero.Id && h.X == tx && h.Y == ty))
+                        return Results.BadRequest(new { error = "Another hero stands there." });
+                    var fog = GameService.ParseFog(player.FogJson, map.Width * map.Height);
+                    if (fog[ty * map.Width + tx] != 2)
+                        return Results.BadRequest(new { error = "Choose a visible destination." });
                     hero.X = tx;
                     hero.Y = ty;
                     hero.Movement = 0;
@@ -1054,8 +1073,13 @@ public static class Endpoints
         if (town == null) return (null, null, Results.NotFound());
         var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
         if (player.Faction != sp.Faction) return (null, null, Results.BadRequest(new { error = "Not your town." }));
+        if (await InactiveGameAsync(db, town.GameId) is { } inactive) return (null, null, inactive);
         return (town, player, null);
     }
+
+    private static async Task<IResult?> InactiveGameAsync(AppDb db, Guid gameId) =>
+        await db.Games.AnyAsync(g => g.Id == gameId && g.State == GameState.InProgress)
+            ? null : Results.BadRequest(new { error = "The game is not in progress." });
 
     private static async Task<object?> HeroInTownAsync(AppDb db, Guid playerId, int x, int y)
     {

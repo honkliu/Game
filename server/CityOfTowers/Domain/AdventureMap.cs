@@ -281,6 +281,7 @@ public static class MapGenerator
             var t = map.At(x, y);
             t.ObjectKind = "shrine";
             t.ObjectData = shrineSpells[i % shrineSpells.Length].Key;
+            t.Passable = false;
         }
 
         // the Obelisk: one per map, visited by walking up to it
@@ -380,10 +381,9 @@ public static class MapGenerator
 /// <summary>A* pathfinding over the adventure map.</summary>
 public static class Pathfinder
 {
-    public static bool Pinches(MapTile t) =>
-        !t.Passable && t.ObjectKind is not (Footprint.Block or "town" or "mine");
+    public static bool Pinches(MapTile t) => !t.Passable;
 
-    public static List<(int x, int y)>? FindPath(AdventureMap map, int sx, int sy, int tx, int ty)
+    public static List<(int x, int y)>? FindPath(AdventureMap map, int sx, int sy, int tx, int ty, int pathfinding = 0)
     {
         if (!map.InBounds(sx, sy) || !map.InBounds(tx, ty)) return null;
 
@@ -442,15 +442,15 @@ public static class Pathfinder
 
                 var t = map.At(nx, ny);
                 var isGoal = ni == goal;
-                if (!t.Passable && !isGoal) continue;
+                if (!t.Passable && (!isGoal || t.ObjectKind is not ("town" or "mine" or "monster" or "obelisk" or "shrine"))) continue;
 
-                // no squeezing diagonally between natural obstacles (building footprints don't count)
+                // Solid footprints block diagonal movement just like terrain.
                 if (dx != 0 && dy != 0)
                 {
                     if (Pinches(map.At(cx + dx, cy)) || Pinches(map.At(cx, cy + dy))) continue;
                 }
 
-                var cost = isGoal ? 1.0 : Terrain.MoveCost(t.Terrain) / 100.0;
+                var cost = isGoal ? 1.0 : Terrain.MoveCost(t.Terrain, pathfinding) / 100.0;
                 var ng = gScore[cur.i] + cost;
                 if (ng < gScore[ni])
                 {

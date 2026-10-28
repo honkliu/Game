@@ -136,14 +136,15 @@ function arrowFrame(path: { x: number; y: number }[], i: number): number {
   return ARROW[dir(path[i - 1], path[i])][dir(path[i], path[i + 1])];
 }
 
-const terrainCost = (terrain: string | null) =>
-  terrain === 'rough' ? 125 : terrain === 'snow' ? 150 : terrain === 'swamp' ? 175 : 100;
+const terrainCost = (terrain: string | null, pathfinding = 0) =>
+  Math.max(100, (terrain === 'rough' ? 125 : terrain === 'snow' || terrain === 'sand' ? 150 : terrain === 'swamp' ? 175 : 100)
+    - 25 * Math.max(0, Math.min(3, pathfinding)));
 
 /** Index of the last path tile the hero can reach with today's movement points. */
-function reachableSteps(map: MapData, path: { x: number; y: number }[], movement: number): number {
+function reachableSteps(map: MapData, path: { x: number; y: number }[], movement: number, pathfinding = 0): number {
   let left = movement, last = 0;
   for (let i = 1; i < path.length; i++) {
-    left -= terrainCost(map.tiles[path[i].y * map.width + path[i].x]?.terrain ?? null);
+    left -= terrainCost(map.tiles[path[i].y * map.width + path[i].x]?.terrain ?? null, pathfinding);
     if (left < 0) break;
     last = i;
   }
@@ -271,7 +272,7 @@ export function AdventureMap() {
     if (path && path.length > 1) {
       const from = glideRef.current ? glideRef.current.seg + 1 : 1;
       const arrows = h3 ? getDef('ADAG') : null;
-      const reach = reachableSteps(map, path, hero?.movement ?? 0);
+      const reach = reachableSteps(map, path, hero?.movement ?? 0, hero?.skills.pathfinding ?? 0);
       for (let i = from; i < path.length; i++) {
         const p = path[i];
         const sx = (p.x - cam.x) * TILE, sy = (p.y - cam.y) * TILE;
@@ -323,7 +324,7 @@ export function AdventureMap() {
     const town = map.towns.find((tw) => tw.x === t.x && tw.y === t.y);
     if (town && hero.x === t.x && hero.y === t.y) { navigate(`/game/${gameId}/town/${town.id}`); return; }
     const other = map.heroes.find((h) => !h.isMine && h.x === t.x && h.y === t.y);
-    const p = findPath(map, hero.x, hero.y, t.x, t.y);
+    const p = findPath(map, hero.x, hero.y, t.x, t.y, hero.skills.pathfinding ?? 0);
     if (!p || p.length < 2) {
       if (!p) toast('Your hero cannot find a way there.');
       return;
@@ -454,7 +455,7 @@ export function AdventureMap() {
     e.preventDefault();
     if (!map || !hero) return;
     const t = toTile(e);
-    setPath(findPath(map, hero.x, hero.y, t.x, t.y));
+    setPath(findPath(map, hero.x, hero.y, t.x, t.y, hero.skills.pathfinding ?? 0));
   }
 
   function onWheel(e: React.WheelEvent<HTMLCanvasElement>) {
@@ -1380,7 +1381,7 @@ function Minimap(props: { map: MapData; cam: { x: number; y: number }; h3: boole
     />
   );
 }
-function findPath(map: MapData, sx: number, sy: number, tx: number, ty: number): { x: number; y: number }[] | null {
+function findPath(map: MapData, sx: number, sy: number, tx: number, ty: number, pathfinding = 0): { x: number; y: number }[] | null {
   const W = map.width, H = map.height;
   if (sx === tx && sy === ty) return [{ x: sx, y: sy }];
   const key = (x: number, y: number) => y * W + x;
@@ -1394,11 +1395,10 @@ function findPath(map: MapData, sx: number, sy: number, tx: number, ty: number):
   const open: { i: number; f: number }[] = [{ i: start, f: h(start) }];
   const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
   let iter = 0;
-  // mines, monsters, towns, the Obelisk and heroes are reached by stepping "into" them from next door
+  // Solid objects are visitable destinations, never transit tiles.
   const visitable = (i: number) => occupied.has(i) ||
-    ['mine', 'monster', 'town', 'obelisk'].includes(map.tiles[i].objectKind ?? '');
-  // a diagonal step may not squeeze between natural obstacles; building footprints don't count (as the server)
-  const pinches = (t: MapTile) => !t.passable && !['block', 'town', 'mine'].includes(t.objectKind ?? '');
+    ['mine', 'monster', 'town', 'obelisk', 'shrine'].includes(map.tiles[i].objectKind ?? '');
+  const pinches = (i: number) => !map.tiles[i].passable || occupied.has(i);
 
   while (open.length && iter++ < 20000) {
     let bi = 0;
@@ -1424,11 +1424,10 @@ function findPath(map: MapData, sx: number, sy: number, tx: number, ty: number):
         if (!t.passable && !visitable(ni)) continue;
       } else if (!t.passable || occupied.has(ni)) continue;
       if (dx && dy) {
-        const a = map.tiles[key(cx + dx, cy)], b = map.tiles[key(cx, cy + dy)];
-        if (pinches(a) || pinches(b)) continue;
+        if (pinches(key(cx + dx, cy)) || pinches(key(cx, cy + dy))) continue;
       }
       // terrain cost, with a hair extra on diagonals so straight routes win ties
-      const ng = g[cur.i] + (ni === goal ? 1 : terrainCost(t.terrain) / 100) + (dx && dy ? 0.001 : 0);
+      const ng = g[cur.i] + (ni === goal ? 1 : terrainCost(t.terrain, pathfinding) / 100) + (dx && dy ? 0.001 : 0);
       if (ng < g[ni]) {
         g[ni] = ng;
         came[ni] = cur.i;

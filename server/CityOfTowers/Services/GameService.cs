@@ -169,7 +169,7 @@ public class GameService
             // magic heroes start with a spellbook, as in HoMM3
             ArtifactsJson = def.Might ? "[]" : JsonSerializer.Serialize(new[] { TownRules.Spellbook }, Json)
         };
-        hero.MaxMana = 10 + hero.Knowledge * 10;
+        hero.MaxMana = ManaCapacity(hero);
         hero.Mana = hero.MaxMana;
         hero.MaxMovement = MaxMovement(hero);
         hero.Movement = hero.MaxMovement;
@@ -188,6 +188,14 @@ public class GameService
         var m = 1500;
         if (skills.TryGetValue("logistics", out var log)) m += 150 * log;
         return m;
+    }
+
+    public static int ManaCapacity(Hero hero)
+    {
+        var knowledge = Math.Max(1, hero.Knowledge + Artifacts.Bonus(TownRules.Artifacts(hero)).Knowledge);
+        var intelligence = Math.Clamp(ParseSkills(hero.SkillsJson).GetValueOrDefault("intelligence"), 0, 3);
+        var multiplier = intelligence switch { 1 => 1.25, 2 => 1.5, 3 => 2.0, _ => 1.0 };
+        return (int)(10 * knowledge * multiplier);
     }
 
     // ---------------------------------------------------------------- game creation
@@ -307,8 +315,13 @@ public class GameService
     }
 
     // ---------------------------------------------------------------- map
-    public Task<AdventureMap> LoadMapAsync(Game game) =>
-        Task.FromResult(JsonSerializer.Deserialize<AdventureMap>(game.MapJson, Json) ?? new AdventureMap());
+    public Task<AdventureMap> LoadMapAsync(Game game)
+    {
+        var map = JsonSerializer.Deserialize<AdventureMap>(game.MapJson, Json) ?? new AdventureMap();
+        // Older saves marked shrines as walk-through pickups.
+        foreach (var tile in map.Tiles.Where(t => t.ObjectKind == "shrine")) tile.Passable = false;
+        return Task.FromResult(map);
+    }
 
     public async Task SaveMapAsync(Game game, AdventureMap map)
     {
@@ -346,8 +359,6 @@ public class GameService
         return (tx, ty);
     }
 
-    private static bool Corner(MapTile t) => Pathfinder.Pinches(t);
-
     public async Task<(bool ok, string? error, Hero? hero)> MoveHeroAsync(Guid heroId, string playerId, List<(int x, int y)> path)
     {
         var hero = await _db.Heroes.FirstOrDefaultAsync(h => h.Id == heroId);
@@ -366,6 +377,7 @@ public class GameService
         var map = await LoadMapAsync(game);
         var others = await _db.Heroes.Where(h => h.GameId == hero.GameId && h.Id != hero.Id)
             .Select(h => new { h.X, h.Y }).ToListAsync();
+        bool Corner(int x, int y) => Pathfinder.Pinches(map.At(x, y)) || others.Any(o => o.X == x && o.Y == y);
         var moved = false;
         var acted = false;
         string? blocked = null;
@@ -378,13 +390,15 @@ public class GameService
             var dy = y - hero.Y;
             if (Math.Max(Math.Abs(dx), Math.Abs(dy)) != 1) { blocked = "Heroes move one tile at a time."; break; }
             if (others.Any(o => o.X == x && o.Y == y)) { blocked = "Another hero stands there."; break; }
+            if (dx != 0 && dy != 0 && (Corner(hero.X + dx, hero.Y) || Corner(hero.X, hero.Y + dy)))
+            { blocked = "Cannot cut that corner."; break; }
 
             var tile = map.At(x, y);
-            var cost = Terrain.MoveCost(tile.Terrain);
+            var cost = Terrain.MoveCost(tile.Terrain, ParseSkills(hero.SkillsJson).GetValueOrDefault("pathfinding"));
 
-            // Mines, monster stacks and obelisks are visited from the neighbouring tile. A town is
-// different: the hero steps onto its own town's tile and stands inside it, as in HoMM3.
-            if (!tile.Passable && tile.ObjectKind is "mine" or "monster" or "town" or "obelisk")
+            // Mines, creatures, shrines and obelisks are visited from the neighbouring tile. A town is
+            // different: the hero steps onto its own town's tile and stands inside it, as in HoMM3.
+            if (!tile.Passable && tile.ObjectKind is "mine" or "monster" or "town" or "obelisk" or "shrine")
             {
                 if (tile.ObjectKind == "town")
                 {
@@ -416,8 +430,6 @@ public class GameService
             }
 
             if (!tile.Passable) { blocked = "Cannot move there."; break; }
-            if (dx != 0 && dy != 0 && (Corner(map.At(hero.X + dx, hero.Y)) || Corner(map.At(hero.X, hero.Y + dy))))
-            { blocked = "Cannot cut that corner."; break; }
             if (hero.Movement < cost) { blocked = "Not enough movement left today."; break; }
 
             hero.Movement -= cost;
@@ -483,6 +495,8 @@ public class GameService
                 var bit = 1 << ownerIndex;
                 if ((tile.Owner & bit) != 0)
                     return (false, (string?)null);
+                if (tile.Owner != 0)
+                    return (false, (string?)"This mine belongs to another city. Sharing requires its owner's permission.");
                 tile.Owner |= bit;
                 return (false, (string?)$"Claimed the {tile.ObjectData} mine.");
             }
@@ -505,10 +519,13 @@ public class GameService
                     return (false, (string?)"You need a spellbook to learn the shrine's spell.");
                 var spells = ParseStringArray(hero.SpellsJson).ToList();
                 var spell = tile.ObjectData ?? "spell";
+                if (!Spells.All.TryGetValue(spell, out var shrineSpell))
+                    return (false, (string?)"This shrine has no spell to teach.");
+                var wisdom = ParseSkills(hero.SkillsJson).GetValueOrDefault("wisdom");
+                if (shrineSpell.Level > Spells.MaxLearnable(wisdom))
+                    return (false, (string?)"Your hero needs greater Wisdom to learn this spell.");
                 if (!spells.Contains(spell)) spells.Add(spell);
                 hero.SpellsJson = JsonSerializer.Serialize(spells, Json);
-                tile.ObjectKind = null;
-                tile.ObjectData = null;
                 return (false, (string?)"Learned a spell.");
             }
             case "monster":
@@ -576,28 +593,26 @@ public class GameService
         {
             hero.Level++;
             var rng = Random.Shared;
-            if (rng.Next(2) == 0)
+            switch (rng.Next(4))
             {
-                switch (rng.Next(4))
-                {
-                    case 0: hero.Attack++; break;
-                    case 1: hero.Defense++; break;
-                    case 2: hero.Power++; break;
-                    default: hero.Knowledge++; hero.MaxMana += 10; break;
-                }
+                case 0: hero.Attack++; break;
+                case 1: hero.Defense++; break;
+                case 2: hero.Power++; break;
+                default: hero.Knowledge++; break;
             }
-            else
+            var skills = ParseSkills(hero.SkillsJson);
+            var upgradable = skills.Where(kv => !kv.Key.StartsWith('_') && kv.Value < 3).Select(kv => kv.Key).ToList();
+            if (upgradable.Count > 0)
             {
-                var skills = ParseSkills(hero.SkillsJson);
-                var upgradable = skills.Where(kv => kv.Value < 3).Select(kv => kv.Key).ToList();
-                if (upgradable.Count > 0)
-                {
-                    var pick = upgradable[rng.Next(upgradable.Count)];
-                    skills[pick]++;
-                    hero.SkillsJson = JsonSerializer.Serialize(skills, Json);
-                }
-                else hero.Attack++;
+                skills[upgradable[rng.Next(upgradable.Count)]]++;
             }
+            else if (skills.Count(kv => !kv.Key.StartsWith('_')) < 8)
+            {
+                var candidates = Heroes.All.Values.SelectMany(h => h.Skills).Distinct().Where(k => !skills.ContainsKey(k)).ToArray();
+                if (candidates.Length > 0) skills[candidates[rng.Next(candidates.Length)]] = 1;
+            }
+            hero.SkillsJson = JsonSerializer.Serialize(skills, Json);
+            hero.MaxMana = ManaCapacity(hero);
         }
     }
 
@@ -681,6 +696,13 @@ public class GameService
                     // Castle Stables' bonus lasts until the end of the week it was granted in
                     h.MaxMovement = MaxMovement(h) + (TownRules.StabledThisWeek(h, game) ? 400 : 0);
                     h.Movement = h.MaxMovement;
+                    h.MaxMana = ManaCapacity(h);
+                    var inGuild = towns.Any(t => t.PlayerId == p.Id && t.X == h.X && t.Y == h.Y
+                        && ParseStringArray(t.BuildingsJson).Contains("mageGuild1"));
+                    var regeneration = 1 + Math.Clamp(ParseSkills(h.SkillsJson).GetValueOrDefault("mysticism"), 0, 3);
+                    if (h.Mana < h.MaxMana)
+                        h.Mana = inGuild && TownRules.HasGear(h, TownRules.Spellbook)
+                            ? h.MaxMana : Math.Min(h.MaxMana, h.Mana + regeneration);
                 }
 
                 // towns keep their surroundings in sight; Cover of Darkness re-shrouds rivals' land
