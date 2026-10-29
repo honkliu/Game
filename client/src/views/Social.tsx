@@ -7,6 +7,7 @@ import { Btn, Loading, Panel, Txt } from '../ui/Layout';
 import { toast } from '../ui/Toast';
 import { socket } from '../ws';
 import { FACTION_COLOR, FACTION_LABEL, HeroPortrait, ResIcon } from '../ui/homm';
+import { NativeMessage } from './HeroWindows';
 
 const RES = ['wood', 'ore', 'mercury', 'sulfur', 'crystal', 'gems', 'gold'] as const;
 
@@ -23,12 +24,15 @@ export function Social() {
   const [giveAmt, setGiveAmt] = useState(5);
   const [want, setWant] = useState('ore');
   const [wantAmt, setWantAmt] = useState(5);
+  const [agreementConfirm, setAgreementConfirm] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!gameId) return;
     try {
       const [g, m, t] = await Promise.all([api.getGame(gameId), api.getMessages(gameId), api.getTrades(gameId)]);
       setGame(g);
+      if (g.state === 'Finished') navigate(`/game/${gameId}/over`);
       setMessages(m);
       setTrades(t);
       if (!toPlayer && g.players.length) {
@@ -41,20 +45,22 @@ export function Social() {
     } catch (e) {
       if (e instanceof ApiError) toast(e.message);
     }
-  }, [gameId, toPlayer]);
+  }, [gameId, toPlayer, navigate]);
 
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
     if (!gameId) return;
     socket.connect(gameId);
-    return socket.on((e) => { if (e.type === 'message' || e.type === 'trade') load(); });
+    return socket.on((e) => { if (e.type === 'message' || e.type === 'trade' || e.type === 'agreement') load(); });
   }, [gameId, load]);
 
   if (!game) return <Loading />;
 
   const me = localStorage.getItem('cityoftowers.player') ?? '';
   const others = game.players.filter((p) => p.name.toLowerCase() !== me);
+  const myself = game.players.find(p => p.name.toLowerCase() === me);
+  const agreed = !!myself && game.endAgreement.includes(myself.playerId);
 
   async function send() {
     if (!draft.trim() || !toPlayer) return;
@@ -86,8 +92,18 @@ export function Social() {
     <>
       <Panel x={0} y={0} w={800} h={40} style={{ borderRadius: 0, borderLeft: 'none', borderRight: 'none', borderTop: 'none' }}>
         <Txt x={16} y={12} size={15} bold className="heading">SOCIAL</Txt>
+        <Btn x={440} y={6} w={245} h={28} label={agreed ? 'Withdraw end agreement' : 'Agree to end game'} size={11}
+          disabled={game.state !== 'InProgress'} onClick={() => setAgreementConfirm(true)} />
         <Btn x={700} y={6} w={90} h={28} label="Back" size={11} onClick={() => navigate(`/game/${gameId}`)} />
       </Panel>
+      {agreementConfirm && <NativeMessage text={agreed ? 'Withdraw your agreement to end this game?' :
+        `End the game when every human agrees? ${game.endAgreement.length} of ${game.players.filter(p => !p.isAi).length} have agreed. Computer seats follow human unanimity.`}
+        onClose={() => setAgreementConfirm(false)} onConfirm={() => {
+          setAgreementConfirm(false);
+          api.endAgreement(gameId!, !agreed).then(result => result.state === 'Finished'
+            ? navigate(`/game/${gameId}/over`) : load()).catch(e => setError(e instanceof ApiError ? e.message : 'Agreement failed.'));
+        }} />}
+      {error && <NativeMessage text={error} onClose={() => setError(null)} />}
 
       {/* messages */}
       <Panel x={16} y={52} w={380} h={250}>

@@ -18,6 +18,20 @@ public class SocialService
 
     // ---------------------------------------------------------------- encounters
     public record EncounterState(string Creature, int Count, int X, int Y);
+    public record EncounterOffer(string Creature, string Name, int Count, int Gold, bool CanRecruit);
+
+    public static EncounterOffer? GetEncounterOffer(Hero hero)
+    {
+        if (string.IsNullOrEmpty(hero.PendingEncounterJson)) return null;
+        EncounterState? encounter;
+        try { encounter = JsonSerializer.Deserialize<EncounterState>(hero.PendingEncounterJson, Json); }
+        catch (JsonException) { return null; }
+        if (encounter == null || string.IsNullOrEmpty(encounter.Creature) || encounter.Count <= 0
+            || !Creatures.All.TryGetValue(encounter.Creature, out var creature)) return null;
+        return new EncounterOffer(encounter.Creature, creature.Name, encounter.Count,
+            Encounters.RecruitCost(creature.Gold, encounter.Count),
+            Encounters.CanRecruit(Encounters.Strength(hero.ArmyJson), Encounters.StackStrength(creature.AiValue, encounter.Count)));
+    }
 
     /// <summary>Resolve a peaceful encounter with a wandering monster stack.</summary>
     public async Task<(bool ok, string? error, string? message)> ResolveEncounterAsync(
@@ -37,6 +51,7 @@ public class SocialService
         if (enc == null) return (false, "There is no encounter here.", null);
 
         var game = await _db.Games.FirstAsync(g => g.Id == hero.GameId);
+        if (game.State != GameState.InProgress) return (false, "The game is not in progress.", null);
         var map = JsonSerializer.Deserialize<AdventureMap>(game.MapJson, Json);
         if (map == null) return (false, "Map not found.", null);
 
@@ -76,6 +91,9 @@ public class SocialService
 
                 player.Gold -= cost;
                 hero.ArmyJson = GameService.SerializeArmy(army);
+                var effects = GameService.Effects(hero);
+                hero.MaxMovement = GameService.MaxMovement(hero) + (TownRules.StabledThisWeek(hero, game) ? 400 : 0)
+                    + (effects.HasteTurn == game.CurrentTurn ? effects.HasteBonus : 0);
                 hero.PendingEncounterJson = null;
                 tile.ObjectKind = null;
                 tile.ObjectData = null;
@@ -104,6 +122,7 @@ public class SocialService
 
         var from = await PlayerBySeededAsync(gameId, fromPlayerId);
         if (from == null) return (false, "Unknown player.");
+        if (!await IsActive(gameId)) return (false, "The game is not in progress.");
         if (!await _db.Players.AnyAsync(p => p.Id == toPlayerId && p.GameId == gameId))
             return (false, "Recipient not found.");
 
@@ -150,9 +169,13 @@ public class SocialService
     {
         if (giveAmount <= 0 || wantAmount <= 0) return (false, "Amounts must be positive.");
         if (give == want) return (false, "Cannot trade a resource for itself.");
+        if (!TownRules.IsResource(give) || !TownRules.IsResource(want)) return (false, "Unknown resource.");
 
         var from = await PlayerBySeededAsync(gameId, fromPlayerId);
         if (from == null) return (false, "Unknown player.");
+        if (!await IsActive(gameId)) return (false, "The game is not in progress.");
+        if (toPlayerId == from.Id || !await _db.Players.AnyAsync(p => p.Id == toPlayerId && p.GameId == gameId))
+            return (false, "Choose another player in this game.");
         if (GetRes(from, give) < giveAmount) return (false, "You do not have that much " + give + ".");
 
         _db.TradeOffers.Add(new TradeOffer
@@ -178,6 +201,7 @@ public class SocialService
 
         var me = await PlayerBySeededAsync(offer.GameId, playerId);
         if (me == null || me.Id != offer.ToPlayerId) return (false, "This offer is not for you.");
+        if (!await IsActive(offer.GameId)) return (false, "The game is not in progress.");
 
         if (!accept)
         {
@@ -191,6 +215,9 @@ public class SocialService
             return (false, "The other player no longer has that resource.");
         if (GetRes(me, offer.WantResource) < offer.WantAmount)
             return (false, "You do not have enough " + offer.WantResource + ".");
+        if ((long)GetRes(me, offer.GiveResource) + offer.GiveAmount > int.MaxValue
+            || (long)GetRes(from, offer.WantResource) + offer.WantAmount > int.MaxValue)
+            return (false, "That trade would exceed the resource limit.");
 
         SetRes(from, offer.GiveResource, GetRes(from, offer.GiveResource) - offer.GiveAmount);
         SetRes(me, offer.GiveResource, GetRes(me, offer.GiveResource) + offer.GiveAmount);
@@ -260,8 +287,11 @@ public class SocialService
 
         var me = await PlayerBySeededAsync(project.GameId, playerId);
         if (me == null) return (false, "Unknown player.");
+        if (!await IsActive(project.GameId)) return (false, "The game is not in progress.");
 
         if (gold < 0 || wood < 0 || ore < 0) return (false, "Amounts must not be negative.");
+        if ((long)project.ContributedGold + gold > int.MaxValue || (long)project.ContributedWood + wood > int.MaxValue
+            || (long)project.ContributedOre + ore > int.MaxValue) return (false, "That contribution is too large.");
         if (GetRes(me, "gold") < gold || GetRes(me, "wood") < wood || GetRes(me, "ore") < ore)
             return (false, "Not enough resources.");
 
@@ -325,6 +355,7 @@ public class SocialService
 
         var me = await PlayerBySeededAsync(gameId, playerId);
         if (me == null) return (false, "Unknown player.");
+        if (!await IsActive(gameId)) return (false, "The game is not in progress.");
 
         _db.MapAnnotations.Add(new MapAnnotation
         {
@@ -395,6 +426,9 @@ public class SocialService
         if (set.Contains("mageGuild1")) return 3;
         return 0;
     }
+
+    private Task<bool> IsActive(Guid gameId) =>
+        _db.Games.AnyAsync(g => g.Id == gameId && g.State == GameState.InProgress);
 
     public async Task<(Guid? id, string? error)> AddWallMessageAsync(
         Guid townId, string playerId, string body, Guid? parentId)

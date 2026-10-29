@@ -25,6 +25,7 @@ public class AppDb : DbContext
     {
         b.Entity<Player>().HasIndex(p => new { p.GameId, p.Faction }).IsUnique();
         b.Entity<Hero>().HasIndex(h => new { h.GameId, h.PlayerId });
+        b.Entity<Hero>().Property(h => h.PendingTreasureJson).IsConcurrencyToken();
         b.Entity<Town>().HasIndex(t => new { t.GameId, t.PlayerId });
         b.Entity<WallMessage>().HasIndex(x => new { x.TownId, x.CreatedAt });
         b.Entity<Comment>().HasIndex(x => new { x.PostId, x.CreatedAt });

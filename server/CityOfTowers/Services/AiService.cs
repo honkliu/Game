@@ -116,6 +116,7 @@ public class AiService
     {
         var hero = await _db.Heroes.FirstOrDefaultAsync(h => h.PlayerId == player.Id);
         if (hero == null || hero.Movement <= 0) return;
+        while (HeroProgression.Pending(hero) is { } level) HeroProgression.Choose(hero, level.Choices.FirstOrDefault()?.Key);
 
         var map = await _games.LoadMapAsync(game);
         var target = NearestMine(map, player, hero);
@@ -123,10 +124,11 @@ public class AiService
 
         // step one tile toward the target; the move endpoint handles the rest
         var step = StepToward(map, hero.X, hero.Y, target.Value.x, target.Value.y,
-            GameService.ParseSkills(hero.SkillsJson).GetValueOrDefault("pathfinding"));
+            GameService.ParseSkills(hero.SkillsJson).GetValueOrDefault("pathfinding"), GameService.NativeTerrain(hero));
         if (step == null) return;
         var playerId = Seeded.Players.First(p => p.Faction == player.Faction).Id;
         await _games.MoveHeroAsync(hero.Id, playerId, [step.Value]);
+        while (HeroProgression.Pending(hero) is { } level) HeroProgression.Choose(hero, level.Choices.FirstOrDefault()?.Key);
     }
 
     private static (int x, int y)? NearestMine(AdventureMap map, Player player, Hero hero)
@@ -148,9 +150,9 @@ public class AiService
         return best;
     }
 
-    private static (int x, int y)? StepToward(AdventureMap map, int sx, int sy, int tx, int ty, int pathfinding)
+    private static (int x, int y)? StepToward(AdventureMap map, int sx, int sy, int tx, int ty, int pathfinding, string? nativeTerrain)
     {
-        var path = Pathfinder.FindPath(map, sx, sy, tx, ty, pathfinding);
+        var path = Pathfinder.FindPath(map, sx, sy, tx, ty, pathfinding, nativeTerrain);
         return path is { Count: > 1 } ? path[1] : null;
     }
 

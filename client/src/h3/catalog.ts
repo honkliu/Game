@@ -1,4 +1,8 @@
 // Mapping from City of Towers keys to original HoMM3 asset names / frame indices.
+import objectGeometry from './object-geometry.json';
+
+export const OBJECT_GEOMETRY: Record<string, { x: number; rows: string[] }> = objectGeometry.templates;
+export const objectAnchorX = (sprite: string) => OBJECT_GEOMETRY[sprite]?.x ?? 0;
 
 export const FACTIONS = ['castle', 'rampart', 'tower', 'inferno', 'necropolis', 'dungeon', 'stronghold', 'fortress', 'conflux'];
 
@@ -151,13 +155,13 @@ export function edgeFrames(terrain: string): Record<string, [R, R]> | null {
 }
 
 export const TREE_DEFS: Record<string, string[]> = {
-  default: ['AVLtRo04', 'AVLtRo06', 'AVLtRo01', 'AVLtRo07', 'AVLtRo08', 'AVLSPTR0', 'AVLSPTR1', 'AVLSPTR2'],
-  dirt: ['AVLtr1d0', 'AVLtr2d0', 'AVLtr3d0', 'AVLtRo04', 'AVLtRo06'],
-  snow: ['avlsntr0', 'avlsntr1', 'avlsntr2', 'avlsntr3']
+  default: objectGeometry.groups.tree,
+  dirt: objectGeometry.groups['tree.dirt'],
+  snow: objectGeometry.groups['tree.snow']
 };
 
-export const ROCK_DEFS = ['AVLr09u0', 'AVLr13u0', 'AVLR14R0', 'AVLR15R0', 'AVLr16u0', 'AVLrk1s0', 'AVLrk4s0'];
-export const MOUNTAIN_DEFS = ['AVLr02r0', 'AVLr04r0', 'AVLr09r0', 'AVLr06u0', 'AVLr12u0', 'AVLr02u0'];
+export const ROCK_DEFS = objectGeometry.groups.rock;
+export const MOUNTAIN_DEFS = objectGeometry.groups.mountain;
 
 export const OBJECT_DEF: Record<string, string> = {
   treasure: 'AVTchst0', shrine: 'AVXl1sh0', grail: 'AvXOblY', obelisk: 'AvXOblY'

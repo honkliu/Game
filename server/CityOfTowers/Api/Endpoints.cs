@@ -6,12 +6,25 @@ using CityOfTowers.Services;
 
 namespace CityOfTowers.Api;
 
-public static class Endpoints
+public static partial class Endpoints
 {
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     public static void MapApi(this WebApplication app)
     {
+        app.Use(async (context, next) =>
+        {
+            var serialized = context.Request.Path.StartsWithSegments("/api")
+                && (!HttpMethods.IsGet(context.Request.Method)
+                    || context.Request.Path.Value!.EndsWith("/map", StringComparison.Ordinal)
+                    || context.Request.Path.Value!.EndsWith("/visions", StringComparison.Ordinal));
+            if (!serialized) { await next(context); return; }
+            await GameService.MutationLock.WaitAsync(context.RequestAborted);
+            try { await next(context); }
+            finally { GameService.MutationLock.Release(); }
+        });
+        app.MapHeroActions();
+        app.MapPeacefulActions();
         // ------------------------------------------------------------ players
         app.MapGet("/api/players", () => Results.Ok(Seeded.Players.Select(p => new
         {
@@ -89,6 +102,7 @@ public static class Endpoints
                 mapWidth = game.MapWidth,
                 mapHeight = game.MapHeight,
                 winnerUserId = game.WinnerUserId,
+                endAgreement = GameService.ParseStringArray(game.EndAgreementJson),
                 grailRevealed = game.GrailRevealed,
                 grailX = game.GrailRevealed ? game.GrailX : (int?)null,
                 grailY = game.GrailRevealed ? game.GrailY : (int?)null,
@@ -145,7 +159,9 @@ public static class Endpoints
                     variant = t.Variant,
                     objectKind = t.ObjectKind,
                     objectData = t.ObjectData,
+                    sprite = t.Sprite,
                     owner = t.Owner,
+                    mineShared = t.MineShared,
                     passable = t.Passable,
                     fog = f
                 });
@@ -170,6 +186,7 @@ public static class Endpoints
                     level = h.Level,
                     movement = h.Movement,
                     maxMovement = h.MaxMovement,
+                    nativeTerrain = GameService.NativeTerrain(h),
                     isMine = h.PlayerId == player.Id
                 }),
                 towns = towns.Where(t => t.PlayerId == player.Id || Explored(t.X, t.Y)).Select(t => new
@@ -213,7 +230,18 @@ public static class Endpoints
             await ws.BroadcastAsync(hero!.GameId, "heroMoved", new { heroId = hero.Id, x = hero.X, y = hero.Y });
             // the hero payload is unchanged; a move notice (enter-town, pickup) rides in a header
             if (games.LastMoveMessage != null) ctx.Response.Headers["X-Move-Message"] = games.LastMoveMessage;
+            if (games.LastMoveNotices.Count > 0)
+                ctx.Response.Headers["X-Move-Events"] = JsonSerializer.Serialize(games.LastMoveNotices, Json);
             return Results.Ok(HeroDto(hero!));
+        });
+
+        app.MapPost("/api/heroes/{heroId:guid}/treasure", async (Guid heroId, TreasureReq req, GameService games, AppDb db, WsHub ws, HttpContext ctx) =>
+        {
+            var (ok, error, message) = await games.ResolveTreasureAsync(heroId, ctx.Request.Headers["X-Player-Id"].ToString(), req.Choice ?? "");
+            if (!ok) return Results.BadRequest(new { error });
+            var hero = await db.Heroes.FirstAsync(h => h.Id == heroId);
+            await ws.BroadcastAsync(hero.GameId, "heroMoved", new { heroId });
+            return Results.Ok(new { message, notices = games.LastMoveNotices });
         });
 
         // ------------------------------------------------------------ towns
@@ -264,7 +292,7 @@ public static class Endpoints
                 garrison = GameService.ParseArmy(town.GarrisonJson),
                 heroInTown = await HeroInTownAsync(db, player.Id, town.X, town.Y),
                 tavern = GameService.ParseStringArray(town.TavernJson),
-                mageGuild = GameService.ParseStringArray(town.MageGuildJson),
+                mageGuild = GameService.ParseStringArray(town.MageGuildJson).Select(Spells.CanonicalKey).Distinct(),
                 resources = new
                 {
                     wood = player.Wood, ore = player.Ore, mercury = player.Mercury, sulfur = player.Sulfur,
@@ -384,6 +412,7 @@ public static class Endpoints
                 if (army == null || !GameService.AddToArmy(army, creatureKey, count))
                     return Results.BadRequest(new { error = "There is no room for them in the garrison." });
                 hero!.ArmyJson = GameService.SerializeArmy(army);
+                await RefreshArmyMovementAsync(db, hero);
             }
 
             TownRules.Pay(player, cost);
@@ -445,7 +474,7 @@ public static class Endpoints
             if (!built.Contains("tavern")) return Results.BadRequest(new { error = "No Tavern built." });
             if (await db.Heroes.AnyAsync(h => h.GameId == town.GameId && h.X == town.X && h.Y == town.Y))
                 return Results.BadRequest(new { error = "A hero is already visiting this town." });
-            if (player.Gold < 2000) return Results.BadRequest(new { error = "Not enough gold (2000)." });
+            if (player.Gold < 2500) return Results.BadRequest(new { error = "Not enough gold (2500)." });
 
             var pool = GameService.ParseStringArray(town.TavernJson).ToList();
             var key = req.HeroKey ?? "";
@@ -454,7 +483,7 @@ public static class Endpoints
             var count = await db.Heroes.CountAsync(h => h.PlayerId == player.Id);
             if (count >= 8) return Results.BadRequest(new { error = "You already have 8 heroes." });
 
-            player.Gold -= 2000;
+            player.Gold -= 2500;
             pool.Remove(key);
             town.TavernJson = JsonSerializer.Serialize(pool, Json);
 
@@ -507,6 +536,7 @@ public static class Endpoints
                 return Results.BadRequest(new { error = "A hero must keep at least one stack." });
 
             hero.ArmyJson = GameService.SerializeArmy(heroArmy);
+            await RefreshArmyMovementAsync(db, hero);
             town.GarrisonJson = GameService.SerializeArmy(garrison);
             await db.SaveChangesAsync();
             return Results.Ok(new { moved = count, creature = stack.Creature });
@@ -532,7 +562,11 @@ public static class Endpoints
                 req.FromArmy == "hero", req.ToArmy == "hero");
             if (error != null) return Results.BadRequest(new { error });
 
-            if (hero != null) hero.ArmyJson = GameService.SerializeArmy(heroArmy!);
+            if (hero != null)
+            {
+                hero.ArmyJson = GameService.SerializeArmy(heroArmy!);
+                await RefreshArmyMovementAsync(db, hero);
+            }
             town.GarrisonJson = GameService.SerializeArmy(garrison);
             await db.SaveChangesAsync();
             return Results.Ok(new { hero = heroArmy, garrison });
@@ -580,7 +614,11 @@ public static class Endpoints
             if (!TownRules.CanAfford(player!, cost)) return Results.BadRequest(new { error = "Not enough resources." });
             TownRules.Pay(player!, cost);
             army[req.Slot] = stack with { Creature = upKey };
-            if (req.Army == "hero") hero!.ArmyJson = GameService.SerializeArmy(army);
+            if (req.Army == "hero")
+            {
+                hero!.ArmyJson = GameService.SerializeArmy(army);
+                await RefreshArmyMovementAsync(db, hero);
+            }
             else town.GarrisonJson = GameService.SerializeArmy(army);
             await db.SaveChangesAsync();
             return Results.Ok(new { creature = upKey, cost });
@@ -640,12 +678,12 @@ public static class Endpoints
             if (c.Faction == "necropolis" || c.Abilities.Contains("undead")) return Results.BadRequest(new { error = "The undead cannot be transformed." });
             army[req.Slot] = stack with { Creature = "skeleton" };
             hero.ArmyJson = GameService.SerializeArmy(army);
+            await RefreshArmyMovementAsync(db, hero);
             await db.SaveChangesAsync();
             return Results.Ok(new { creature = "skeleton", count = stack.Count });
         });
 
-        // Cast a spell the hero knows. Adventure-map spells have real effects; the rest
-// are acknowledged (there is no combat in this game).
+        // Legacy combat spells remain learnable catalogue entries, never paid no-op casts.
         app.MapPost("/api/heroes/{heroId:guid}/cast", async (Guid heroId, CastReq req, AppDb db, GameService games, HttpContext ctx) =>
         {
             var sp = Seeded.Find(ctx.Request.Headers["X-Player-Id"]);
@@ -656,25 +694,96 @@ public static class Endpoints
             var player = await db.Players.FirstAsync(p => p.Id == hero.PlayerId);
             if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your hero." });
 
-            var key = req.Spell ?? "";
+            if (hero.PendingEncounterJson != null || hero.PendingTreasureJson != null || hero.PendingLevelJson != null)
+                return Results.BadRequest(new { error = "Resolve the pending encounter or treasure choice first." });
+            var key = Spells.CanonicalKey(req.Spell ?? "");
             if (!Spells.All.TryGetValue(key, out var spell)) return Results.BadRequest(new { error = "Unknown spell." });
-            var known = GameService.ParseStringArray(hero.SpellsJson);
+            if (!spell.Adventure) return Results.BadRequest(new { error = "That spell is not available in this peaceful game." });
+            var known = GameService.ParseStringArray(hero.SpellsJson).Select(Spells.CanonicalKey);
             if (!known.Contains(key)) return Results.BadRequest(new { error = "Your hero does not know that spell." });
             if (!TownRules.HasGear(hero, TownRules.Spellbook)) return Results.BadRequest(new { error = "Your hero has no spellbook." });
-            if (hero.Mana < spell.Cost) return Results.BadRequest(new { error = "Not enough spell points." });
+            var skills = GameService.ParseSkills(hero.SkillsJson);
+            var manaCost = Spells.ManaCost(spell, skills);
+            if (hero.Mana < manaCost) return Results.BadRequest(new { error = "Not enough spell points." });
 
             var game = await db.Games.FirstAsync(g => g.Id == hero.GameId);
             if (game.State != GameState.InProgress) return Results.BadRequest(new { error = "The game is not in progress." });
 
             string message;
+            object? view = null;
+            var effects = GameService.Effects(hero);
             switch (key)
             {
+                case "fly":
+                    var air = Math.Clamp(skills.GetValueOrDefault("air"), 0, 3);
+                    GameService.SetEffects(hero, effects with
+                    {
+                        FlightTurn = game.CurrentTurn,
+                        FlightPenalty = air >= 3 ? 0 : air >= 2 ? 20 : 40
+                    });
+                    message = "You can fly until tomorrow. Choose a legal landing tile.";
+                    break;
+                case "haste":
+                    if (effects.HasteTurn == game.CurrentTurn)
+                        return Results.BadRequest(new { error = "Haste is already active today." });
+                    var haste = skills.GetValueOrDefault("air") >= 2 ? 500 : 300;
+                    GameService.SetEffects(hero, effects with { HasteTurn = game.CurrentTurn, HasteBonus = haste });
+                    hero.MaxMovement += haste;
+                    hero.Movement += haste;
+                    message = $"Haste grants {haste} movement for today.";
+                    break;
+                case "cure":
+                    GameService.SetEffects(hero, effects with { MovementPenalty = 0 });
+                    hero.MaxMovement = GameService.MaxMovement(hero) + (TownRules.StabledThisWeek(hero, game) ? 400 : 0)
+                        + (effects.HasteTurn == game.CurrentTurn ? effects.HasteBonus : 0);
+                    message = effects.MovementPenalty > 0 ? "Cure removes the negative movement effect." : "Cure finds no negative adventure effects.";
+                    break;
+                case "viewAir":
+                case "viewEarth":
+                {
+                    var map = await games.LoadMapAsync(game);
+                    var mastery = Math.Clamp(skills.GetValueOrDefault(spell.School), 0, 3);
+                    var locations = new List<object>();
+                    for (var y = 0; y < map.Height; y++)
+                    for (var x = 0; x < map.Width; x++)
+                    {
+                        var tile = map.At(x, y);
+                        var show = key == "viewAir" ? tile.ObjectKind == "artifact"
+                            : tile.ObjectKind == "resource" || mastery >= 2 && tile.ObjectKind == "mine";
+                        if (!show) continue;
+                        var name = tile.ObjectKind == "artifact" ? Artifacts.Of(tile.ObjectData ?? "").Name
+                            : (tile.ObjectData ?? "").Split(':')[0] + (tile.ObjectKind == "mine" ? " mine" : "");
+                        locations.Add(new { kind = tile.ObjectKind, x, y, name });
+                    }
+                    if (key == "viewAir" && mastery >= 2)
+                        foreach (var seen in await db.Heroes.Where(h => h.GameId == game.Id).ToListAsync())
+                            locations.Add(new { kind = "hero", x = seen.X, y = seen.Y, name = seen.Name });
+                    if (key == "viewAir" && mastery >= 3)
+                        foreach (var seen in await db.Towns.Where(t => t.GameId == game.Id).ToListAsync())
+                            locations.Add(new { kind = "town", x = seen.X, y = seen.Y, name = seen.Name });
+                    var fog = GameService.ParseFog(player.FogJson, map.Width * map.Height);
+                    view = new
+                    {
+                        width = map.Width, height = map.Height,
+                        terrain = map.Tiles.Select((t, i) => key == "viewEarth" && mastery >= 3 || fog[i] > 0 ? t.Terrain : null),
+                        locations
+                    };
+                    message = $"{spell.Name} reveals {locations.Count} locations on the world view.";
+                    break;
+                }
                 case "townPortal":
                 {
-                    var town = await db.Towns.FirstOrDefaultAsync(t => t.PlayerId == player.Id);
-                    if (town == null) return Results.BadRequest(new { error = "You have no town." });
-                    (hero.X, hero.Y) = await games.ArrivalSpotAsync(game, town.X, town.Y, hero.Id);
-                    hero.Movement = 0;
+                    var mastery = Spells.Mastery(spell, skills);
+                    var towns = await db.Towns.Where(t => t.PlayerId == player.Id).ToListAsync();
+                    var town = mastery >= 2 ? towns.FirstOrDefault(t => t.Id == req.TownId)
+                        : towns.OrderBy(t => (long)(t.X - hero.X) * (t.X - hero.X) + (long)(t.Y - hero.Y) * (t.Y - hero.Y)).ThenBy(t => t.Id).FirstOrDefault();
+                    if (town == null) return Results.BadRequest(new { error = mastery >= 2 ? "Choose an unoccupied town." : "You have no town." });
+                    if (await db.Heroes.AnyAsync(h => h.GameId == game.Id && h.X == town.X && h.Y == town.Y))
+                        return Results.BadRequest(new { error = "That town already has a visiting hero." });
+                    var cost = mastery >= 3 ? 200 : 300;
+                    if (hero.Movement < cost) return Results.BadRequest(new { error = "Not enough movement points." });
+                    hero.X = town.X; hero.Y = town.Y; hero.Movement -= cost;
+                    GameService.VisitOwnTown(game, hero, town);
                     message = $"You return to {town.Name}.";
                     break;
                 }
@@ -682,31 +791,46 @@ public static class Endpoints
                 {
                     if (req.X is not { } tx || req.Y is not { } ty)
                         return Results.BadRequest(new { error = "Choose a destination." });
+                    var mastery = Spells.Mastery(spell, skills);
+                    var casts = effects.DoorTurn == game.CurrentTurn ? effects.DoorCasts : 0;
+                    if (casts >= mastery + 1) return Results.BadRequest(new { error = "Dimension Door has reached its daily limit." });
+                    if (hero.Movement <= 0) return Results.BadRequest(new { error = "Not enough movement points." });
+                    if (Math.Abs((long)tx - hero.X) > 9 || Math.Abs((long)ty - hero.Y) > 8)
+                        return Results.BadRequest(new { error = "That destination is out of range." });
                     var map = await games.LoadMapAsync(game);
-                    if (!map.InBounds(tx, ty) || !map.At(tx, ty).Passable)
+                    if (!map.InBounds(tx, ty) || (!map.At(tx, ty).Passable && map.At(tx, ty).Terrain != "water")
+                        || map.At(tx, ty).Terrain == "rock"
+                        || map.At(tx, ty).ObjectKind != null || (tx == hero.X && ty == hero.Y))
                         return Results.BadRequest(new { error = "You cannot appear there." });
                     if (await db.Heroes.AnyAsync(h => h.GameId == game.Id && h.Id != hero.Id && h.X == tx && h.Y == ty))
                         return Results.BadRequest(new { error = "Another hero stands there." });
-                    var fog = GameService.ParseFog(player.FogJson, map.Width * map.Height);
-                    if (fog[ty * map.Width + tx] != 2)
-                        return Results.BadRequest(new { error = "Choose a visible destination." });
-                    hero.X = tx;
-                    hero.Y = ty;
-                    hero.Movement = 0;
-                    message = "You step through a door in space.";
+                    var failed = map.At(tx, ty).Terrain == "water";
+                    if (!failed) { hero.X = tx; hero.Y = ty; }
+                    hero.Movement = Math.Max(0, hero.Movement - (mastery >= 3 ? 200 : 300));
+                    GameService.SetEffects(hero, effects with { DoorTurn = game.CurrentTurn, DoorCasts = casts + 1 });
+                    message = failed ? "Dimension Door failed!" : "You step through a door in space.";
                     break;
                 }
                 case "visions":
-                    message = "You sense the strength of the lands around you.";
+                    GameService.SetEffects(hero, effects with { VisionsTurn = game.CurrentTurn, VisionsMastery = Spells.Mastery(spell, skills) });
+                    message = "Visions reveals nearby creatures until tomorrow.";
                     break;
                 default:
-                    message = $"{spell.Name} has no effect outside combat.";
-                    break;
+                    return Results.BadRequest(new { error = "That spell is not available in this peaceful game." });
             }
 
-            hero.Mana -= spell.Cost;
+            hero.Mana -= manaCost;
+            if (key is "townPortal" or "dimensionDoor")
+            {
+                var map = await games.LoadMapAsync(game);
+                var fog = GameService.ParseFog(player.FogJson, map.Width * map.Height);
+                GameService.RecomputeFog(fog, map.Width, map.Height,
+                    await db.Heroes.Where(h => h.PlayerId == player.Id).ToListAsync(),
+                    await db.Towns.Where(t => t.PlayerId == player.Id).ToListAsync());
+                player.FogJson = GameService.SerializeFog(fog);
+            }
             await db.SaveChangesAsync();
-            return Results.Ok(new { message, mana = hero.Mana, x = hero.X, y = hero.Y });
+            return Results.Ok(new { message, mana = hero.Mana, x = hero.X, y = hero.Y, view });
         });
 
         // End the current turn: advance the day and restore every hero's movement.
@@ -725,7 +849,7 @@ public static class Endpoints
             // force this game's turn to expire, then let the ticker do the day rollover
             game.TurnStartedAt = DateTime.UtcNow.AddSeconds(-(game.TurnSeconds + 1));
             await db.SaveChangesAsync();
-            await games.TickAsync();
+            await games.TickAsync(false);
 
             var fresh = await db.Games.FirstAsync(g => g.Id == id);
             await ws.BroadcastAsync(id, "turnEnded", new { day = fresh.Day, week = fresh.Week, month = fresh.Month });
@@ -814,7 +938,7 @@ public static class Endpoints
         app.MapGet("/api/spells", () => Results.Ok(Spells.All.Values.Select(s => new
         {
             key = s.Key, name = s.Name, level = s.Level, school = s.School,
-            cost = s.Cost, description = s.Description
+            cost = s.Cost, description = s.Description, id = s.Id, manaCosts = s.ManaCosts, adventure = s.Adventure
         })));
 
 // ------------------------------------------------------------ encounters
@@ -1018,12 +1142,129 @@ public static class Endpoints
             if (hero == null) return Results.NotFound();
             var gear = GameService.ParseStringArray(hero.ArtifactsJson).Where(TownRules.IsGear);
             hero.ArtifactsJson = System.Text.Json.JsonSerializer.Serialize(gear.Concat(keys).ToList());
+            hero.ArtifactLayoutJson = "{}";
             await db.SaveChangesAsync();
             return Results.Ok(HeroDto(hero));
         });
 
-        // advances every game one day so API tests can walk long distances
-        app.MapPost("/api/games/{id:guid}/_test/nextday", async (Guid id, AppDb db, GameService games, IHostEnvironment env) =>
+        // Deterministic adventure states for browser regressions.
+        app.MapPost("/api/heroes/{id:guid}/_test/adventure", async (Guid id, AdventureFixtureReq req, AppDb db,
+            GameService games, IHostEnvironment env, HttpContext ctx) =>
+        {
+            if (!env.IsDevelopment()) return Results.NotFound();
+            var hero = await db.Heroes.FirstOrDefaultAsync(h => h.Id == id);
+            if (hero == null) return Results.NotFound();
+            var player = await db.Players.FirstAsync(p => p.Id == hero.PlayerId);
+            if (Seeded.Find(ctx.Request.Headers["X-Player-Id"])?.Faction != player.Faction) return Results.NotFound();
+            var game = await db.Games.FirstAsync(g => g.Id == hero.GameId);
+            var map = await games.LoadMapAsync(game);
+            if (req.Army != null) hero.ArmyJson = GameService.SerializeArmy(req.Army);
+            if (req.Skills != null) hero.SkillsJson = System.Text.Json.JsonSerializer.Serialize(req.Skills);
+            if (req.Gold is { } gold) player.Gold = Math.Max(0, gold);
+            if (req.Spells != null)
+            {
+                TownRules.AddGear(hero, TownRules.Spellbook);
+                hero.SpellsJson = System.Text.Json.JsonSerializer.Serialize(req.Spells);
+                hero.Knowledge = 10;
+                hero.Mana = hero.MaxMana = 100;
+            }
+            if (req.MovementPenalty > 0)
+                GameService.SetEffects(hero, new AdventureEffects(MovementPenalty: req.MovementPenalty));
+            hero.Movement = hero.MaxMovement = GameService.MaxMovement(hero);
+            if (req.MovementPenalty > 0) hero.Movement = 500;
+            if (req.Treasure || req.FlightLane)
+            {
+                hero.Y++;
+                var start = map.At(hero.X, hero.Y);
+                start.Terrain = "grass"; start.ObjectKind = null; start.ObjectData = null; start.Passable = true;
+                var tile = map.At(hero.X, hero.Y + 1);
+                tile.Terrain = "grass";
+                tile.ObjectKind = req.Treasure ? "treasure" : "tree";
+                tile.ObjectData = req.Treasure ? "1500:1000" : null;
+                tile.Passable = req.Treasure;
+                var end = map.At(hero.X, hero.Y + 2);
+                end.Terrain = "grass"; end.ObjectKind = null; end.ObjectData = null; end.Passable = true;
+            }
+            if (req.SurveyTargets)
+            {
+                map.At(0, 0).ObjectKind = "artifact"; map.At(0, 0).ObjectData = "artifact1";
+                map.At(1, 0).ObjectKind = "resource"; map.At(1, 0).ObjectData = "wood:5";
+            }
+            if (req.ObjectKind != null)
+            {
+                var town = await db.Towns.FirstAsync(t => t.PlayerId == player.Id);
+                hero.X = town.X; hero.Y = town.Y + 5;
+                for (var y = town.Y + 1; y <= town.Y + 6; y++)
+                for (var x = town.X - 4; x <= town.X + 4; x++)
+                {
+                    var tile = map.At(x, y);
+                    tile.Terrain = "grass"; tile.ObjectKind = null; tile.ObjectData = null; tile.Sprite = null; tile.Passable = true;
+                }
+                if (req.ObjectKind == "obelisk")
+                    foreach (var old in map.Tiles.Where(t => t.ObjectKind == "obelisk"))
+                    { old.ObjectKind = null; old.ObjectData = null; old.Passable = true; }
+                var target = map.At(hero.X, hero.Y - 1);
+                target.ObjectKind = req.ObjectKind;
+                target.ObjectData = req.ObjectData;
+                target.Owner = 0;
+                target.Passable = req.ObjectKind is "resource" or "artifact" or "treasure" or "grail";
+                if (req.ObjectKind == "grail")
+                {
+                    game.GrailX = hero.X; game.GrailY = hero.Y - 1;
+                    player.ObeliskVisits = 10;
+                }
+                if (req.Wisdom > 0)
+                {
+                    var skills = GameService.ParseSkills(hero.SkillsJson);
+                    skills["wisdom"] = req.Wisdom;
+                    hero.SkillsJson = System.Text.Json.JsonSerializer.Serialize(skills);
+                }
+            }
+            if (req.Movement is { } movement) hero.Movement = Math.Clamp(movement, 0, hero.MaxMovement);
+            if (req.Meeting != null)
+            {
+                var town = await db.Towns.FirstAsync(t => t.PlayerId == player.Id);
+                hero.X = town.X; hero.Y = town.Y + 3;
+                for (var y = hero.Y - 1; y <= hero.Y + 2; y++)
+                for (var x = hero.X - 1; x <= hero.X + 2; x++)
+                {
+                    var tile = map.At(x, y);
+                    tile.Terrain = "grass"; tile.ObjectKind = null; tile.ObjectData = null; tile.Passable = true;
+                }
+                var owner = req.Meeting == "own" ? player : await db.Players.FirstAsync(p => p.GameId == game.Id && p.Faction == "rampart");
+                if (owner != player) owner.IsAi = false;
+                var friend = GameService.CreateHero(game.Id, owner.Id, Seeded.Players.First(p => p.Faction == owner.Faction), hero.X + 1, hero.Y);
+                friend.Name = req.Meeting == "own" ? "Companion" : "Visitor";
+                db.Heroes.Add(friend);
+            }
+            if (req.PortalTown)
+            {
+                var tx = hero.X + 5; var ty = hero.Y + 5;
+                var town = new Town { GameId = game.Id, PlayerId = player.Id, Faction = player.Faction, Name = "Portal destination", X = tx, Y = ty };
+                db.Towns.Add(town);
+                var tile = map.At(tx, ty);
+                tile.Terrain = "grass"; tile.ObjectKind = "town"; tile.ObjectData = town.Id.ToString(); tile.Passable = false;
+            }
+            if (req.Experience > 0) GameService.GainExperience(hero, req.Experience);
+            if (req.Buildings != null)
+            {
+                var town = await db.Towns.FirstAsync(t => t.PlayerId == player.Id);
+                town.BuildingsJson = JsonSerializer.Serialize(req.Buildings, Json);
+                town.AvailableJson = JsonSerializer.Serialize(new Dictionary<string, int> { ["1"] = 20, ["2"] = 20, ["7"] = 3 }, Json);
+                foreach (var key in req.Buildings.Where(k => k.StartsWith("mageGuild"))) TownRules.StockGuild(town, key);
+                player.Wood = player.Ore = player.Mercury = player.Sulfur = player.Crystal = player.Gems = 50;
+            }
+            var fog = GameService.ParseFog(player.FogJson, map.Width * map.Height);
+            GameService.RecomputeFog(fog, map.Width, map.Height,
+                await db.Heroes.Where(h => h.PlayerId == player.Id).ToListAsync(),
+                await db.Towns.Where(t => t.PlayerId == player.Id).ToListAsync());
+            player.FogJson = GameService.SerializeFog(fog);
+            await games.SaveMapAsync(game, map);
+            return Results.Ok(HeroDto(hero));
+        });
+
+        // advances this game one day so API tests can walk long distances
+        app.MapPost("/api/games/{id:guid}/_test/nextday", async (Guid id, AppDb db, GameService games, WsHub ws, IHostEnvironment env) =>
         {
             if (!env.IsDevelopment()) return Results.NotFound();
             // force the turn timer to expire so TickAsync advances this game
@@ -1031,7 +1272,8 @@ public static class Endpoints
             if (game == null) return Results.NotFound();
             game.TurnStartedAt = DateTime.UtcNow.AddSeconds(-(game.TurnSeconds + 1));
             await db.SaveChangesAsync();
-            await games.TickAsync();
+            foreach (var advanced in await games.TickAsync(false))
+                await ws.BroadcastAsync(advanced, "turnAdvanced", new { gameId = advanced });
             return Results.NoContent();
         });
     }
@@ -1106,14 +1348,16 @@ public static class Endpoints
     private static object HeroDto(CityOfTowers.Domain.Hero h)
     {
         var arts = TownRules.Artifacts(h);
-        var (worn, backpack) = Artifacts.Arrange(arts);
-        var bonus = Artifacts.Bonus(arts);
+        var (worn, backpack) = Artifacts.Layout(h);
+        var bonus = Artifacts.Bonus(h);
+        var effects = GameService.Effects(h);
         // HoMM3 shows the totals including worn artifacts; attack/defense floor at 0, power/knowledge at 1
         return new
         {
             id = h.Id,
             name = h.Name,
             heroKey = h.HeroKey,
+            heroClass = NativeRules.ClassOf(h).Name,
             faction = h.Faction,
             level = h.Level,
             experience = h.Experience,
@@ -1127,18 +1371,29 @@ public static class Endpoints
             maxMana = h.MaxMana,
             movement = h.Movement,
             maxMovement = h.MaxMovement,
+            nativeTerrain = GameService.NativeTerrain(h),
             x = h.X,
             y = h.Y,
             army = GameService.ParseArmy(h.ArmyJson),
             strength = GameService.ArmyStrength(GameService.ParseArmy(h.ArmyJson)),
             skills = GameService.ParseSkills(h.SkillsJson).Where(kv => !kv.Key.StartsWith('_')).ToDictionary(kv => kv.Key, kv => kv.Value),
-            spells = GameService.ParseStringArray(h.SpellsJson),
+            spells = GameService.ParseStringArray(h.SpellsJson).Select(Spells.CanonicalKey).Distinct(),
             artifacts = arts,
             worn = worn.ToDictionary(kv => kv.Key, kv => ArtifactDto(kv.Value)),
             backpack = backpack.Select(ArtifactDto),
             spellbook = TownRules.HasGear(h, TownRules.Spellbook),
             warMachines = TownRules.WarMachines(h),
-            pendingEncounter = h.PendingEncounterJson
+            pendingEncounter = h.PendingEncounterJson,
+            encounterOffer = SocialService.GetEncounterOffer(h),
+            pendingTreasure = GameService.Treasure(h),
+            pendingLevel = HeroProgression.Pending(h),
+            flying = effects.FlightTurn > 0,
+            flightPenalty = effects.FlightPenalty,
+            hasteBonus = effects.HasteBonus,
+            movementPenalty = effects.MovementPenalty,
+            visions = effects.VisionsTurn > 0,
+            visionRadius = effects.VisionsTurn > 0 ? Math.Max(3, Math.Max(1, h.Power + bonus.Power) * Math.Max(1, effects.VisionsMastery)) : 0,
+            doorCasts = effects.DoorCasts
         };
     }
 
@@ -1174,9 +1429,14 @@ public record StackReq(string? Army, int Slot);
 public record TradeReq(string? From, string? To, int Amount);
 public record HireReq(string? HeroKey);
 public record GarrisonReq(string? Direction, int Slot, int Count);
-public record CastReq(string? Spell, int? X, int? Y);
+public record CastReq(string? Spell, int? X, int? Y, Guid? TownId = null);
 public record BodyReq(string? Body);
 public record EncounterReq(string? Action);
+public record TreasureReq(string? Choice);
+public record AdventureFixtureReq(string[]? Spells, int MovementPenalty = 0, bool Treasure = false, bool FlightLane = false,
+    bool SurveyTargets = false, string? ObjectKind = null, string? ObjectData = null, int Wisdom = 0, int? Movement = null,
+    GameService.ArmySlot[]? Army = null, int? Gold = null, Dictionary<string, int>? Skills = null,
+    string? Meeting = null, bool PortalTown = false, int Experience = 0, string[]? Buildings = null);
 public record MessageReq(string? ToPlayerId, string? Body);
 public record TradeOfferReq(string? ToPlayerId, string? Give, int GiveAmount, string? Want, int WantAmount);
 public record RespondReq(bool Accept);

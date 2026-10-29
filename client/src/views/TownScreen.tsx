@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useContext, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { useGameNavigate } from '../useGameNavigate';
 import { api, ApiError } from '../api';
@@ -9,9 +9,10 @@ import { FACTION_LABEL, RES_ORDER, ResIcon, buildingName } from '../ui/homm';
 import { DefImg, Pcx, ScreenBackdrop, alphaAt, drawFrame, getDef, onAssetLoaded, useH3 } from '../h3/assets';
 import { FACTION_PLAYER_COLOR, creaturePortraitFrame, heroPortrait, townListFrame } from '../h3/catalog';
 import { HORDE_TIER, TOWN_BACK, townStructures } from '../h3/town';
-import { BlacksmithWindow, BuildingDialog, CreatureInfo, DefButton, FortWindow, GuildWindow, HallWindow, MarketWindow, SplitDialog, TransformerWindow } from './TownWindows';
+import { BlacksmithWindow, BuildingDialog, CreatureInfo, DefButton, FortWindow, GuildWindow, HallWindow, MarketWindow, SplitDialog, TownMessageContext, TransformerWindow } from './TownWindows';
+import { NativeMessage } from './HeroWindows';
 
-const HERO_COST = 2000;
+const HERO_COST = 2500;
 
 const SKILL_NAMES: Record<string, string> = {
   pathfinding: 'Pathfinding', archery: 'Archery', logistics: 'Logistics', scouting: 'Scouting',
@@ -36,11 +37,12 @@ export function TownScreen() {
   const [buildings, setBuildings] = useState<BuildingDef[]>([]);
   const [creatures, setCreatures] = useState<Record<string, CreatureDef>>({});
   const [view, setView] = useState<View | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!townId) return;
     try { setTown(await api.getTown(townId)); }
-    catch (e) { if (e instanceof ApiError) toast(e.message); }
+    catch (e) { if (e instanceof ApiError) setMessage(e.message); }
   }, [townId]);
 
   useEffect(() => { refresh(); }, [refresh]);
@@ -55,14 +57,15 @@ export function TownScreen() {
     }).catch(() => {});
   }, [faction]);
 
-  if (!town) return <Loading />;
+  if (!town) return <><Loading />{message && <NativeMessage text={message} onClose={() => setMessage(null)} />}</>;
   return (
-    <>
+    <TownMessageContext.Provider value={setMessage}>
       <TownH3 town={town} buildings={buildings} creatures={creatures} onView={setView} onChanged={refresh}
         onHero={(id) => navigate(`/game/${gameId}/hero/${id}?from=town/${townId}`)}
         onExit={() => navigate(`/game/${gameId}`)} />
       {view && windowFor(town, buildings, creatures, view, setView, refresh)}
-    </>
+      {message && <NativeMessage text={message} onClose={() => setMessage(null)} />}
+    </TownMessageContext.Provider>
   );
 }
 
@@ -72,7 +75,7 @@ function windowFor(town: TownDetail, buildings: BuildingDef[], creatures: Record
   switch (view.kind) {
     case 'hall': return <HallWindow town={town} buildings={buildings} onBuilt={refresh} onClose={close} />;
     case 'fort': return <FortWindow town={town} creatures={creatures} onRecruit={(tier) => setView({ kind: 'recruit', tier })} onClose={close} />;
-    case 'recruit': return <RecruitPanel key={view.tier} town={town} creatures={creatures} tier={view.tier} onRecruited={refresh} onClose={close} />;
+    case 'recruit': return <RecruitPanel key={view.tier} town={town} creatures={creatures} tier={view.tier} onRecruited={() => { refresh(); close(); }} onClose={close} />;
     case 'market': return <MarketWindow town={town} onTraded={refresh} onClose={close} />;
     case 'guild': return <GuildWindow town={town} onChanged={refresh} onClose={close} />;
     case 'tavern': return <TavernPanel town={town} onHired={refresh} onClose={close} />;
@@ -252,6 +255,7 @@ function ArmyBar(props: {
   label: (t: string) => void; clear: () => void; onChanged: () => void; onHero: (id: string) => void;
 }) {
   const { town, creatures, label, clear, onChanged, onHero } = props;
+  const showMessage = useContext(TownMessageContext);
   const [sel, setSel] = useState<SlotRef | null>(null);
   const [splitting, setSplitting] = useState(false);
   const [split, setSplit] = useState<{ from: SlotRef; to: SlotRef } | null>(null);
@@ -266,7 +270,7 @@ function ArmyBar(props: {
 
   async function move(from: SlotRef, to: SlotRef, count = 0) {
     try { await api.moveArmy(town.id, from.army, from.slot, to.army, to.slot, count); onChanged(); }
-    catch (e) { toast(e instanceof ApiError ? e.message : 'Something went wrong.'); }
+    catch (e) { showMessage(e instanceof ApiError ? e.message : 'Something went wrong.'); }
   }
 
   function click(r: SlotRef, shift: boolean) {
@@ -286,7 +290,7 @@ function ArmyBar(props: {
     if (!src) return;
     if (splitting || shift) {
       setSplitting(false);
-      if (here && here.creature !== src.creature) { toast('Split onto an empty slot or the same creature.'); return; }
+      if (here && here.creature !== src.creature) { showMessage('Split onto an empty slot or the same creature.'); return; }
       setSplit({ from: sel, to: r });
       return;
     }
@@ -365,6 +369,7 @@ function RecruitPanel(props: {
   town: TownDetail; creatures: Record<string, CreatureDef>; tier: number;
   onRecruited: () => void; onClose: () => void;
 }) {
+  const showMessage = useContext(TownMessageContext);
   const { town, creatures, onRecruited, onClose } = props;
   const [busy, setBusy] = useState(false);
   const row = town.available.find((a) => a.tier === props.tier) ?? town.available[0];
@@ -393,12 +398,11 @@ function RecruitPanel(props: {
     if (!row || n < 1) return;
     setBusy(true);
     try {
-      const r = await api.recruit(town.id, row.tier, n, pick);
-      toast(`Recruited ${r.recruited} ${creatures[r.creature]?.name ?? r.creature}.`);
+      await api.recruit(town.id, row.tier, n, pick);
       setQty(0);
       onRecruited();
     } catch (e) {
-      toast(e instanceof ApiError ? e.message : 'Something went wrong.');
+      showMessage(e instanceof ApiError ? e.message : 'Something went wrong.');
     } finally { setBusy(false); }
   }
 
@@ -471,6 +475,7 @@ function RecruitPanel(props: {
 
 function TavernPanel(props: { town: TownDetail; onHired: () => void; onClose: () => void }) {
   const { town, onHired, onClose } = props;
+  const showMessage = useContext(TownMessageContext);
   const h3 = useH3();
   const [busy, setBusy] = useState(false);
   const [heroes, setHeroes] = useState<Record<string, HeroDef>>({});
@@ -495,11 +500,10 @@ function TavernPanel(props: { town: TownDetail; onHired: () => void; onClose: ()
     setBusy(true);
     try {
       await api.hire(town.id, key);
-      toast(`Hired ${heroes[key]?.name ?? key}.`);
       setIndex(0);
       onHired();
     } catch (e) {
-      toast(e instanceof ApiError ? e.message : 'Something went wrong.');
+      showMessage(e instanceof ApiError ? e.message : 'Something went wrong.');
     } finally { setBusy(false); }
   }
 
@@ -556,9 +560,15 @@ function TavernPanel(props: { town: TownDetail; onHired: () => void; onClose: ()
               disabled={busy} onClick={() => setIndex((i) => (i + 1) % pool.length)} />
           )}
 
+          {town.heroInTown && (
+            <Txt x={24} y={380} w={345} size={11} color={dim}>
+              Send the visiting hero out before hiring another.
+            </Txt>
+          )}
+
           {/* buttons sit on the light band at y≈432 */}
           <Btn x={24} y={432} w={120} h={34} label={busy ? '…' : 'Hire'} size={12}
-            disabled={busy || !canAfford} onClick={hire} />
+            disabled={busy || !canAfford || !!town.heroInTown} onClick={hire} />
         </>
       )}
 

@@ -1,15 +1,17 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { useGameNavigate } from '../useGameNavigate';
 import { api, ApiError } from '../api';
-import type { MapData, GameDetail, HeroDetail, MapTile } from '../types';
+import type { MapData, GameDetail, HeroDetail, MapTile, WorldView, AdventureNotice, CreatureDef, SpellDef, VisionTarget } from '../types';
 import { Btn, Loading, Txt } from '../ui/Layout';
-import { toast } from '../ui/Toast';
+import { DefButton, DialogBox } from './TownWindows';
+import { HeroExchange, HeroLevel, NativeMessage } from './HeroWindows';
+import { Spellbook } from './Spellbook';
 import { socket } from '../ws';
 import { FACTION_COLOR, FACTION_SEAT, HERO_CLASS, HeroPortrait, RES_ORDER, ResIcon } from '../ui/homm';
-import { DefImg, Pcx, drawFrame, getDef, groupFrame, onAssetLoaded, useH3, type Sheet } from '../h3/assets';
+import { DefImg, Pcx, drawFrame, getDef, groupFrame, onAssetLoaded, useDef, useH3, type Sheet } from '../h3/assets';
 import {
-  MINE_DEF, MOUNTAIN_DEFS, OBJECT_DEF, RESOURCE_DEF, ROCK_DEFS, TERRAIN_DEF, TOWN_MAP_DEF, TREE_DEFS, artifactSeed, borderKind, edgeFrames,
+  MINE_DEF, MOUNTAIN_DEFS, OBJECT_DEF, RESOURCE_DEF, RES_FRAME, ROCK_DEFS, TERRAIN_DEF, TOWN_MAP_DEF, TREE_DEFS, artifactSeed, borderKind, edgeFrames, objectAnchorX,
   artifactDef, creaturePortraitFrame, flagDef, heroMapDef, heroPortrait, monsterDef, townListFrame
 } from '../h3/catalog';
 
@@ -49,7 +51,7 @@ const BUTTONS: { label: string; def: string; x: number; y: number; w: number; ti
   { label: 'Spells', def: 'IAM007', x: 711, y: 260, w: 32, tip: 'Spellbook' },
   { label: 'Town', def: 'IAM008', x: 679, y: 292, w: 32, tip: 'Visit your town' },
   { label: 'Menu', def: 'IAM009', x: 711, y: 292, w: 32, tip: 'System options' },
-  { label: 'Next Hero', def: 'IAM000', x: 679, y: 324, w: 64, tip: 'Next hero' },
+  { label: 'Move Hero', def: 'IAM000', x: 679, y: 324, w: 64, tip: 'Follow the selected path' },
   { label: 'End Turn', def: 'IAM001', x: 679, y: 356, w: 64, tip: 'End turn' }
 ];
 
@@ -136,19 +138,75 @@ function arrowFrame(path: { x: number; y: number }[], i: number): number {
   return ARROW[dir(path[i - 1], path[i])][dir(path[i], path[i + 1])];
 }
 
-const terrainCost = (terrain: string | null, pathfinding = 0) =>
-  Math.max(100, (terrain === 'rough' ? 125 : terrain === 'snow' || terrain === 'sand' ? 150 : terrain === 'swamp' ? 175 : 100)
-    - 25 * Math.max(0, Math.min(3, pathfinding)));
+const terrainCost = (terrain: string | null, pathfinding = 0, nativeTerrain: string | null = null) =>
+  terrain != null && terrain === nativeTerrain ? 100 :
+    Math.max(100, (terrain === 'rough' ? 125 : terrain === 'snow' || terrain === 'sand' ? 150 : terrain === 'swamp' ? 175 : 100)
+      - 25 * Math.max(0, Math.min(3, pathfinding)));
+
+function stepCost(source: string | null, diagonal: boolean, remaining: number, pathfinding = 0,
+  nativeTerrain: string | null = null, flightPenalty: number | null = null): number {
+  const straight = flightPenalty == null ? terrainCost(source, pathfinding, nativeTerrain) : 100 * (100 + flightPenalty) / 100;
+  const full = diagonal ? flightPenalty == null ? Math.floor(straight * Math.SQRT2) : Math.floor(141 * (100 + flightPenalty) / 100) : straight;
+  return flightPenalty == null && diagonal && remaining >= straight && remaining < full ? remaining : full;
+}
 
 /** Index of the last path tile the hero can reach with today's movement points. */
-function reachableSteps(map: MapData, path: { x: number; y: number }[], movement: number, pathfinding = 0): number {
+function reachableSteps(map: MapData, path: { x: number; y: number }[], movement: number, pathfinding = 0, flightPenalty: number | null = null, nativeTerrain: string | null = null): number {
   let left = movement, last = 0;
   for (let i = 1; i < path.length; i++) {
-    left -= terrainCost(map.tiles[path[i].y * map.width + path[i].x]?.terrain ?? null, pathfinding);
+    const tile = map.tiles[path[i].y * map.width + path[i].x];
+    const final = i === path.length - 1;
+    const town = map.towns.find(t => t.x === path[i].x && t.y === path[i].y);
+    const exchange = final && map.heroes.some(h => h.x === path[i].x && h.y === path[i].y);
+    const visit = final && ['mine', 'monster', 'shrine', 'obelisk', 'town'].includes(tile?.objectKind ?? '') && !town?.isMine;
+    const diagonal = path[i].x !== path[i - 1].x && path[i].y !== path[i - 1].y;
+    const source = map.tiles[path[i - 1].y * map.width + path[i - 1].x];
+    left -= exchange || visit && town ? 0 : stepCost(source?.terrain, diagonal, left,
+      pathfinding, nativeTerrain, visit ? null : flightPenalty);
     if (left < 0) break;
-    last = i;
+    if (flightPenalty == null && left < terrainCost((visit ? source : tile)?.terrain, pathfinding, nativeTerrain)) left = 0;
+    if (flightPenalty == null || tile?.passable || town?.isMine || final && (visit || exchange) && last === i - 1)
+      last = i;
   }
   return last;
+}
+
+function adventureCursor(map: MapData, hero: HeroDetail, x: number, y: number) {
+  const target = targetTile(map, x, y);
+  const tile = map.tiles[target.y * map.width + target.x];
+  if (!tile || tile.fog === 0) return { action: 'blocked', frame: 0 };
+  const other = map.heroes.find(h => h.x === target.x && h.y === target.y);
+  if (other?.id === hero.id) return { action: tile.objectKind === 'town' ? 'town' : 'hero', frame: tile.objectKind === 'town' ? 3 : 2 };
+  const p = findPath(map, hero.x, hero.y, target.x, target.y, hero.skills.pathfinding ?? 0, hero.flying ? hero.flightPenalty : null, hero);
+  if (!p) return { action: 'blocked', frame: 0 };
+  const action = other ? 'exchange'
+    : ['resource', 'treasure', 'artifact', 'monster', 'mine', 'town', 'shrine', 'obelisk', 'grail'].includes(tile.objectKind ?? '') ? 'visit' : 'move';
+  // CRADVNTR: walking horse, meeting heroes and visiting horse, with next-day variants.
+  let turns = 0, start = 0;
+  while (turns < 3) {
+    const reached = reachableSteps(map, p.slice(start), turns ? hero.maxMovement - hero.hasteBonus : hero.movement,
+      hero.skills.pathfinding ?? 0, !turns && hero.flying ? hero.flightPenalty : null, hero.nativeTerrain);
+    if (start + reached === p.length - 1) break;
+    start += reached;
+    turns++;
+  }
+  return { action, frame: (action === 'exchange' ? 8 : action === 'visit' ? 9 : 4) + turns * 6 };
+}
+
+const cursorImages = new Map<number, string>();
+function adventureCursorCss(sheet: Sheet, frame: number): string {
+  let url = cursorImages.get(frame);
+  if (!url) {
+    const canvas = document.createElement('canvas');
+    canvas.width = sheet.w; canvas.height = sheet.h;
+    drawFrame(canvas.getContext('2d')!, sheet, frame, 0, 0);
+    url = canvas.toDataURL();
+    cursorImages.set(frame, url);
+  }
+  const base = frame >= 10 && frame <= 27 ? (frame - 4) % 6 + 4 : frame;
+  const [x, y] = base === 2 ? [12, 10] : base === 3 ? [12, 12] : base === 4 ? [15, 13]
+    : base === 8 ? [8, 9] : base === 9 || base === 41 ? [14, 16] : [0, 0];
+  return `url("${url}") ${x} ${y}, auto`;
 }
 
 export function AdventureMap() {
@@ -164,7 +222,6 @@ export function AdventureMap() {
   const [cam, setCam] = useState({ x: 0, y: 0 });
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
   const [path, setPath] = useState<{ x: number; y: number }[] | null>(null);
-  const [now, setNow] = useState(Date.now());
   const [tick, setTick] = useState(0);
   const [assetGen, setAssetGen] = useState(0);
   const [pressed, setPressed] = useState<string | null>(null);
@@ -173,34 +230,89 @@ export function AdventureMap() {
   const [encounter, setEncounter] = useState<{ creature: string; count: number } | null>(null);
   const [meeting, setMeeting] = useState<{ heroName: string; playerId: string; ownerName: string } | null>(null);
   const [meetingText, setMeetingText] = useState('');
+  const [exchange, setExchange] = useState<[HeroDetail, HeroDetail] | null>(null);
+  const [creatures, setCreatures] = useState<Record<string, CreatureDef>>({});
+  const [mineSharing, setMineSharing] = useState<{ x: number; y: number; shared: boolean } | null>(null);
   const [annotations, setAnnotations] = useState<{ id: string; x: number; y: number; text: string; author: string }[]>([]);
   const [noteAt, setNoteAt] = useState<{ x: number; y: number } | null>(null);
   const [noteText, setNoteText] = useState('');
   const [spellbookOpen, setSpellbookOpen] = useState(false);
-  const [spellDefs, setSpellDefs] = useState<Record<string, { name: string; level: number; school: string; cost: number; description: string }>>({});
+  const [teleportTarget, setTeleportTarget] = useState(false);
+  const [portalOpen, setPortalOpen] = useState(false);
+  const [portalTown, setPortalTown] = useState<string | null>(null);
+  const [visionTargets, setVisionTargets] = useState<VisionTarget[]>([]);
+  const [visionInfo, setVisionInfo] = useState<VisionTarget | null>(null);
+  const spellBusyRef = useRef(false);
+  const [worldView, setWorldView] = useState<WorldView | null>(null);
+  const [treasureBusy, setTreasureBusy] = useState(false);
+  const [treasureChoice, setTreasureChoice] = useState<'gold' | 'experience'>('gold');
+  const [pickupQueue, setPickupQueue] = useState<AdventureNotice[]>([]);
+  const [noticeQueue, setNoticeQueue] = useState<AdventureNotice[]>([]);
+  const [dateNotice, setDateNotice] = useState<GameDetail | null>(null);
+  const lastTurnRef = useRef<number | null>(null);
+  const [sleeping, setSleeping] = useState<string[]>([]);
+  const [endTurnConfirm, setEndTurnConfirm] = useState(false);
+  const [endingTurn, setEndingTurn] = useState(false);
+  const endingTurnRef = useRef(false);
+  const [encounterBusy, setEncounterBusy] = useState(false);
+  const encounterBusyRef = useRef(false);
+  const [spellDefs, setSpellDefs] = useState<Record<string, SpellDef>>({});
   const movingRef = useRef<string | null>(null);
   const glideRef = useRef<Glide | null>(null);
   const [animGen, setAnimGen] = useState(0);
   const facingRef = useRef(new Map<string, Facing>());
   const myPlayerIdRef = useRef<string | null>(null);
   const playerId = localStorage.getItem('cityoftowers.player') ?? '';
+  const sleepKey = `cityoftowers.sleeping.${gameId}.${playerId}`;
+  function teleportLegal(x: number, y: number) {
+    if (!map || !hero || x < 0 || y < 0 || x >= map.width || y >= map.height
+      || Math.abs(x - hero.x) > 9 || Math.abs(y - hero.y) > 8 || (x === hero.x && y === hero.y)
+      || map.heroes.some(h => h.x === x && h.y === y)) return false;
+    const tile = map.tiles[y * map.width + x];
+    return tile.fog === 0 || (!tile.objectKind && tile.terrain !== 'rock' && (tile.passable || tile.terrain === 'water'));
+  }
+  const cursor = useMemo(() => map && hero && hover ? teleportTarget
+    ? { action: teleportLegal(hover.x, hover.y) ? 'teleport' : 'blocked', frame: teleportLegal(hover.x, hover.y) ? 41 : 0 }
+    : adventureCursor(map, hero, hover.x, hover.y) : { action: 'default', frame: 0 }, [map, hero, hover, teleportTarget]);
+
+  useEffect(() => {
+    api.getCreatures().then(cs => setCreatures(Object.fromEntries(cs.map(c => [c.key, c])))).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    lastTurnRef.current = null;
+    setDateNotice(null);
+    setEndTurnConfirm(false);
+    try {
+      const saved = JSON.parse(localStorage.getItem(sleepKey) ?? '[]');
+      setSleeping(Array.isArray(saved) ? saved.filter(id => typeof id === 'string') : []);
+    } catch { setSleeping([]); }
+  }, [sleepKey]);
 
   const refresh = useCallback(async () => {
     if (!gameId) return;
     try {
       const [m, g, hs] = await Promise.all([api.getMap(gameId), api.getGame(gameId), api.getHeroes(gameId)]);
+      if (lastTurnRef.current != null && g.turn > lastTurnRef.current) setDateNotice(g);
+      lastTurnRef.current = Math.max(lastTurnRef.current ?? g.turn, g.turn);
       setMap(m);
       setGame(g);
       setHeroes(hs);
       api.getAnnotations(gameId).then(setAnnotations).catch(() => {});
       api.getSpells().then((ss) => {
-        const m: Record<string, { name: string; level: number; school: string; cost: number; description: string }> = {};
+        const m: Record<string, SpellDef> = {};
         for (const s of ss) m[s.key] = s;
         setSpellDefs(m);
       }).catch(() => {});
-      const cur = hs.find((h) => h.id === selectedRef.current) ?? hs[0];
+      const cur = hs.find(h => h.pendingLevel) ?? hs.find((h) => h.id === selectedRef.current) ?? hs[0];
       if (cur) {
+        const visions = cur.visions ? await api.getVisions(cur.id).catch(() => []) : [];
+        setVisionTargets(visions);
         setHero(cur);
+        setPath(current => {
+          const end = current?.[current.length - 1];
+          return end ? findPath(m, cur.x, cur.y, end.x, end.y, cur.skills.pathfinding ?? 0, cur.flying ? cur.flightPenalty : null, cur) : null;
+        });
         if (cur.pendingEncounter) {
           try { setEncounter(JSON.parse(cur.pendingEncounter)); } catch { /* ignore */ }
         } else {
@@ -209,18 +321,40 @@ export function AdventureMap() {
         if (!movingRef.current) {
           setCam((c) => (c.x === 0 && c.y === 0 ? centerCam(m, cur.x, cur.y) : c));
         }
+      } else {
+        setHero(null);
+        setVisionTargets([]);
+        setEncounter(null);
+        setPath(null);
       }
     } catch (e) {
-      if (e instanceof ApiError) toast(e.message);
+      if (e instanceof ApiError) showMessage(e.message);
     }
   }, [gameId]);
 
   useEffect(() => { refresh(); }, [refresh]);
-
+  useEffect(() => { if (game?.state === 'Finished') navigate(`/game/${gameId}/over`); }, [game?.state, gameId, navigate]);
   useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
+    const cancel = (event: KeyboardEvent) => { if (event.key === 'Escape') { setTeleportTarget(false); setPortalOpen(false); } };
+    window.addEventListener('keydown', cancel);
+    return () => window.removeEventListener('keydown', cancel);
   }, []);
+
+  const pickup = pickupQueue[0];
+  useEffect(() => {
+    if (!pickup || dateNotice) return;
+    const timer = window.setTimeout(() => setPickupQueue(queue => queue.slice(1)), 3000);
+    return () => window.clearTimeout(timer);
+  }, [pickup, dateNotice]);
+
+  function showNotices(notices: AdventureNotice[]) {
+    setPickupQueue(queue => queue.concat(notices.filter(n => n.kind === 'resource' || n.kind === 'experience')));
+    setNoticeQueue(queue => queue.concat(notices.filter(n => n.kind !== 'resource' && n.kind !== 'experience')));
+  }
+
+  function showMessage(message: string) {
+    showNotices([{ kind: 'message', key: 'Adventure', amount: 0, message }]);
+  }
 
   // N adds a note on the hovered tile, as in HoMM3's map notes.
   useEffect(() => {
@@ -228,7 +362,7 @@ export function AdventureMap() {
       const el = e.target as HTMLElement | null;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return;
       if (e.key === 'n' || e.key === 'N') {
-        if (!hover) { toast('Hover a tile first, then press N.'); return; }
+        if (!hover) return;
         setNoteAt({ x: hover.x, y: hover.y });
         setNoteText('');
       }
@@ -250,9 +384,9 @@ export function AdventureMap() {
     socket.connect(gameId);
     const off = socket.on((e) => {
       if (movingRef.current) return;
-      if (e.type === 'turnAdvanced' || e.type === 'heroMoved' || e.type === 'encounter' || e.type === 'project') refresh();
-      if (e.type === 'message' && e.payload.toPlayerId === myPlayerIdRef.current) toast('A hero has sent you a message.');
-      if (e.type === 'trade' && e.payload.toPlayerId === myPlayerIdRef.current) toast('You have a new trade offer.');
+      if (e.type === 'turnAdvanced' || e.type === 'turnEnded' || e.type === 'heroMoved' || e.type === 'encounter' || e.type === 'project' || e.type === 'agreement') refresh();
+      if (e.type === 'message' && e.payload.toPlayerId === myPlayerIdRef.current) showMessage('A hero has sent you a message.');
+      if (e.type === 'trade' && e.payload.toPlayerId === myPlayerIdRef.current) showMessage('You have a new trade offer.');
     });
     return off;
   }, [gameId, refresh]);
@@ -272,7 +406,7 @@ export function AdventureMap() {
     if (path && path.length > 1) {
       const from = glideRef.current ? glideRef.current.seg + 1 : 1;
       const arrows = h3 ? getDef('ADAG') : null;
-      const reach = reachableSteps(map, path, hero?.movement ?? 0, hero?.skills.pathfinding ?? 0);
+      const reach = reachableSteps(map, path, hero?.movement ?? 0, hero?.skills.pathfinding ?? 0, hero?.flying ? hero.flightPenalty : null, hero?.nativeTerrain);
       for (let i = from; i < path.length; i++) {
         const p = path[i];
         const sx = (p.x - cam.x) * TILE, sy = (p.y - cam.y) * TILE;
@@ -313,9 +447,15 @@ export function AdventureMap() {
   }
 
   async function onClick(e: React.MouseEvent<HTMLCanvasElement>) {
-    if (!map || !hero || !game || movingRef.current || encounter || meeting) return;
+    if (!map || !hero || !game || movingRef.current || encounter || meeting || exchange || hero.pendingTreasure || hero.pendingLevel || worldView || noticeQueue.length || endTurnConfirm || endingTurn || spellBusyRef.current) return;
     const raw = toTile(e);
     if (raw.x < 0 || raw.y < 0 || raw.x >= map.width || raw.y >= map.height) return;
+    if (teleportTarget) {
+      if (!teleportLegal(raw.x, raw.y)) return;
+      setTeleportTarget(false);
+      await castSpell('dimensionDoor', raw.x, raw.y);
+      return;
+    }
     // a click anywhere on a town or mine targets its entrance, as in HoMM3
     const t = targetTile(map, raw.x, raw.y);
 
@@ -323,15 +463,36 @@ export function AdventureMap() {
     // opens when the hero arrives (the server answers with enter-town / visit-town).
     const town = map.towns.find((tw) => tw.x === t.x && tw.y === t.y);
     if (town && hero.x === t.x && hero.y === t.y) { navigate(`/game/${gameId}/town/${town.id}`); return; }
-    const other = map.heroes.find((h) => !h.isMine && h.x === t.x && h.y === t.y);
-    const p = findPath(map, hero.x, hero.y, t.x, t.y, hero.skills.pathfinding ?? 0);
+    const p = findPath(map, hero.x, hero.y, t.x, t.y, hero.skills.pathfinding ?? 0, hero.flying ? hero.flightPenalty : null, hero);
     if (!p || p.length < 2) {
-      if (!p) toast('Your hero cannot find a way there.');
+      if (!p) setPath(null);
       return;
     }
-    const end = await walk(other ? p.slice(0, -1) : p);
+    const end = path?.[path.length - 1];
+    if (!end || end.x !== t.x || end.y !== t.y || path?.[0].x !== hero.x || path?.[0].y !== hero.y) {
+      setPath(p);
+      return;
+    }
+    await followPath(p);
+  }
+
+  async function followPath(p: { x: number; y: number }[]) {
+    if (!map || !hero || !game || movingRef.current || encounter || meeting || exchange || hero.pendingTreasure || worldView || noticeQueue.length || endTurnConfirm || endingTurn) return;
+    const t = p[p.length - 1];
+    const other = map.heroes.find(h => h.id !== hero.id && h.x === t.x && h.y === t.y);
+    const route = other ? p.slice(0, -1) : p;
+    if (route.length > 1 && reachableSteps(map, route, hero.movement, hero.skills.pathfinding ?? 0, hero.flying ? hero.flightPenalty : null, hero.nativeTerrain) === 0) return;
+    if (sleeping.includes(hero.id)) storeSleeping(sleeping.filter(id => id !== hero.id));
+    const end = await walk(route);
     if (!end || !other) return;
     if (Math.max(Math.abs(end.x - t.x), Math.abs(end.y - t.y)) > 1) return;
+    if (other.isMine) {
+      try {
+        const result = await api.exchangeHeroes(hero.id, other.id);
+        setExchange([result.hero, result.other]);
+      } catch (e) { showMessage(e instanceof ApiError ? e.message : 'The exchange could not be opened.'); }
+      return;
+    }
     const owner = game.players.find((pl) => pl.heroIds.includes(other.id));
     if (owner) setMeeting({ heroName: other.name, playerId: owner.playerId, ownerName: owner.name });
   }
@@ -370,13 +531,19 @@ export function AdventureMap() {
     movingRef.current = hero.id;
     setPath(p);
     let message: string | null = null;
+    let notices: AdventureNotice[] = [];
+    let remainingPath: { x: number; y: number }[] | null = null;
+    let hasEncounter = false;
     try {
       // one request for the whole route; the server stops at pickups, visits and when movement runs out
       const res = await api.moveHero(hero.id, p.slice(1));
       const updated = res.hero;
+      hasEncounter = updated.pendingEncounter != null;
       message = res.message ?? null;
+      notices = res.notices;
       pos = { x: updated.x, y: updated.y };
       const k = Math.max(0, p.findIndex((q) => q.x === pos.x && q.y === pos.y));
+      if (!message && !notices.length && !hasEncounter && k < p.length - 1) remainingPath = p.slice(k);
       await glide(hero.id, p.slice(0, k + 1));
       // face the object the hero stopped next to
       if (k < p.length - 1) facingRef.current.set(hero.id, facingFor(Math.sign(p[k + 1].x - p[k].x), Math.sign(p[k + 1].y - p[k].y)));
@@ -388,54 +555,75 @@ export function AdventureMap() {
           ? { ...h, x: updated.x, y: updated.y, movement: updated.movement } : h)
       } : m);
     } catch (e) {
-      if (e instanceof ApiError) toast(e.message);
+      if (e instanceof ApiError) showNotices([{ kind: 'message', key: 'Movement', amount: 0, message: e.message }]);
     } finally {
       movingRef.current = null;
       glideRef.current = null;
-      setPath(null);
+      setPath(remainingPath);
     }
     // stepping into a town's gate enters it, as in HoMM3
     const enter = /^(?:enter|visit)-town:(.+)$/.exec(message ?? '');
     if (enter) { navigate(`/game/${gameId}/town/${enter[1]}`); return pos; }
     // walking up to the Obelisk opens it
     if (message === 'obelisk:open') { navigate(`/game/${gameId}/obelisk`); return pos; }
-    if (message) toast(message);
+    if (notices.length) showNotices(notices);
+    else if (message && message !== 'treasure:choose' && !hasEncounter)
+      showNotices([{ kind: 'message', key: 'Adventure', amount: 0, message }]);
     await refresh();
     return pos;
   }
-  async function endTurn(message: string) {
-    if (!gameId) return;
+  async function endTurn() {
+    if (!gameId || endingTurnRef.current || movingRef.current) return;
+    endingTurnRef.current = true;
+    setEndingTurn(true);
+    setEndTurnConfirm(false);
     try {
-      const r = await api.endTurn(gameId);
-      toast(`${message} Day ${r.day}, week ${r.week}, month ${r.month}.`);
+      await api.endTurn(gameId);
       await refresh();
     } catch (e) {
-      toast(e instanceof ApiError ? e.message : 'Something went wrong.');
+      showMessage(e instanceof ApiError ? e.message : 'The turn could not be ended.');
+    } finally {
+      endingTurnRef.current = false;
+      setEndingTurn(false);
     }
   }
 
-  async function castSpell(key: string) {
-    if (!hero) return;
-    try {
-      const r = await api.castSpell(hero.id, key);
-      toast(r.message);
-      setSpellbookOpen(false);
-      await refresh();
-    } catch (e) {
-      toast(e instanceof ApiError ? e.message : 'Something went wrong.');
+  function chooseSpell(key: string) {
+    if (!hero || !map) return;
+    if (key === 'dimensionDoor') { setSpellbookOpen(false); setPath(null); setTeleportTarget(true); return; }
+    if (key === 'townPortal' && (hero.skills.earth ?? 0) >= 2) {
+      setSpellbookOpen(false); setPortalTown(null); setPortalOpen(true); return;
     }
+    void castSpell(key);
+  }
+  async function castSpell(key: string, x?: number, y?: number, townId?: string) {
+    if (!hero || spellBusyRef.current) return;
+    spellBusyRef.current = true;
+    try {
+      const r = await api.castSpell(hero.id, key, x, y, townId);
+      setPath(null);
+      await refresh();
+      setSpellbookOpen(false);
+      if (r.view) setWorldView(r.view);
+      if (key === 'dimensionDoor' && r.message === 'Dimension Door failed!') showMessage(r.message);
+      if (key === 'townPortal') {
+        const town = map?.towns.find(t => t.isMine && t.x === r.x && t.y === r.y);
+        if (town) navigate(`/game/${gameId}/town/${town.id}`);
+      }
+    } catch (e) {
+      showMessage(e instanceof ApiError ? e.message : 'The spell could not be cast.');
+    } finally { spellBusyRef.current = false; }
   }
 
   async function addNote() {
     if (!gameId || !noteAt || !noteText.trim()) return;
     try {
       await api.addAnnotation(gameId, noteAt.x, noteAt.y, noteText.trim());
-      toast('Note added.');
       setNoteAt(null);
       setNoteText('');
       api.getAnnotations(gameId).then(setAnnotations).catch(() => {});
     } catch (e) {
-      toast(e instanceof ApiError ? e.message : 'Something went wrong.');
+      showMessage(e instanceof ApiError ? e.message : 'The note could not be saved.');
     }
   }
 
@@ -443,19 +631,35 @@ export function AdventureMap() {
     if (!gameId || !meeting || !meetingText.trim()) return;
     try {
       await api.sendMessage(gameId, meeting.playerId, meetingText.trim());
-      toast(`Message sent to ${meeting.ownerName}.`);
       setMeetingText('');
       setMeeting(null);
     } catch (e) {
-      toast(e instanceof ApiError ? e.message : 'Something went wrong.');
+      showMessage(e instanceof ApiError ? e.message : 'The message could not be sent.');
     }
   }
 
-  function onContextMenu(e: React.MouseEvent<HTMLCanvasElement>) {
+  async function onContextMenu(e: React.MouseEvent<HTMLCanvasElement>) {
     e.preventDefault();
-    if (!map || !hero) return;
+    if (teleportTarget) { setTeleportTarget(false); return; }
+    if (!map || hero?.pendingLevel) return;
     const t = toTile(e);
-    setPath(findPath(map, hero.x, hero.y, t.x, t.y, hero.skills.pathfinding ?? 0));
+    const target = targetTile(map, t.x, t.y);
+    const tile = map.tiles[target.y * map.width + target.x];
+    const factionSeat = FACTION_SEAT[game?.players.find(p => p.name.toLowerCase() === playerId)?.faction ?? ''];
+    if (tile?.objectKind === 'mine' && tile.owner === (1 << factionSeat)) {
+      setMineSharing({ ...target, shared: !!tile.mineShared });
+      return;
+    }
+    let vision = hero?.visions ? visionTargets.find(v => v.x === t.x && v.y === t.y) : undefined;
+    if (hero?.visions && !vision) {
+      const targets = await api.getVisions(hero.id).catch(() => []);
+      if (selectedRef.current !== hero.id) return;
+      setVisionTargets(targets);
+      vision = targets.find(v => v.x === t.x && v.y === t.y);
+    }
+    if (vision) { setVisionInfo(vision); return; }
+    if (!hero) return;
+    setPath(findPath(map, hero.x, hero.y, t.x, t.y, hero.skills.pathfinding ?? 0, hero.flying ? hero.flightPenalty : null, hero));
   }
 
   function onWheel(e: React.WheelEvent<HTMLCanvasElement>) {
@@ -465,15 +669,32 @@ export function AdventureMap() {
   }
 
   async function resolveEncounter(action: string) {
-    if (!hero) return;
+    if (!hero || encounterBusyRef.current) return;
+    encounterBusyRef.current = true;
+    setEncounterBusy(true);
     try {
-      const r = await api.resolveEncounter(hero.id, action);
-      toast(r.message ?? 'Done.');
+      await api.resolveEncounter(hero.id, action);
       setEncounter(null);
       await refresh();
     } catch (e) {
-      toast(e instanceof ApiError ? e.message : 'Something went wrong.');
+      showMessage(e instanceof ApiError ? e.message : 'The encounter could not be resolved.');
+    } finally {
+      encounterBusyRef.current = false;
+      setEncounterBusy(false);
     }
+  }
+
+  async function resolveTreasure(choice: 'gold' | 'experience' | 'leave') {
+    if (!hero || treasureBusy) return;
+    setTreasureBusy(true);
+    try {
+      const result = await api.resolveTreasure(hero.id, choice);
+      showNotices(result.notices);
+      setTreasureChoice('gold');
+      await refresh();
+    } catch (e) {
+      showMessage(e instanceof ApiError ? e.message : 'The treasure could not be collected.');
+    } finally { setTreasureBusy(false); }
   }
 
   if (!map || !game) return <Loading />;
@@ -487,6 +708,7 @@ export function AdventureMap() {
 
   function selectHero(h: HeroDetail) {
     selectedRef.current = h.id;
+    setVisionTargets([]);
     setHero(h);
     setPath(null);
     setCam(centerCam(map!, h.x, h.y));
@@ -494,32 +716,51 @@ export function AdventureMap() {
     else setEncounter(null);
   }
 
+  function storeSleeping(ids: string[]) {
+    setSleeping(ids);
+    localStorage.setItem(sleepKey, JSON.stringify(ids));
+  }
+
+  function toggleSleep() {
+    if (!hero || movingRef.current || encounter || hero.pendingTreasure || endingTurn) return;
+    if (sleeping.includes(hero.id)) { storeSleeping(sleeping.filter(id => id !== hero.id)); return; }
+    const ids = [...sleeping, hero.id];
+    storeSleeping(ids);
+    const index = heroes.findIndex(h => h.id === hero.id);
+    const next = [...heroes.slice(index + 1), ...heroes.slice(0, index)].find(h => !ids.includes(h.id) && h.movement > 0);
+    if (next) selectHero(next);
+  }
+
+  function requestEndTurn() {
+    if (movingRef.current || endingTurn || encounter || hero?.pendingTreasure || noticeQueue.length) return;
+    const reminder = heroes.some(h => h.movement > 0 && !sleeping.includes(h.id)
+      && (h.id !== hero?.id || !path || reachableSteps(map!, path, h.movement, h.skills.pathfinding ?? 0, h.flying ? h.flightPenalty : null, h.nativeTerrain) > 0));
+    if (reminder) setEndTurnConfirm(true);
+    else void endTurn();
+  }
+
   const actions: Record<string, () => void> = {
     Social: () => navigate(`/game/${gameId}/social`),
     Projects: () => navigate(`/game/${gameId}/projects`),
     Obelisk: () => navigate(`/game/${gameId}/obelisk`),
-    Sleep: () => endTurn(`${hero?.name ?? 'Your hero'} rests until the next day.`),
+    Sleep: toggleSleep,
     Hero: () => { if (hero) navigate(`/game/${gameId}/hero/${hero.id}`); },
     Spells: () => setSpellbookOpen(true),
     Note: () => {
-      if (!hover) { toast('Hover a tile first, then add a note.'); return; }
+      if (!hover) return;
       setNoteAt({ x: hover.x, y: hover.y });
       setNoteText('');
     },
     Town: () => { const t = myTowns[0]; if (t) navigate(`/game/${gameId}/town/${t.id}`); },
     Menu: () => navigate('/lobby'),
-    'Next Hero': () => {
-      if (heroes.length === 0) return;
-      const i = heroes.findIndex((h) => h.id === hero?.id);
-      selectHero(heroes[(i + 1) % heroes.length]);
+    'Move Hero': () => {
+      const end = path?.[path.length - 1];
+      if (!hero || !end) return;
+      const p = findPath(map!, hero.x, hero.y, end.x, end.y, hero.skills.pathfinding ?? 0, hero.flying ? hero.flightPenalty : null, hero);
+      if (p) void followPath(p);
     },
-    'End Turn': () => endTurn('A new day begins.')
+    'End Turn': requestEndTurn
   };
-
-  const remaining = Math.max(0, Math.floor(
-    (new Date(game.turnStartedAt).getTime() + game.turnSeconds * 1000 - now) / 1000));
-  const mm = Math.floor(remaining / 60);
-  const ss = String(remaining % 60).padStart(2, '0');
 
   const hoverAt = hover && map ? targetTile(map, hover.x, hover.y) : null;
   const hoverTile = hoverAt && map ? map.tiles[hoverAt.y * map.width + hoverAt.x] : null;
@@ -530,12 +771,14 @@ export function AdventureMap() {
       : hoverTile && hoverTile.fog > 0
         ? (hoverTile.objectKind ? objectName(hoverTile) : (hoverTile.terrain ? TERRAIN_NAME[hoverTile.terrain] : ''))
         : '';
-  const heroLine = hero
-    ? `Lvl ${hero.level} ${HERO_CLASS[hero.faction] ?? 'Hero'} · Move ${hero.movement}/${hero.maxMovement} · Mana ${hero.mana}/${hero.maxMana} · Next day in ${mm}:${ss}`
-    : `Next day in ${mm}:${ss}`;
   const visibleHeroes = heroes.slice(heroScroll, heroScroll + 5);
   const visibleTowns = myTowns.slice(townScroll, townScroll + 5);
   const dateText = `Month: ${game.month}, Week: ${game.week}, Day: ${game.day}`;
+  const cursorSheet = h3 ? getDef('CRADVNTR') : null;
+  const cursorFrame = movingRef.current ? 1 : cursor.frame;
+  const cursorStyle = cursorSheet ? adventureCursorCss(cursorSheet, cursorFrame)
+    : cursor.action === 'blocked' ? 'not-allowed' : cursor.action === 'visit' ? 'grab'
+      : cursor.action === 'exchange' ? 'alias' : 'crosshair';
 
   return (
     <>
@@ -556,7 +799,10 @@ export function AdventureMap() {
         data-hover={hover ? `${hover.x},${hover.y}` : ''}
         data-hover-kind={hoverTile?.objectKind ?? ''}
         data-hover-fog={hoverTile ? String(hoverTile.fog) : ''}
-        style={{ position: 'absolute', left: MAP_X, top: MAP_Y, width: MAP_W, height: MAP_H, cursor: h3 ? 'pointer' : 'crosshair' }}
+        data-cursor-action={cursor.action}
+        data-cursor-frame={cursorFrame}
+        data-path-end={path?.length ? `${path[path.length - 1].x},${path[path.length - 1].y}` : ''}
+        style={{ position: 'absolute', left: MAP_X, top: MAP_Y, width: MAP_W, height: MAP_H, cursor: cursorStyle }}
         onMouseMove={onMove}
         onMouseLeave={() => setHover(null)}
         onClick={onClick}
@@ -574,10 +820,14 @@ export function AdventureMap() {
         const sel = h.id === hero?.id;
         return (
           <div key={h.id} className="abs clickable" style={{ left: 610, top: 212 + i * 32, width: 62, height: 32 }}
-            role="button" aria-label={h.name} title={`${h.name} — ${h.movement}/${h.maxMovement} move`}
+            role="button" aria-label={h.name} title={`${h.name}, Level ${h.level} ${h.heroClass ?? HERO_CLASS[h.faction] ?? 'Hero'}`}
+            data-movement={h.movement} data-max-movement={h.maxMovement} data-sleeping={sleeping.includes(h.id)}
             onClick={() => selectHero(h)} onDoubleClick={() => navigate(`/game/${gameId}/hero/${h.id}`)}>
             {h3 ? (<>
-              <DefImg name="imobil" frame={Math.min(25, Math.floor(h.movement / 100))} x={0} y={1} />
+              <div role="meter" aria-label="Movement points" aria-valuenow={h.movement} aria-valuemin={0} aria-valuemax={h.maxMovement}
+                className="abs" style={{ left: 0, top: 1, width: 7, height: 30 }}>
+                <DefImg name="imobil" frame={Math.min(25, Math.floor(h.movement / 100))} x={0} y={0} />
+              </div>
               <H3Img name={heroPortrait(h.heroKey || h.name, h.faction, 'small')} x={7} y={0} w={48} h={32}
                 fallback={<HeroPortrait faction={h.faction} size={32} />} />
               <DefImg name="imana" frame={Math.min(25, Math.floor(h.mana / 5))} x={56} y={1} />
@@ -612,18 +862,33 @@ export function AdventureMap() {
 
       {/* command buttons */}
       {BUTTONS.map((b) => (
-        <button key={b.label} type="button" aria-label={b.label} title={b.tip}
+        <button key={b.label} type="button" aria-label={b.label === 'Sleep' && hero && sleeping.includes(hero.id) ? 'Wake' : b.label}
+          title={b.label === 'Sleep' && hero && sleeping.includes(hero.id) ? 'Wake hero' : b.tip}
+          disabled={endingTurn}
           className={h3 ? 'h3hit' : 'btn h3btn-fallback'}
           style={{ position: 'absolute', left: b.x, top: b.y, width: b.w, height: 32, fontSize: 9, padding: 0 }}
           onMouseDown={() => setPressed(b.label)} onMouseUp={() => setPressed(null)} onMouseLeave={() => setPressed(null)}
           onClick={actions[b.label]}>
-          {h3 ? <DefImg name={b.def} frame={pressed === b.label ? 1 : 0} x={0} y={0} /> : b.label}
+          {h3 ? <DefImg name={b.def} frame={pressed === b.label || b.label === 'Sleep' && hero && sleeping.includes(hero.id) ? 1 : 0} x={0} y={0} />
+            : b.label === 'Sleep' && hero && sleeping.includes(hero.id) ? 'Wake' : b.label}
         </button>
       ))}
 
       {/* info bar: selected hero */}
       <div className="abs" style={{ left: 605, top: 389, width: 175, height: 168 }}>
-        {h3 && hero ? (<>
+        {dateNotice ? <NewDayInfo key={dateNotice.turn} date={dateNotice} onClose={() => setDateNotice(null)} /> : pickup ? (
+          <div className={h3 ? 'h3text' : 'well'} role="status" aria-label="Adventure reward"
+            data-adventure-info data-kind={pickup.kind} data-resource={pickup.key} data-amount={pickup.amount}
+            style={{ position: 'absolute', inset: 0, textAlign: 'center', cursor: 'pointer' }}
+            onClick={() => setPickupQueue(queue => queue.slice(1))}>
+            {h3 && <Pcx name="ADSTATOT" x={0} y={0} />}
+            <Txt x={10} y={12} w={155} size={11} align="center">{pickup.message}</Txt>
+            {h3 ? <DefImg name={pickup.kind === 'resource' ? 'RESOUR82' : 'PSKILL'}
+              frame={pickup.kind === 'resource' ? RES_FRAME[pickup.key] : 4} x={46} y={49} />
+              : <div style={{ position: 'absolute', left: 62, top: 65 }}><ResIcon r={pickup.key} size={48} /></div>}
+            <Txt x={0} y={140} w={175} size={14} align="center">{pickup.amount}</Txt>
+          </div>
+        ) : h3 && hero ? (<>
           <Pcx name="ADSTATHR" x={0} y={0} />
           <H3Img name={heroPortrait(hero.heroKey || hero.name, hero.faction, 'large')} x={3} y={2} w={58} h={64}
             fallback={<HeroPortrait faction={hero.faction} size={58} />} />
@@ -669,7 +934,7 @@ export function AdventureMap() {
       {/* status bar */}
       <div className={'abs' + (h3 ? ' h3text' : '')} data-rollover
         style={{ left: 8, top: 556, width: 586, height: 18, textAlign: 'center', fontSize: 12, lineHeight: '18px', color: h3 ? undefined : 'var(--text-dim)' }}>
-        {rollover || heroLine}
+        {rollover}
       </div>
 
       {/* resource bar */}
@@ -685,36 +950,58 @@ export function AdventureMap() {
         style={{ left: 3 + 619, top: 578, fontSize: 12 }}>{dateText}</div>
 
       {/* spellbook */}
-      {spellbookOpen && hero && (
+      {spellbookOpen && hero && <Spellbook hero={hero} spells={spellDefs} onCast={chooseSpell} onClose={() => setSpellbookOpen(false)} />}
+      {portalOpen && <div className="backdrop">
+        <div className="modal" role="dialog" aria-label="Town Portal destination" style={{ position: 'relative', width: 400, height: 360 }}>
+          <DialogBox w={400} h={360} />
+          <div className="abs h3text" style={{ left: 32, top: 28, width: 336, textAlign: 'center', color: '#f8d870' }}>Town Portal</div>
+          <div className="abs" style={{ left: 40, top: 68, width: 320, height: 208, overflowY: 'auto' }}>
+            {myTowns.map(t => <button key={t.id} className="h3hit" aria-label={`Portal to ${t.name}`}
+              disabled={map.heroes.some(h => h.x === t.x && h.y === t.y)} aria-pressed={portalTown === t.id}
+              style={{ position: 'relative', display: 'block', width: 304, height: 40, marginBottom: 8,
+                outline: portalTown === t.id ? '2px solid #f8d870' : undefined }}
+              onClick={() => setPortalTown(t.id)}>
+              <DefImg name="ITPA" frame={townListFrame(t.faction)} x={0} y={2} />
+              <span className="abs h3text" style={{ left: 56, top: 10, fontSize: 13 }}>{t.name}</span>
+            </button>)}
+          </div>
+          <DefButton def="IOKAY" x={98} y={300} label="Confirm town" disabled={!portalTown} onClick={() => {
+            const town = portalTown!; setPortalOpen(false); void castSpell('townPortal', undefined, undefined, town);
+          }} />
+          <DefButton def="ICANCEL" x={238} y={300} label="Cancel portal" onClick={() => setPortalOpen(false)} />
+        </div>
+      </div>}
+      {visionInfo && <NativeMessage text={`${visionInfo.name}${visionInfo.level ? `, Level ${visionInfo.level}` : ''}\n`
+        + visionInfo.army.filter(s => s.creature).map(s => `${s.count} ${creatures[s.creature!]?.name ?? s.creature}`).join('\n')
+        + (visionInfo.canRecruit == null ? '' : visionInfo.canRecruit ? `\nThey will join for ${visionInfo.gold} gold.` : '\nThey will not join.')}
+        onClose={() => setVisionInfo(null)} />}
+
+      {worldView && <WorldViewDialog view={worldView} onClose={() => setWorldView(null)} />}
+
+      {hero?.pendingTreasure && (
         <div className="backdrop">
-          <div className="modal panel" style={{ width: 520, height: 420 }} role="dialog" aria-label="Spellbook">
-            <Txt x={0} y={14} w={520} size={16} bold align="center" className="heading">SPELLBOOK</Txt>
-            <Txt x={0} y={36} w={520} size={10} align="center" color="var(--text-dim)">
-              {hero.name} · {hero.mana} of {hero.maxMana} spell points
-            </Txt>
-            {hero.spells.length === 0 ? (
-              <Txt x={0} y={190} w={520} size={11} align="center" color="var(--text-mute)">
-                No spells known. Build a Mage Guild or visit a shrine.
-              </Txt>
-            ) : (
-              hero.spells.map((k, i) => {
-                const s = spellDefs[k];
-                const affordable = !!s && hero.mana >= s.cost;
-                return (
-                  <div key={k} data-spell={k} style={{ position: 'absolute', left: 24, top: 62 + i * 56, width: 472, height: 50,
-                    border: '1px solid var(--gold-0)', background: 'rgba(0,0,0,0.3)' }}>
-                    <Txt x={10} y={6} size={12} bold>{s?.name ?? k}</Txt>
-                    <Txt x={10} y={24} w={330} size={9} color="var(--text-dim)">{s?.description ?? ''}</Txt>
-                    <Txt x={10} y={36} w={330} size={9} color="var(--text-mute)">
-                      {s ? `Level ${s.level} · ${s.school} · ${s.cost} points` : ''}
-                    </Txt>
-                    <Btn x={360} y={10} w={100} h={30} label="Cast" size={11}
-                      disabled={!affordable} onClick={() => castSpell(k)} />
-                  </div>
-                );
-              })
-            )}
-            <Btn x={376} y={372} w={120} h={32} label="Close" size={12} onClick={() => setSpellbookOpen(false)} />
+          <div className="modal panel" style={{ width: 420, height: 320 }} role="dialog" aria-modal="true" aria-label="Treasure chest">
+            <DialogBox w={420} h={320} />
+            <Txt x={0} y={20} w={420} size={16} bold align="center" className="heading">Treasure Chest</Txt>
+            <Txt x={25} y={54} w={370} size={11} align="center">Keep the gold, or share it to gain experience. Choose one reward.</Txt>
+            {(['gold', 'experience'] as const).map((choice, i) => <button key={choice} type="button" className="abs h3hit"
+              aria-label={choice === 'gold' ? `Take ${hero.pendingTreasure!.gold} gold` : `Gain ${hero.pendingTreasure!.experience} experience`}
+              aria-pressed={treasureChoice === choice} disabled={treasureBusy} onClick={() => setTreasureChoice(choice)}
+              style={{ left: 90 + i * 145, top: 100, width: 94, height: 126, background: 'none',
+                border: `1px solid ${treasureChoice === choice ? '#f8d870' : 'transparent'}`, color: '#f0e0b0' }}>
+              {h3 ? <DefImg name={choice === 'gold' ? 'RESOUR82' : 'PSKILL'} frame={choice === 'gold' ? 6 : 4} x={5} y={4} />
+                : <ResIcon r={choice} size={64} />}
+              <span style={{ position: 'absolute', left: 0, top: 94, width: '100%', textAlign: 'center' }}>
+                {choice === 'gold' ? hero.pendingTreasure!.gold : hero.pendingTreasure!.experience}
+              </span>
+            </button>)}
+            {h3 ? <>
+              <DefButton def="IOKAY" x={110} y={262} label="OK" disabled={treasureBusy} onClick={() => resolveTreasure(treasureChoice)} />
+              <DefButton def="ICANCEL" x={245} y={262} label="Leave the chest" disabled={treasureBusy} onClick={() => resolveTreasure('leave')} />
+            </> : <>
+              <Btn x={80} y={262} w={100} h={30} label="OK" disabled={treasureBusy} onClick={() => resolveTreasure(treasureChoice)} />
+              <Btn x={220} y={262} w={130} h={30} label="Leave the chest" disabled={treasureBusy} onClick={() => resolveTreasure('leave')} />
+            </>}
           </div>
         </div>
       )}
@@ -723,6 +1010,7 @@ export function AdventureMap() {
       {noteAt && (
         <div className="backdrop">
           <div className="modal panel" style={{ width: 420, height: 200 }} role="dialog" aria-label="Add note">
+            <DialogBox w={420} h={200} />
             <Txt x={0} y={16} w={420} size={15} bold align="center" className="heading">Add a note</Txt>
             <Txt x={24} y={44} w={372} size={10} color="var(--text-dim)">
               Tile {noteAt.x}, {noteAt.y} — visible to every player.
@@ -740,38 +1028,36 @@ export function AdventureMap() {
       )}
 
       {/* encounter dialog */}
-      {encounter && (() => {
-        const stackStrength = encounterStrength(encounter.creature, encounter.count);
-        const mine = hero?.strength ?? 0;
-        const canObserve = mine * 2 >= stackStrength;
-        const canRecruit = mine >= stackStrength;
-        return (
-          <div className="backdrop">
-            <div className="modal panel" style={{ width: 400, height: 250 }}>
-              <Txt x={0} y={20} w={400} size={16} bold align="center" className="heading">
-                A Wandering Band
-              </Txt>
-              <Txt x={30} y={56} w={340} size={12} align="center" color="var(--text-dim)">
-                {encounter.count} {creatureLabel(encounter.creature)} block the way. There is no need to fight.
-              </Txt>
-              <Txt x={30} y={80} w={340} size={10} align="center" color="var(--text-mute)">
-                Expedition {mine} vs stack {stackStrength}
-              </Txt>
-              <Btn x={30} y={104} w={340} h={32} label="Observe (gain experience)" size={12}
-                disabled={!canObserve} onClick={() => resolveEncounter('observe')} />
-              <Btn x={30} y={144} w={340} h={32} label="Recruit them (pay gold)" size={12}
-                disabled={!canRecruit} onClick={() => resolveEncounter('recruit')} />
-              <Btn x={30} y={184} w={340} h={28} label="Pass by" size={12}
-                onClick={() => resolveEncounter('pass')} />
-            </div>
-          </div>
-        );
-      })()}
+      {encounter && hero && <CreatureEncounterDialog offer={hero.encounterOffer ?? {
+        creature: encounter.creature, name: encounter.creature, count: encounter.count, gold: 0, canRecruit: false
+      }} h3={h3}
+        busy={encounterBusy} onAccept={() => resolveEncounter('recruit')} onDecline={() => resolveEncounter('pass')} />}
+
+      {endTurnConfirm && <AdventureQuestion label="End turn" h3={h3}
+        message="Some heroes can still move. End your turn?"
+        onYes={() => void endTurn()} onNo={() => setEndTurnConfirm(false)} />}
+
+      {hero?.pendingLevel && <HeroLevel key={`${hero.id}-${hero.pendingLevel.level}`} hero={hero}
+        onChanged={updated => { setHero(updated); setHeroes(hs => hs.map(h => h.id === updated.id ? updated : h)); void refresh(); }} />}
+      {mineSharing && <NativeMessage text={mineSharing.shared
+        ? 'Stop sharing this mine? Only your city will receive its full daily production.'
+        : 'Share this mine with every city? Each city will receive half its daily production. Half units are saved until they form a whole resource.'}
+        onClose={() => setMineSharing(null)} onConfirm={() => {
+          const mine = mineSharing; setMineSharing(null);
+          api.shareMine(gameId!, mine.x, mine.y, !mine.shared).then(refresh).catch(e => showMessage(e instanceof ApiError ? e.message : 'Sharing failed.'));
+        }} />}
+      {exchange && <HeroExchange first={exchange[0]} second={exchange[1]} creatures={creatures}
+        onChanged={updated => {
+          setExchange([updated[0], updated[1]]);
+          setHeroes(current => current.map(h => updated.find(u => u.id === h.id) ?? h));
+          setHero(current => updated.find(h => h.id === current?.id) ?? current);
+        }} onClose={() => { setExchange(null); void refresh(); }} />}
 
       {/* hero meeting: replaces hero-vs-hero battle */}
       {meeting && (
         <div className="backdrop">
-          <div className="modal panel" style={{ width: 420, height: 260 }} role="dialog" aria-label="Hero meeting">
+          <div className="modal panel" style={{ width: 420, height: 296 }} role="dialog" aria-label="Hero meeting">
+            <DialogBox w={420} h={296} />
             <Txt x={0} y={18} w={420} size={16} bold align="center" className="heading">
               You meet {meeting.heroName}
             </Txt>
@@ -790,11 +1076,17 @@ export function AdventureMap() {
               disabled={!meetingText.trim()} onClick={sendMeetingMessage} />
             <Btn x={30} y={192} w={176} h={28} label="Offer a trade…" size={12}
               onClick={() => navigate(`/game/${gameId}/social?to=${meeting.playerId}`)} />
-            <Btn x={214} y={192} w={176} h={28} label="Part ways" size={12}
+            <Btn x={214} y={192} w={176} h={28} label="Share map marker" size={12}
+              onClick={() => { setMeeting(null); if (hero) setNoteAt({ x: hero.x, y: hero.y }); }} />
+            <Btn x={30} y={228} w={360} h={28} label="Part ways" size={12}
               onClick={() => setMeeting(null)} />
           </div>
         </div>
       )}
+
+      {noticeQueue[0] && <AdventureNoticeDialog notice={noticeQueue[0]}
+        spellName={spellDefs[noticeQueue[0].key]?.name} spellId={spellDefs[noticeQueue[0].key]?.id} h3={h3}
+        onClose={() => setNoticeQueue(queue => queue.slice(1))} />}
 
     </>
   );
@@ -812,18 +1104,19 @@ function pick<T>(list: T[], x: number, y: number, s: number): T {
 }
 
 function objectSprite(t: MapTile, x: number, y: number): { def: string; ox: number; animated: boolean } | null {
+  const sprite = (def: string, animated: boolean) => ({ def, ox: objectAnchorX(def), animated });
   switch (t.objectKind) {
-    case 'tree': return { def: pick(TREE_DEFS[t.terrain ?? ''] ?? TREE_DEFS.default, x, y, 3), ox: 0, animated: false };
-    case 'rock': return { def: pick(ROCK_DEFS, x, y, 4), ox: 0, animated: false };
-    case 'mountain': return { def: pick(MOUNTAIN_DEFS, x, y, 5), ox: 0, animated: false };
-    case 'mine': return { def: MINE_DEF[t.objectData ?? 'gold'] ?? MINE_DEF.gold, ox: 1, animated: true };
-    case 'resource': return { def: RESOURCE_DEF[(t.objectData ?? 'gold').split(':')[0]] ?? RESOURCE_DEF.gold, ox: 0, animated: true };
-    case 'treasure': return { def: OBJECT_DEF.treasure, ox: 0, animated: true };
-    case 'artifact': return { def: artifactDef(artifactSeed(t.objectData)), ox: 0, animated: true };
-    case 'shrine': return { def: OBJECT_DEF.shrine, ox: 1, animated: true };
-    case 'obelisk': return { def: OBJECT_DEF.obelisk, ox: 1, animated: true };
-    case 'grail': return { def: OBJECT_DEF.grail, ox: 0, animated: true };
-    case 'monster': return { def: monsterDef((t.objectData ?? '').split(':')[0]), ox: 0, animated: true };
+    case 'tree': return sprite(t.sprite ?? pick(TREE_DEFS[t.terrain ?? ''] ?? TREE_DEFS.default, x, y, 3), false);
+    case 'rock': return sprite(t.sprite ?? pick(ROCK_DEFS, x, y, 4), false);
+    case 'mountain': return sprite(t.sprite ?? pick(MOUNTAIN_DEFS, x, y, 5), false);
+    case 'mine': return sprite(MINE_DEF[t.objectData ?? 'gold'] ?? MINE_DEF.gold, true);
+    case 'resource': return sprite(RESOURCE_DEF[(t.objectData ?? 'gold').split(':')[0]] ?? RESOURCE_DEF.gold, true);
+    case 'treasure': return sprite(OBJECT_DEF.treasure, true);
+    case 'artifact': return sprite(artifactDef(artifactSeed(t.objectData)), true);
+    case 'shrine': return sprite(t.sprite ?? OBJECT_DEF.shrine, true);
+    case 'obelisk': return sprite(OBJECT_DEF.obelisk, true);
+    case 'grail': return null;
+    case 'monster': return sprite(monsterDef((t.objectData ?? '').split(':')[0]), true);
     default: return null;
   }
 }
@@ -961,6 +1254,10 @@ function renderH3(ctx: CanvasRenderingContext2D, map: MapData, cam: { x: number;
       if (mx < 0 || my < 0 || mx >= map.width || my >= map.height) continue;
       const t = at(mx, my);
       if (!t.objectKind || t.fog === 0) continue;
+      if (t.objectKind === 'grail') {
+        list.push({ y: my, x: mx, draw: () => drawGrailSite(ctx, (mx - cam.x) * TILE, (my - cam.y) * TILE) });
+        continue;
+      }
       const spr = objectSprite(t, mx, my);
       if (!spr) continue;
       const s = getDef(spr.def) ?? (t.objectKind === 'monster' ? getDef('AVWMON1') : null);
@@ -989,7 +1286,7 @@ function renderH3(ctx: CanvasRenderingContext2D, map: MapData, cam: { x: number;
     if (!s) continue;
     const px = (town.x - cam.x) * TILE, py = (town.y - cam.y) * TILE;
     if (px < -4 * TILE || py < -TILE || px > MAP_W + 6 * TILE || py > MAP_H + 6 * TILE) continue;
-    list.push({ y: town.y, x: town.x + 2, draw: () => anchorDraw(ctx, s, 0, px, py, 2) });
+    list.push({ y: town.y, x: town.x + 2, draw: () => anchorDraw(ctx, s, 0, px, py, objectAnchorX(TOWN_MAP_DEF[town.faction] ?? 'AVCcasx0')) });
   }
   for (const h of map.heroes) {
     const g0 = glide && glide.id === h.id ? glide : null;
@@ -1172,13 +1469,17 @@ function drawObject(ctx: CanvasRenderingContext2D, t: MapTile, sx: number, sy: n
     ctx.beginPath(); ctx.arc(sx + 12, sy + 14, 2, 0, 7); ctx.fill();
     ctx.beginPath(); ctx.arc(sx + 20, sy + 14, 2, 0, 7); ctx.fill();
   } else if (kind === 'grail') {
-    ctx.fillStyle = '#e0c040';
-    ctx.beginPath();
-    ctx.moveTo(sx + 10, sy + 10); ctx.lineTo(sx + 22, sy + 10);
-    ctx.lineTo(sx + 19, sy + 24); ctx.lineTo(sx + 13, sy + 24);
-    ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#fff8c0'; ctx.fillRect(sx + 9, sy + 8, 14, 3);
+    drawGrailSite(ctx, sx, sy);
   }
+}
+
+function drawGrailSite(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  ctx.strokeStyle = '#e0c040';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(x + 9, y + 9); ctx.lineTo(x + 23, y + 23);
+  ctx.moveTo(x + 23, y + 9); ctx.lineTo(x + 9, y + 23);
+  ctx.stroke();
 }
 
 // Town drawn ~2x2 tiles: gate sits on the town tile, walls extend up and to the sides.
@@ -1285,23 +1586,18 @@ function creatureTier(key: string): number {
 }
 
 function creatureLabel(key: string): string {
-  return key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase()) + 's';
+  return pluralCreatureName(key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase()));
 }
 
-/** Creature AI values, loaded once, so the encounter dialog can compare strengths. */
-const creatureAi = new Map<string, number>();
-let creatureAiLoading = false;
-function ensureCreatureAi() {
-  if (creatureAiLoading || creatureAi.size > 0) return;
-  creatureAiLoading = true;
-  api.getCreatures()
-    .then((cs) => { for (const c of cs) creatureAi.set(c.key, c.aiValue); })
-    .catch(() => { creatureAiLoading = false; });
-}
-
-function encounterStrength(creature: string, count: number): number {
-  ensureCreatureAi();
-  return (creatureAi.get(creature) ?? 100) * count;
+function pluralCreatureName(name: string): string {
+  if (/Cyclops$/.test(name)) return name;
+  if (/Pegasus$/.test(name)) return name.slice(0, -2) + 'i';
+  if (/Efreet$/.test(name)) return name + 'i';
+  if (/man$/.test(name)) return name.slice(0, -3) + 'men';
+  if (/(?:Elf|Dwarf)$/.test(name)) return name.slice(0, -1) + 'ves';
+  if (/[^aeiou]y$/.test(name)) return name.slice(0, -1) + 'ies';
+  if (/Mage$/.test(name)) return name.slice(0, -4) + 'Magi';
+  return name + (/(?:s|x|z|ch|sh)$/.test(name) ? 'es' : 's');
 }
 
 const MINE_NAME: Record<string, string> = {
@@ -1328,6 +1624,123 @@ function objectName(t: MapTile): string {
     case 'town': return 'Town';
     default: return '';
   }
+}
+
+function NewDayInfo({ date, onClose }: { date: GameDetail; onClose: () => void }) {
+  const h3 = useH3();
+  const week = date.day === 1 && date.turn > 1;
+  const requested = week ? `NEWWEEK${date.week}` : 'NEWDAY';
+  const sheet = useDef(h3 ? requested : null);
+  const fallback = useDef(h3 && week && sheet === null ? 'NEWWEEK1' : null);
+  const name = sheet === null && week ? 'NEWWEEK1' : requested;
+  const count = (sheet ?? fallback)?.count ?? 1;
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const start = performance.now();
+    const animation = window.setInterval(() => setElapsed(performance.now() - start), 50);
+    const timer = window.setTimeout(onClose, 3000);
+    return () => { window.clearInterval(animation); window.clearTimeout(timer); };
+  }, []);
+  return (
+    <div role="status" aria-label="New turn" data-day={date.day} data-week={date.week} data-animation={name}
+      style={{ position: 'absolute', inset: 0, cursor: 'pointer' }} onClick={onClose}>
+      {h3 && <DefImg name={name} frame={Math.min(count - 1, Math.floor(elapsed * count / 1500))} x={1} y={0} />}
+      <Txt x={20} y={20} w={150} size={16} align="center">{week ? `Week ${date.week}` : `Day ${date.day}`}</Txt>
+    </div>
+  );
+}
+
+function AdventureQuestion({ label, message, h3, gold, busy, onYes, onNo }: {
+  label: string; message: string; h3: boolean; gold?: number; busy?: boolean; onYes: () => void; onNo: () => void;
+}) {
+  const height = gold == null ? 190 : 300;
+  return <div className="backdrop">
+    <div className="modal panel" role="dialog" aria-modal="true" aria-label={label} style={{ width: 440, height }}>
+      <DialogBox w={440} h={height} />
+      <Txt x={30} y={40} w={380} size={12} align="center">{message}</Txt>
+      {gold != null && <>
+        {h3 ? <DefImg name="RESOUR82" frame={6} x={179} y={100} />
+          : <div className="abs" style={{ left: 196, top: 120 }}><ResIcon r="gold" size={48} /></div>}
+        <Txt x={30} y={200} w={380} size={12} align="center">{gold}</Txt>
+      </>}
+      {h3 ? <>
+        <DefButton def="IOKAY" x={114} y={height - 55} label="Yes" disabled={busy} onClick={onYes} />
+        <DefButton def="ICANCEL" x={264} y={height - 55} label="No" disabled={busy} onClick={onNo} />
+      </> : <>
+        <Btn x={100} y={height - 55} w={90} h={30} label="Yes" disabled={busy} onClick={onYes} />
+        <Btn x={250} y={height - 55} w={90} h={30} label="No" disabled={busy} onClick={onNo} />
+      </>}
+    </div>
+  </div>;
+}
+
+function CreatureEncounterDialog({ offer, h3, busy, onAccept, onDecline }: {
+  offer: NonNullable<HeroDetail['encounterOffer']>; h3: boolean; busy: boolean; onAccept: () => void; onDecline: () => void;
+}) {
+  if (offer.canRecruit) return <AdventureQuestion label="Creature encounter" h3={h3} gold={offer.gold} busy={busy}
+    message={`${offer.count} ${offer.count === 1 ? offer.name + ' offers' : pluralCreatureName(offer.name) + ' offer'} to join your army for ${offer.gold} gold. Accept?`}
+    onYes={onAccept} onNo={onDecline} />;
+  return <div className="backdrop">
+    <div className="modal panel" role="dialog" aria-modal="true" aria-label="Creature encounter" style={{ width: 400, height: 250 }}>
+      <DialogBox w={400} h={250} />
+      <Txt x={30} y={40} w={340} size={12} align="center">These creatures will not join your army.</Txt>
+      {h3 ? <DefImg name="TWCRPORT" frame={creaturePortraitFrame(offer.creature)} x={171} y={88} />
+        : <div className="abs" style={{ left: 175, top: 90 }}><CreatureIcon creature={offer.creature} size={48} /></div>}
+      <Txt x={30} y={163} w={340} size={12} align="center">{offer.count} {offer.count === 1 ? offer.name : pluralCreatureName(offer.name)}</Txt>
+      {h3 ? <DefButton def="IOKAY" x={168} y={195} label="OK" disabled={busy} onClick={onDecline} />
+        : <Btn x={155} y={195} w={90} h={30} label="OK" disabled={busy} onClick={onDecline} />}
+    </div>
+  </div>;
+}
+
+function AdventureNoticeDialog({ notice, spellName, spellId, h3, onClose }: {
+  notice: AdventureNotice; spellName?: string; spellId?: number; h3: boolean; onClose: () => void;
+}) {
+  const title = notice.kind === 'shrine' ? 'Shrine of Magic' : notice.kind === 'artifact' ? 'Artifact'
+    : notice.kind === 'mine' ? 'Mine' : notice.kind === 'grail' ? 'The Grail' : notice.key;
+  return (
+    <div className="backdrop">
+      <div className="modal panel" style={{ width: 440, height: 280 }} role="dialog" aria-modal="true" aria-label={title}>
+        <DialogBox w={440} h={280} />
+        {notice.kind !== 'message' && <Txt x={20} y={20} w={400} size={16} bold align="center" className="heading">{title}</Txt>}
+        <Txt x={32} y={54} w={376} size={12} align="center">{notice.message}</Txt>
+        {h3 && notice.kind === 'shrine' && spellId != null &&
+          <DefImg name="SPELLSCR" frame={spellId} x={172} y={101} />}
+        {h3 && notice.icon != null && <DefImg name="Artifact" frame={notice.icon} x={198} y={119} />}
+        {notice.kind === 'mine' && (h3
+          ? <DefImg name="RESOUR82" frame={RES_FRAME[notice.key]} x={179} y={100} />
+          : <div style={{ position: 'absolute', left: 196, top: 114 }}><ResIcon r={notice.key} size={48} /></div>)}
+        <Txt x={24} y={194} w={392} size={12} align="center">
+          {notice.kind === 'shrine' ? spellName ?? notice.key : notice.kind === 'mine' ? `${notice.amount} per day` : ''}
+        </Txt>
+        {h3 ? <DefButton def="IOKAY" x={188} y={230} label="OK" onClick={onClose} />
+          : <Btn x={170} y={230} w={100} h={30} label="OK" onClick={onClose} />}
+      </div>
+    </div>
+  );
+}
+
+function WorldViewDialog({ view, onClose }: { view: WorldView; onClose: () => void }) {
+  return (
+    <div className="backdrop">
+      <div className="modal panel" style={{ width: 520, height: 480 }} role="dialog" aria-label="World view">
+        <Txt x={0} y={16} w={520} size={16} bold align="center" className="heading">World View</Txt>
+        <svg role="img" aria-label="Revealed terrain and locations" viewBox={`0 0 ${view.width} ${view.height}`}
+          style={{ position: 'absolute', left: 24, top: 50, width: 472, height: 230, background: '#111' }}>
+          {view.terrain.map((terrain, i) => terrain && <rect key={i} x={i % view.width} y={Math.floor(i / view.width)}
+            width={1} height={1} fill={TERRAIN_COLOR[terrain] ?? '#555'} />)}
+          {view.locations.map((location, i) => <circle key={i} cx={location.x + 0.5} cy={location.y + 0.5}
+            r={0.65} fill="#ffdb72"><title>{location.name} ({location.x}, {location.y})</title></circle>)}
+        </svg>
+        <div style={{ position: 'absolute', left: 24, top: 292, width: 472, height: 120, overflowY: 'auto', fontSize: 12 }}>
+          {view.locations.length === 0 && <p>No locations revealed.</p>}
+          {view.locations.map((location, i) => <div key={i} data-location-kind={location.kind}
+            data-x={location.x} data-y={location.y}>{location.name} ({location.x}, {location.y})</div>)}
+        </div>
+        <Btn x={376} y={432} w={120} h={30} label="Close" onClick={onClose} />
+      </div>
+    </div>
+  );
 }
 
 function Minimap(props: { map: MapData; cam: { x: number; y: number }; h3: boolean; onJump: (x: number, y: number) => void }) {
@@ -1381,58 +1794,92 @@ function Minimap(props: { map: MapData; cam: { x: number; y: number }; h3: boole
     />
   );
 }
-function findPath(map: MapData, sx: number, sy: number, tx: number, ty: number, pathfinding = 0): { x: number; y: number }[] | null {
+function findPath(map: MapData, sx: number, sy: number, tx: number, ty: number, pathfinding = 0, flightPenalty: number | null = null, hero?: HeroDetail): { x: number; y: number }[] | null {
   const W = map.width, H = map.height;
   if (sx === tx && sy === ty) return [{ x: sx, y: sy }];
   const key = (x: number, y: number) => y * W + x;
   const start = key(sx, sy), goal = key(tx, ty);
-  const g = new Float64Array(W * H).fill(Infinity);
-  const came = new Int32Array(W * H).fill(-1);
-  const closed = new Uint8Array(W * H);
-  g[start] = 0;
-  const h = (i: number) => Math.max(Math.abs((i % W) - tx), Math.abs(Math.floor(i / W) - ty));
+  const N = W * H, phase = flightPenalty == null ? 1 : 0, first = start + phase * N;
+  const g = new Float64Array(N * 2).fill(Infinity);
+  const came = new Int32Array(N * 2).fill(-1);
+  const closed = new Uint8Array(N * 2);
+  g[first] = 0;
+  const h = (i: number) => Math.max(0, Math.max(Math.abs((i % W) - tx), Math.abs(Math.floor(i / W) - ty)) - 1) * 100;
   const occupied = new Set(map.heroes.map((hh) => key(hh.x, hh.y)));
-  const open: { i: number; f: number }[] = [{ i: start, f: h(start) }];
+  const daily = Math.max(100, (hero?.maxMovement ?? 1e9) - (hero?.hasteBonus ?? 0));
+  type Node = { i: number; phase: number; left: number; cost: number; f: number };
+  const open: Node[] = [{ i: start, phase, left: hero?.movement ?? 1e9, cost: 0, f: h(start) }];
+  function push(i: number, nextPhase: number, left: number, cost: number, from: number) {
+    const id = i + nextPhase * N;
+    if (cost >= g[id]) return;
+    g[id] = cost; came[id] = from;
+    open.push({ i, phase: nextPhase, left, cost, f: cost + h(i) });
+  }
   const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
   let iter = 0;
   // Solid objects are visitable destinations, never transit tiles.
   const visitable = (i: number) => occupied.has(i) ||
     ['mine', 'monster', 'town', 'obelisk', 'shrine'].includes(map.tiles[i].objectKind ?? '');
-  const pinches = (i: number) => !map.tiles[i].passable || occupied.has(i);
+  const solid = (i: number) => !map.tiles[i].passable ||
+    ['town', 'mine', 'monster', 'obelisk', 'shrine', 'block', 'tree', 'rock', 'mountain'].includes(map.tiles[i].objectKind ?? '');
+  const pinches = (i: number) => solid(i) || occupied.has(i);
+  const landable = (i: number) => i === start || !occupied.has(i) &&
+    ((!solid(i) && !['water', 'rock'].includes(map.tiles[i].terrain ?? ''))
+      || map.towns.some(t => t.isMine && key(t.x, t.y) === i));
 
   while (open.length && iter++ < 20000) {
     let bi = 0;
     for (let i = 1; i < open.length; i++) if (open[i].f < open[bi].f) bi = i;
     const cur = open.splice(bi, 1)[0];
+    const id = cur.i + cur.phase * N;
+    if (closed[id] || cur.cost !== g[id]) continue;
     if (cur.i === goal) {
       const path: { x: number; y: number }[] = [];
-      let c = goal;
-      while (c !== -1) { path.push({ x: c % W, y: Math.floor(c / W) }); c = came[c]; }
+      let c = id;
+      while (c !== -1) {
+        const i = c % N, p = { x: i % W, y: Math.floor(i / W) };
+        if (!path.length || path[path.length - 1].x !== p.x || path[path.length - 1].y !== p.y) path.push(p);
+        c = came[c];
+      }
       return path.reverse();
     }
-    if (closed[cur.i]) continue;
-    closed[cur.i] = 1;
+    closed[id] = 1;
     const cx = cur.i % W, cy = Math.floor(cur.i / W);
+    const flying = cur.phase === 0;
+    if (hero && flying && landable(cur.i)) push(cur.i, 1, daily, cur.cost + cur.left, id);
     for (const [dx, dy] of dirs) {
       const nx = cx + dx, ny = cy + dy;
       if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
       const ni = key(nx, ny);
-      if (closed[ni]) continue;
+      if (closed[ni + cur.phase * N]) continue;
       const t = map.tiles[ni];
       if (t.fog === 0) continue;
+      if (flying && t.terrain === 'rock') continue;
       if (ni === goal) {
-        if (!t.passable && !visitable(ni)) continue;
-      } else if (!t.passable || occupied.has(ni)) continue;
-      if (dx && dy) {
+        if (solid(ni) && !visitable(ni)) continue;
+        if (flying && !landable(ni) && !landable(cur.i)) continue;
+      } else if (!flying && (solid(ni) || occupied.has(ni))) continue;
+      if (dx && dy && !flying) {
         if (pinches(key(cx + dx, cy)) || pinches(key(cx, cy + dy))) continue;
       }
-      // terrain cost, with a hair extra on diagonals so straight routes win ties
-      const ng = g[cur.i] + (ni === goal ? 1 : terrainCost(t.terrain, pathfinding) / 100) + (dx && dy ? 0.001 : 0);
-      if (ng < g[ni]) {
-        g[ni] = ng;
-        came[ni] = cur.i;
-        open.push({ i: ni, f: ng + h(ni) });
+      const free = ni === goal && (occupied.has(ni) || map.towns.some(town => !town.isMine && key(town.x, town.y) === ni));
+      const visit = ni === goal && solid(ni);
+      const penalty = flying && !visit ? flightPenalty : null;
+      const source = map.tiles[cur.i].terrain;
+      let cost = free ? 0 : stepCost(source, !!(dx && dy), cur.left, pathfinding, hero?.nativeTerrain, penalty);
+      let left = cur.left, waited = 0;
+      if (cost > left) {
+        if (flying) continue;
+        waited = left; left = daily;
+        cost = free ? 0 : stepCost(source, !!(dx && dy), left, pathfinding, hero?.nativeTerrain);
+        if (cost > left) continue;
       }
+      left -= cost;
+      let spent = cost + waited;
+      if (!flying && left < terrainCost((visit ? map.tiles[cur.i] : t).terrain, pathfinding, hero?.nativeTerrain)) {
+        spent += left; left = 0;
+      }
+      push(ni, cur.phase, left, cur.cost + spent, id);
     }
   }
   return null;

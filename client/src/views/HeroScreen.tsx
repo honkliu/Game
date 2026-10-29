@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { useGameNavigate } from '../useGameNavigate';
 import { api, ApiError } from '../api';
-import { toast } from '../ui/Toast';
-import { SplitDialog } from './TownWindows';
+import { CreatureInfo, SplitDialog } from './TownWindows';
+import { ART_SLOTS, HeroLevel, NativeMessage, SKILL_ID } from './HeroWindows';
 import type { ArtifactInfo, HeroDetail, CreatureDef } from '../types';
 import { Btn, Loading, Panel, Txt } from '../ui/Layout';
 import { HERO_CLASS, HeroPortrait } from '../ui/homm';
@@ -11,19 +11,8 @@ import { DefImg, Pcx, pcxUrl, useDef, useH3 } from '../h3/assets';
 import { FACTION_PLAYER_COLOR, creaturePortraitFrame, heroPortrait } from '../h3/catalog';
 
 // Original secondary-skill ids (SECSKILL.def index = 3 + id * 3 + level - 1).
-const SKILL_ID: Record<string, number> = {
-  pathfinding: 0, archery: 1, logistics: 2, scouting: 3, diplomacy: 4, navigation: 5, leadership: 6, wisdom: 7,
-  mysticism: 8, luck: 9, ballistics: 10, eagleEye: 11, necromancy: 12, estates: 13, fire: 14, air: 15, water: 16,
-  earth: 17, scholar: 18, tactics: 19, artillery: 20, learning: 21, offence: 22, armorer: 23, intelligence: 24,
-  sorcery: 25, resistance: 26, firstAid: 27
-};
 
 // Paper-doll slot positions inside HeroScr4.pcx (VCMI CArtifactsOfHeroBase::slotPos minus the 64,7 window offset).
-const ART_SLOTS: Record<string, [number, number]> = {
-  head: [445, 23], shoulders: [504, 235], neck: [445, 73], rightHand: [319, 61], leftHand: [500, 176], torso: [445, 123],
-  ring1: [367, 61], ring2: [546, 176], feet: [451, 288],
-  misc1: [319, 136], misc2: [335, 187], misc3: [351, 238], misc4: [367, 289], misc5: [317, 289]
-};
 const BACKPACK_X = 339, BACKPACK_Y = 358, BACKPACK_SIZE = 5;
 
 function artifactTip(a: ArtifactInfo): string {
@@ -44,6 +33,11 @@ function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef
   const { hero, creatures, onBack, onChanged } = props;
   const [sel, setSel] = useState<number | null>(null);
   const [split, setSplit] = useState<{ from: number; to: number } | null>(null);
+  const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
+  const [confirmDismiss, setConfirmDismiss] = useState<number | 'hero' | null>(null);
+  const [creatureInfo, setCreatureInfo] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   // every HoMM3 hero carries a catapult; the others are bought at the Blacksmith
   const machines = new Set([...(hero.warMachines ?? []), 'catapult']);
 
@@ -51,7 +45,27 @@ function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef
     try {
       const r = await api.moveHeroArmy(hero.id, from, to, count);
       onChanged({ ...hero, army: r.army });
-    } catch (e) { toast(e instanceof ApiError ? e.message : 'Something went wrong.'); }
+    } catch (e) { setError(e instanceof ApiError ? e.message : 'Something went wrong.'); }
+  }
+  async function artifactClick(slot: string) {
+    const item = slot.startsWith('backpack:') ? hero.backpack[Number(slot.slice(9))] : hero.worn[slot];
+    if (!selectedArtifact) { if (item) setSelectedArtifact(slot); return; }
+    const from = selectedArtifact; setSelectedArtifact(null);
+    if (from === slot || busy) return;
+    setBusy(true);
+    try { onChanged((await api.moveArtifact(hero.id, from, slot)).hero); }
+    catch (e) { setError(e instanceof ApiError ? e.message : 'The artifact cannot be moved.'); }
+    finally { setBusy(false); }
+  }
+  async function dismiss() {
+    if (confirmDismiss === null || busy) return;
+    setBusy(true);
+    try {
+      if (confirmDismiss === 'hero') { await api.dismissHero(hero.id); onBack(); }
+      else onChanged(await api.dismissStack(hero.id, confirmDismiss));
+      setConfirmDismiss(null);
+    } catch (e) { setConfirmDismiss(null); setError(e instanceof ApiError ? e.message : 'Dismissal failed.'); }
+    finally { setBusy(false); }
   }
   function clickSlot(i: number, shift: boolean) {
     const here = hero.army[i]?.creature ? hero.army[i] : null;
@@ -61,7 +75,7 @@ function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef
     setSel(null);
     if (!src?.creature) return;
     if (shift) {
-      if (here && here.creature !== src.creature) { toast('Split onto an empty slot or the same creature.'); return; }
+      if (here && here.creature !== src.creature) { setError('Split onto an empty slot or the same creature.'); return; }
       setSplit({ from: sel, to: i });
       return;
     }
@@ -76,7 +90,7 @@ function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef
   const primary: [string, number][] = [['Attack', hero.attack], ['Defense', hero.defense], ['Power', hero.power], ['Knowledge', hero.knowledge]];
   const skills = Object.entries(hero.skills).slice(0, 8);
   const army = Array.from({ length: 7 }, (_, i) => hero.army[i]);
-  const cls = HERO_CLASS[hero.faction] ?? 'Hero';
+  const cls = hero.heroClass ?? HERO_CLASS[hero.faction] ?? 'Hero';
 
   return (
     <div className="abs" style={{ left: 0, top: 0, width: 800, height: 600, background: '#000' }}>
@@ -130,25 +144,32 @@ function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef
         })}
 
         {/* artifacts on the paper doll, each in its own body slot */}
-        {Object.entries(hero.worn ?? {}).filter(([slot]) => ART_SLOTS[slot]).map(([slot, a]) => (
-          <div key={slot} className="abs" data-art-slot={slot} data-art-id={a.id} {...tip(artifactTip(a))}
-            style={{ left: ART_SLOTS[slot][0], top: ART_SLOTS[slot][1], width: 44, height: 44 }}>
-            <DefImg name="Artifact" frame={a.id} x={0} y={0} />
-          </div>
-        ))}
+        {Object.entries(ART_SLOTS).map(([slot, [x, y]]) => {
+          const a = hero.worn[slot];
+          return <button key={slot} className="abs h3hit" data-art-slot={slot} data-art-id={a?.id}
+            aria-label={`Artifact ${slot}`} disabled={busy} {...tip(a ? artifactTip(a) : slot)}
+            onClick={() => void artifactClick(slot)}
+            style={{ left: x, top: y, width: 44, height: 44, outline: selectedArtifact === slot ? '2px solid #f8d870' : undefined }}>
+            {a && <DefImg name="Artifact" frame={a.id} x={0} y={0} />}
+          </button>;
+        })}
 
         {/* backpack: five visible places with scroll arrows */}
-        {(hero.backpack ?? []).slice(bpOffset, bpOffset + BACKPACK_SIZE).map((a, i) => (
-          <div key={bpOffset + i} className="abs" data-backpack={bpOffset + i} data-art-id={a.id} {...tip(artifactTip(a))}
-            style={{ left: BACKPACK_X + 46 * i, top: BACKPACK_Y, width: 44, height: 44 }}>
-            <DefImg name="Artifact" frame={a.id} x={0} y={0} />
-          </div>
-        ))}
-        {(hero.backpack?.length ?? 0) > BACKPACK_SIZE && <>
+        {Array.from({ length: BACKPACK_SIZE }, (_, i) => {
+          const index = bpOffset + i, a = hero.backpack[index];
+          return <button key={index} className="abs h3hit" data-backpack={index} data-art-id={a?.id}
+            aria-label={`Backpack ${index + 1}`} disabled={busy} {...tip(a ? artifactTip(a) : 'Backpack')}
+            onClick={() => void artifactClick(`backpack:${index}`)}
+            style={{ left: BACKPACK_X + 46 * i, top: BACKPACK_Y, width: 44, height: 44,
+              outline: selectedArtifact === `backpack:${index}` ? '2px solid #f8d870' : undefined }}>
+            {a && <DefImg name="Artifact" frame={a.id} x={0} y={0} />}
+          </button>;
+        })}
+        {(hero.backpack?.length ?? 0) >= BACKPACK_SIZE && <>
           <button className="abs h3hit" aria-label="Backpack left" style={{ left: BACKPACK_X - 24, top: BACKPACK_Y - 1, width: 18, height: 46 }}
             onClick={() => setBpOffset((o) => Math.max(0, o - 1))}><DefImg name="hsbtns3" frame={0} x={0} y={0} /></button>
           <button className="abs h3hit" aria-label="Backpack right" style={{ left: BACKPACK_X + 46 * BACKPACK_SIZE - 2, top: BACKPACK_Y - 1, width: 18, height: 46 }}
-            onClick={() => setBpOffset((o) => Math.min(hero.backpack.length - BACKPACK_SIZE, o + 1))}><DefImg name="hsbtns5" frame={0} x={0} y={0} /></button>
+            onClick={() => setBpOffset((o) => Math.min(hero.backpack.length - BACKPACK_SIZE + 1, o + 1))}><DefImg name="hsbtns5" frame={0} x={0} y={0} /></button>
         </>}
 
         {/* war machines and the spellbook */}
@@ -166,6 +187,7 @@ function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef
           <div key={i} className="abs h3hit" data-hero-army-slot={i}
             style={{ left: 15 + 66 * i, top: 485, width: 58, height: 64, cursor: 'pointer' }}
             onClick={(e) => clickSlot(i, e.shiftKey)}
+            onDoubleClick={() => { setSel(null); if (slot?.creature) setCreatureInfo(i); }}
             {...tip(slot?.creature ? `${slot.count} ${creatures[slot.creature]?.name ?? slot.creature}` : 'Empty')}>
             {slot?.creature && <DefImg name="TWCRPORT" frame={creaturePortraitFrame(slot.creature)} x={0} y={0} />}
             {slot?.creature && <div className="abs h3text" style={{ right: 3, bottom: 1, fontSize: 11 }}>{slot.count}</div>}
@@ -180,6 +202,8 @@ function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef
         )}
 
         {/* hero list + quit */}
+        <button className="abs h3hit" aria-label="Dismiss hero" style={{ left: 454, top: 429, width: 52, height: 36 }}
+          onClick={() => setConfirmDismiss('hero')}><DefImg name="hsbtns2" frame={0} x={0} y={0} /></button>
         <img className="abs" src={pcxUrl(heroPortrait(hero.heroKey || hero.name, hero.faction, 'small'))} alt=""
           style={{ left: 612, top: 87, width: 48, height: 32 }} onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }} />
         <button className="abs h3hit" aria-label="Back" style={{ left: 609, top: 516, width: 52, height: 36 }} onClick={onBack} {...tip('Return to the adventure map')}>
@@ -188,6 +212,14 @@ function HeroH3(props: { hero: HeroDetail; creatures: Record<string, CreatureDef
         <div className="abs h3text" style={{ left: 7, top: 559, width: 660, height: 19, textAlign: 'center', fontSize: 12, lineHeight: '19px' }}>
           {rollover ?? `${hero.name} · Move ${hero.movement}/${hero.maxMovement}`}
         </div>
+        {creatureInfo !== null && <CreatureInfo creatures={creatures} army="hero" slot={creatureInfo} stack={hero.army[creatureInfo]}
+          onChanged={() => {}} onClose={() => setCreatureInfo(null)}
+          onDismiss={() => { setConfirmDismiss(creatureInfo); setCreatureInfo(null); }} />}
+        {confirmDismiss !== null && <NativeMessage text={confirmDismiss === 'hero' ? `Dismiss ${hero.name}?` :
+          `Dismiss all ${creatures[hero.army[confirmDismiss].creature!]?.name ?? hero.army[confirmDismiss].creature}?`}
+          busy={busy} onClose={() => setConfirmDismiss(null)} onConfirm={() => void dismiss()} />}
+        {error && <NativeMessage text={error} onClose={() => setError(null)} />}
+        {hero.pendingLevel && <HeroLevel key={`${hero.id}-${hero.pendingLevel.level}`} hero={hero} onChanged={onChanged} />}
       </div>
     </div>
   );
@@ -199,7 +231,7 @@ const SKILL_NAMES: Record<string, string> = {
   ballistics: 'Ballistics', eagleEye: 'Eagle Eye', estates: 'Estates', wisdom: 'Wisdom',
   mysticism: 'Mysticism', intelligence: 'Intelligence', sorcery: 'Sorcery',
   resistance: 'Resistance', firstAid: 'First Aid', artillery: 'Artillery',
-  learning: 'Learning', tactics: 'Tactics', armorer: 'Armorer',
+  learning: 'Learning', tactics: 'Tactics', armorer: 'Armorer', scholar: 'Scholar', offence: 'Offense', necromancy: 'Necromancy',
   air: 'Air Magic', earth: 'Earth Magic', fire: 'Fire Magic', water: 'Water Magic'
 };
 
@@ -276,7 +308,7 @@ export function HeroScreen() {
           <div style={{ position: 'absolute', left: 2, top: 2 }}><HeroPortrait faction={hero.faction} size={68} /></div>
         </div>
         <Txt x={94} y={14} w={300} size={20} bold className="heading">{hero.name}</Txt>
-        <Txt x={94} y={44} w={300} size={13} color="var(--text-dim)">Level {hero.level} {HERO_CLASS[hero.faction] ?? 'Hero'}</Txt>
+        <Txt x={94} y={44} w={300} size={13} color="var(--text-dim)">Level {hero.level} {hero.heroClass ?? HERO_CLASS[hero.faction] ?? 'Hero'}</Txt>
         <Txt x={94} y={64} w={300} size={11} color="var(--text-mute)">Move {hero.movement}/{hero.maxMovement}</Txt>
 
         {([['Attack', hero.attack], ['Defense', hero.defense], ['Power', hero.power], ['Knowledge', hero.knowledge]] as [string, number][])

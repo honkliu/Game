@@ -22,6 +22,7 @@ public class GameService
 
     /// <summary>Message produced by the most recent move, e.g. "enter-town:{id}".</summary>
     public string? LastMoveMessage { get; private set; }
+    public List<AdventureNotice> LastMoveNotices { get; } = [];
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
@@ -100,7 +101,8 @@ public class GameService
         var eyes = heroes.Select(hero =>
         {
             var skills = ParseSkills(hero.SkillsJson);
-            return (hero.X, hero.Y, R: 5 + 2 * (skills.TryGetValue("scouting", out var sc) ? sc : 0));
+            var scoutingArtifacts = Artifacts.Layout(hero).Worn.Values.Count(k => Artifacts.Of(k).Id is 52 or 53);
+            return (hero.X, hero.Y, R: 5 + Math.Clamp(skills.GetValueOrDefault("scouting"), 0, 3) + scoutingArtifacts);
         }).Concat((towns ?? []).Select(t => (t.X, t.Y, R: TownSight)));
 
         foreach (var (cx, cy, radius) in eyes)
@@ -148,7 +150,7 @@ public class GameService
     public static Hero CreateHero(Guid gameId, Guid playerId, SeededPlayer sp, int x, int y)
     {
         var def = Heroes.All[sp.HeroKey];
-        var skills = def.Skills.ToDictionary(s => s, _ => 1);
+        var skills = def.InitialSkills?.ToDictionary(kv => kv.Key, kv => kv.Value) ?? def.Skills.ToDictionary(s => s, _ => 1);
         var hero = new Hero
         {
             GameId = gameId,
@@ -165,34 +167,49 @@ public class GameService
             X = x,
             Y = y,
             SkillsJson = JsonSerializer.Serialize(skills, Json),
-            SpellsJson = "[]",
+            SpellsJson = JsonSerializer.Serialize(def.StartingSpells ?? [], Json),
             // magic heroes start with a spellbook, as in HoMM3
             ArtifactsJson = def.Might ? "[]" : JsonSerializer.Serialize(new[] { TownRules.Spellbook }, Json)
         };
         hero.MaxMana = ManaCapacity(hero);
         hero.Mana = hero.MaxMana;
-        hero.MaxMovement = MaxMovement(hero);
-        hero.Movement = hero.MaxMovement;
-
         var tiers = Creatures.BaseTiers(sp.Faction);
         var army = Enumerable.Range(0, 7).Select(_ => new ArmySlot(null, 0)).ToArray();
         if (tiers.Length > 0) army[0] = new ArmySlot(tiers[0], 25);
         if (tiers.Length > 1) army[1] = new ArmySlot(tiers[1], 8);
         hero.ArmyJson = SerializeArmy(army);
+        hero.MaxMovement = MaxMovement(hero);
+        hero.Movement = hero.MaxMovement;
         return hero;
     }
+
+    private static readonly int[] LandMovement = [1300, 1360, 1430, 1500, 1560, 1630, 1700, 1760, 1830, 1900, 1960, 2000];
 
     public static int MaxMovement(Hero hero)
     {
         var skills = ParseSkills(hero.SkillsJson);
-        var m = 1500;
-        if (skills.TryGetValue("logistics", out var log)) m += 150 * log;
-        return m;
+        var speed = ParseArmy(hero.ArmyJson).Where(s => s.Count > 0 && s.Creature != null && Creatures.All.ContainsKey(s.Creature))
+            .Select(s => Creatures.All[s.Creature!].Speed).DefaultIfEmpty(3).Min();
+        var movement = LandMovement[Math.Clamp(speed, 0, LandMovement.Length - 1)];
+        var logistics = Math.Clamp(skills.GetValueOrDefault("logistics"), 0, 3);
+        return Math.Max(0, movement + movement * logistics / 10 - Math.Max(0, Effects(hero).MovementPenalty));
     }
+
+    public static AdventureEffects Effects(Hero hero)
+    {
+        try { return JsonSerializer.Deserialize<AdventureEffects>(hero.AdventureEffectsJson, Json) ?? new(); }
+        catch (JsonException) { return new(); }
+    }
+
+    public static void SetEffects(Hero hero, AdventureEffects effects) =>
+        hero.AdventureEffectsJson = JsonSerializer.Serialize(effects, Json);
+
+    public static TreasureChoice? Treasure(Hero hero) => hero.PendingTreasureJson == null
+        ? null : JsonSerializer.Deserialize<TreasureChoice>(hero.PendingTreasureJson, Json);
 
     public static int ManaCapacity(Hero hero)
     {
-        var knowledge = Math.Max(1, hero.Knowledge + Artifacts.Bonus(TownRules.Artifacts(hero)).Knowledge);
+        var knowledge = Math.Max(1, hero.Knowledge + Artifacts.Bonus(hero).Knowledge);
         var intelligence = Math.Clamp(ParseSkills(hero.SkillsJson).GetValueOrDefault("intelligence"), 0, 3);
         var multiplier = intelligence switch { 1 => 1.25, 2 => 1.5, 3 => 2.0, _ => 1.0 };
         return (int)(10 * knowledge * multiplier);
@@ -318,8 +335,29 @@ public class GameService
     public Task<AdventureMap> LoadMapAsync(Game game)
     {
         var map = JsonSerializer.Deserialize<AdventureMap>(game.MapJson, Json) ?? new AdventureMap();
-        // Older saves marked shrines as walk-through pickups.
-        foreach (var tile in map.Tiles.Where(t => t.ObjectKind == "shrine")) tile.Passable = false;
+        foreach (var tile in map.Tiles.Where(t => t.ObjectKind == Footprint.Block && t.ObjectData?.Contains(',') == true))
+        {
+            var parts = tile.ObjectData!.Split(',');
+            if (parts.Length != 2 || !int.TryParse(parts[0], out var ax) || !int.TryParse(parts[1], out var ay)
+                || !map.InBounds(ax, ay) || map.At(ax, ay).ObjectKind is not ("town" or "mine")) continue;
+            tile.ObjectKind = null; tile.ObjectData = null; tile.Sprite = null;
+            tile.Passable = Terrain.Passable(tile.Terrain);
+        }
+        // Saved flags and footprints predate the current collision rules.
+        foreach (var tile in map.Tiles.Where(Pathfinder.Pinches)) tile.Passable = false;
+        for (var y = 0; y < map.Height; y++)
+        for (var x = 0; x < map.Width; x++)
+        {
+            var tile = map.At(x, y);
+            if (tile.ObjectKind is "town" or "mine")
+                Footprint.Stamp(map, x, y, tile.ObjectKind, tile.ObjectData);
+            ObjectGeometry.AssignObstacle(map, x, y);
+            if (tile.ObjectKind == "shrine")
+            {
+                var spell = Spells.All.GetValueOrDefault(Spells.CanonicalKey(tile.ObjectData ?? ""));
+                tile.Sprite = $"AVXl{Math.Clamp(spell?.Level ?? 1, 1, 3)}sh0";
+            }
+        }
         return Task.FromResult(map);
     }
 
@@ -361,6 +399,8 @@ public class GameService
 
     public async Task<(bool ok, string? error, Hero? hero)> MoveHeroAsync(Guid heroId, string playerId, List<(int x, int y)> path)
     {
+        LastMoveNotices.Clear();
+        LastMoveMessage = null;
         var hero = await _db.Heroes.FirstOrDefaultAsync(h => h.Id == heroId);
         if (hero == null) return (false, "Hero not found.", null);
 
@@ -373,10 +413,15 @@ public class GameService
         var game = await _db.Games.FirstAsync(g => g.Id == hero.GameId);
         if (game.State != GameState.InProgress) return (false, "The game is not in progress.", null);
         if (hero.PendingEncounterJson != null) return (false, "Resolve the encounter first.", null);
+        if (hero.PendingTreasureJson != null) return (false, "Choose the treasure reward first.", null);
+        if (hero.PendingLevelJson != null) return (false, "Choose the level-up skill first.", null);
 
         var map = await LoadMapAsync(game);
         var others = await _db.Heroes.Where(h => h.GameId == hero.GameId && h.Id != hero.Id)
             .Select(h => new { h.X, h.Y }).ToListAsync();
+        var effects = Effects(hero);
+        if (effects.FlightTurn == game.CurrentTurn)
+            return await FlyAsync(game, map, player, hero, path, others.Select(h => (h.X, h.Y)).ToHashSet(), effects.FlightPenalty);
         bool Corner(int x, int y) => Pathfinder.Pinches(map.At(x, y)) || others.Any(o => o.X == x && o.Y == y);
         var moved = false;
         var acted = false;
@@ -394,7 +439,9 @@ public class GameService
             { blocked = "Cannot cut that corner."; break; }
 
             var tile = map.At(x, y);
-            var cost = Terrain.MoveCost(tile.Terrain, ParseSkills(hero.SkillsJson).GetValueOrDefault("pathfinding"));
+            var cost = Terrain.StepCost(map.At(hero.X, hero.Y).Terrain,
+                ParseSkills(hero.SkillsJson).GetValueOrDefault("pathfinding"), NativeTerrain(hero),
+                dx != 0 && dy != 0, hero.Movement);
 
             // Mines, creatures, shrines and obelisks are visited from the neighbouring tile. A town is
             // different: the hero steps onto its own town's tile and stands inside it, as in HoMM3.
@@ -412,6 +459,7 @@ public class GameService
                         hero.Movement -= cost;
                         hero.X = x;
                         hero.Y = y;
+                        ExhaustMovement(hero, map);
                         moved = true;
                         LastMoveMessage = $"enter-town:{town.Id}";
                         VisitOwnTown(game, hero, town);
@@ -422,6 +470,7 @@ public class GameService
                 {
                     if (hero.Movement < cost) { blocked = "Not enough movement left today."; break; }
                     hero.Movement -= cost;
+                    ExhaustMovement(hero, map);
                 }
                 var (_, adjMsg) = await InteractAsync(game, map, player, hero, tile, x, y);
                 if (adjMsg != null) LastMoveMessage = adjMsg;
@@ -435,6 +484,7 @@ public class GameService
             hero.Movement -= cost;
             hero.X = x;
             hero.Y = y;
+            ExhaustMovement(hero, map);
             moved = true;
 
             var (stop, msg) = await InteractAsync(game, map, player, hero, tile, x, y);
@@ -456,11 +506,36 @@ public class GameService
         return (false, blocked ?? "Cannot move there.", hero);
     }
 
+    public static string? NativeTerrain(Hero hero)
+    {
+        var terrains = ParseArmy(hero.ArmyJson).Where(s => s.Creature != null && s.Count > 0)
+            .Select(s => Creatures.All.TryGetValue(s.Creature!, out var c) ? c.Faction switch
+            {
+                "castle" or "rampart" or "conflux" => "grass", "tower" => "snow",
+                "inferno" => "lava", "necropolis" => "dirt", "dungeon" => "subterranean",
+                "stronghold" => "rough", "fortress" => "swamp", _ => null
+            } : null).Distinct().ToArray();
+        return terrains.Length == 1 ? terrains[0] : null;
+    }
+
+    private static void ExhaustMovement(Hero hero, AdventureMap map)
+    {
+        var minimum = Terrain.MoveCost(map.At(hero.X, hero.Y).Terrain,
+            ParseSkills(hero.SkillsJson).GetValueOrDefault("pathfinding"), NativeTerrain(hero));
+        if (hero.Movement > 0 && hero.Movement < minimum) hero.Movement = 0;
+    }
+
     /// <summary>A hero entering its own town learns the guild's spells and, in a Castle, visits the Stables.</summary>
     public static void VisitOwnTown(Game game, Hero hero, Town town)
     {
         TownRules.LearnGuildSpells(hero, town);
         TownRules.VisitStables(hero, game, ParseStringArray(town.BuildingsJson));
+    }
+
+    private (bool stop, string? message) Notify(string kind, string key, decimal amount, string message, int? icon = null)
+    {
+        LastMoveNotices.Add(new AdventureNotice(kind, key, amount, message, icon));
+        return (true, message);
     }
 
     private async Task<(bool stop, string? message)> InteractAsync(Game game, AdventureMap map, Player player, Hero hero, MapTile tile, int tx, int ty)
@@ -475,58 +550,55 @@ public class GameService
                 AddResource(player, type, amount);
                 tile.ObjectKind = null;
                 tile.ObjectData = null;
-                return (false, (string?)$"Found {amount} {type}.");
+                return Notify("resource", type, amount, $"You collect {type}.");
             }
             case "treasure":
             {
                 var parts = (tile.ObjectData ?? "").Split(':');
                 var gold = parts.Length > 0 ? int.Parse(parts[0]) : 0;
                 var xp = parts.Length > 1 ? int.Parse(parts[1]) : 0;
-                player.Gold += gold;
-                GainExperience(hero, xp);
-                tile.ObjectKind = null;
-                tile.ObjectData = null;
-                return (false, (string?)$"Found {gold} gold and {xp} experience.");
+                hero.PendingTreasureJson = JsonSerializer.Serialize(new TreasureChoice(gold, xp, tx, ty), Json);
+                return (true, (string?)"treasure:choose");
             }
             case "mine":
             {
                 var ownerIndex = Array.FindIndex(Seeded.Players, p => p.Faction == player.Faction);
-                // Owner is a bitmask of the seats working this mine, so several cities can share it.
+                var yield = tile.ObjectData is "wood" or "ore" ? 2 : tile.ObjectData == "gold" ? 1000 : 1;
+                if (tile.Owner != 0 && tile.MineShared)
+                    return Notify("mine", tile.ObjectData ?? "gold", yield / 2m,
+                        "This shared mine supplies half its daily production to each city. Fractional resources accumulate until spendable.");
                 var bit = 1 << ownerIndex;
                 if ((tile.Owner & bit) != 0)
-                    return (false, (string?)null);
+                    return Notify("mine", tile.ObjectData ?? "gold", yield, "This mine already supplies your city.");
                 if (tile.Owner != 0)
-                    return (false, (string?)"This mine belongs to another city. Sharing requires its owner's permission.");
+                    return Notify("message", "Mine", 0, "This mine belongs to another city. Sharing requires its owner's permission.");
                 tile.Owner |= bit;
-                return (false, (string?)$"Claimed the {tile.ObjectData} mine.");
+                return Notify("mine", tile.ObjectData ?? "gold", yield, $"You claim the {tile.ObjectData} mine. It will supply your city each day.");
             }
             case "artifact":
             {
-                var arts = ParseStringArray(hero.ArtifactsJson).ToList();
                 var found = tile.ObjectData ?? "artifact";
-                // HoMM3 holds 14 paper-doll artifacts (excluding war machines/spellbook) plus a 64-item backpack
-                if (arts.Count(a => !TownRules.IsGear(a)) >= 14 + 64) return (false, (string?)"The backpack is full.");
-                arts.Add(found);
-                hero.ArtifactsJson = JsonSerializer.Serialize(arts, Json);
+                if (!Artifacts.Add(hero, found)) return Notify("message", "Backpack", 0, "The backpack is full.");
                 tile.ObjectKind = null;
                 tile.ObjectData = null;
-                return (false, (string?)$"Found the {Artifacts.Of(found).Name}.");
+                return Notify("artifact", found, 1, $"You discover the {Artifacts.Of(found).Name}.", Artifacts.Of(found).Id);
             }
             case "shrine":
             {
                 // HoMM3: a shrine teaches nothing to a hero without a spellbook, and stays put
                 if (!TownRules.HasGear(hero, TownRules.Spellbook))
-                    return (false, (string?)"You need a spellbook to learn the shrine's spell.");
-                var spells = ParseStringArray(hero.SpellsJson).ToList();
-                var spell = tile.ObjectData ?? "spell";
+                    return Notify("shrine", Spells.CanonicalKey(tile.ObjectData ?? ""), 0, "You need a spellbook to learn this spell.");
+                var spells = ParseStringArray(hero.SpellsJson).Select(Spells.CanonicalKey).Distinct().ToList();
+                var spell = Spells.CanonicalKey(tile.ObjectData ?? "spell");
                 if (!Spells.All.TryGetValue(spell, out var shrineSpell))
-                    return (false, (string?)"This shrine has no spell to teach.");
+                    return Notify("message", "Shrine", 0, "This shrine has no spell to teach.");
                 var wisdom = ParseSkills(hero.SkillsJson).GetValueOrDefault("wisdom");
                 if (shrineSpell.Level > Spells.MaxLearnable(wisdom))
-                    return (false, (string?)"Your hero needs greater Wisdom to learn this spell.");
-                if (!spells.Contains(spell)) spells.Add(spell);
+                    return Notify("shrine", spell, 0, $"Greater Wisdom is required to learn {shrineSpell.Name}.");
+                var known = spells.Contains(spell);
+                if (!known) spells.Add(spell);
                 hero.SpellsJson = JsonSerializer.Serialize(spells, Json);
-                return (false, (string?)"Learned a spell.");
+                return Notify("shrine", spell, 1, known ? $"You already know {shrineSpell.Name}." : $"You learn {shrineSpell.Name}.");
             }
             case "monster":
             {
@@ -564,11 +636,123 @@ public class GameService
                 hero.Movement = 0;
                 tile.ObjectKind = null;
                 tile.ObjectData = null;
-                return (true, (string?)"You dig up the Grail!");
+                return Notify("grail", "Grail", 1, "You uncover the Grail. Bring it to your town to build the Grail Structure.", 2);
             }
             default:
                 return (false, (string?)null);
         }
+    }
+
+    public async Task<(bool ok, string? error, string? message)> ResolveTreasureAsync(Guid heroId, string playerId, string choice)
+    {
+        var hero = await _db.Heroes.FirstOrDefaultAsync(h => h.Id == heroId);
+        if (hero == null) return (false, "Hero not found.", null);
+        var player = await _db.Players.FirstAsync(p => p.Id == hero.PlayerId);
+        if (Seeded.Find(playerId)?.Faction != player.Faction) return (false, "Not your hero.", null);
+        var game = await _db.Games.FirstAsync(g => g.Id == hero.GameId);
+        if (game.State != GameState.InProgress) return (false, "The game is not in progress.", null);
+        if (choice is not ("gold" or "experience" or "leave")) return (false, "Choose gold or experience, or leave the chest.", null);
+        var treasure = Treasure(hero);
+        if (treasure == null) return (false, "There is no treasure choice pending.", null);
+        var map = await LoadMapAsync(game);
+        if (!map.InBounds(treasure.X, treasure.Y) || hero.X != treasure.X || hero.Y != treasure.Y
+            || map.At(treasure.X, treasure.Y).ObjectKind != "treasure")
+            return (false, "That chest is no longer here.", null);
+        if (choice == "gold" && (long)player.Gold + treasure.Gold > int.MaxValue
+            || choice == "experience" && (long)hero.Experience + treasure.Experience > int.MaxValue)
+            return (false, "That reward is too large.", null);
+        if (choice == "gold") player.Gold += treasure.Gold;
+        if (choice == "experience") GainExperience(hero, treasure.Experience);
+        if (choice != "leave")
+        {
+            map.At(treasure.X, treasure.Y).ObjectKind = null;
+            map.At(treasure.X, treasure.Y).ObjectData = null;
+        }
+        hero.PendingTreasureJson = null;
+        try { await SaveMapAsync(game, map); }
+        catch (DbUpdateConcurrencyException)
+        {
+            _db.ChangeTracker.Clear();
+            return (false, "The chest choice was already resolved.", null);
+        }
+        LastMoveNotices.Clear();
+        if (choice != "leave")
+            LastMoveNotices.Add(new AdventureNotice(choice == "gold" ? "resource" : "experience",
+                choice == "gold" ? "gold" : "experience", choice == "gold" ? treasure.Gold : treasure.Experience,
+                choice == "gold" ? "You keep the gold." : "You share the treasure and gain experience."));
+        return (true, null, choice switch
+        {
+            "gold" => $"Found {treasure.Gold} gold.",
+            "experience" => $"Gained {treasure.Experience} experience.",
+            _ => "You leave the chest unopened."
+        });
+    }
+
+    private async Task<(bool ok, string? error, Hero? hero)> FlyAsync(Game game, AdventureMap map, Player player,
+        Hero hero, List<(int x, int y)> path, HashSet<(int x, int y)> occupied, int penalty)
+    {
+        LastMoveMessage = null;
+        var fog = ParseFog(player.FogJson, map.Width * map.Height);
+        var ownTowns = await _db.Towns.Where(t => t.PlayerId == player.Id).ToListAsync();
+        bool CanLand(int x, int y) => !occupied.Contains((x, y)) && fog[y * map.Width + x] > 0
+            && ((!Pathfinder.Pinches(map.At(x, y)) && Terrain.Passable(map.At(x, y).Terrain))
+                || ownTowns.Any(t => t.X == x && t.Y == y));
+        if (path.Count == 0) return (false, "Choose a landing tile.", hero);
+        var end = path[^1];
+        if (!map.InBounds(end.x, end.y)) return (false, "That flight route is blocked.", hero);
+        var visit = !CanLand(end.x, end.y) && !occupied.Contains(end)
+            && map.At(end.x, end.y).ObjectKind is "monster" or "mine" or "shrine" or "obelisk" or "town";
+        var destination = visit ? path.Count > 1 ? path[^2] : (hero.X, hero.Y) : end;
+        if (!map.InBounds(destination.Item1, destination.Item2) || fog[end.y * map.Width + end.x] == 0
+            || !CanLand(destination.Item1, destination.Item2)
+            || visit && Math.Max(Math.Abs(end.x - destination.Item1), Math.Abs(end.y - destination.Item2)) != 1)
+            return (false, "Fly must end on explored, unoccupied ground or your town gate.", hero);
+
+        var x = hero.X; var y = hero.Y; var spent = 0; var landingCost = 0;
+        (int x, int y)? landing = visit && path.Count == 1 ? (hero.X, hero.Y) : null;
+        foreach (var next in visit ? path.Take(path.Count - 1) : path)
+        {
+            var dx = Math.Abs(next.x - x); var dy = Math.Abs(next.y - y);
+            if (!map.InBounds(next.x, next.y) || Math.Max(dx, dy) != 1 || map.At(next.x, next.y).Terrain == "rock")
+                return (false, "That flight route is blocked.", hero);
+            spent += (dx != 0 && dy != 0 ? 141 : 100) * (100 + penalty) / 100;
+            x = next.x; y = next.y;
+            if (spent <= hero.Movement && CanLand(x, y)) { landing = (x, y); landingCost = spent; }
+        }
+        if (landing is not { } target) return (false, "Not enough movement to reach a legal landing.", hero);
+        hero.X = target.x; hero.Y = target.y; hero.Movement -= landingCost;
+        var town = ownTowns.FirstOrDefault(t => t.X == hero.X && t.Y == hero.Y);
+        var stopAtLanding = false;
+        if (town != null)
+        {
+            VisitOwnTown(game, hero, town);
+            LastMoveMessage = $"enter-town:{town.Id}";
+        }
+        else
+        {
+            var (stop, message) = await InteractAsync(game, map, player, hero, map.At(hero.X, hero.Y), hero.X, hero.Y);
+            stopAtLanding = stop;
+            LastMoveMessage = message;
+        }
+        if (visit && target == destination && !stopAtLanding)
+        {
+            var cost = map.At(end.x, end.y).ObjectKind == "town" ? 0
+                : Terrain.StepCost(map.At(hero.X, hero.Y).Terrain,
+                    ParseSkills(hero.SkillsJson).GetValueOrDefault("pathfinding"), NativeTerrain(hero),
+                    hero.X != end.x && hero.Y != end.y, hero.Movement);
+            if (hero.Movement >= cost)
+            {
+                hero.Movement -= cost;
+                var (_, message) = await InteractAsync(game, map, player, hero, map.At(end.x, end.y), end.x, end.y);
+                LastMoveMessage = message;
+            }
+            else LastMoveMessage = "Not enough movement left to visit the object.";
+        }
+        var heroes = await _db.Heroes.Where(h => h.PlayerId == player.Id).ToListAsync();
+        RecomputeFog(fog, map.Width, map.Height, heroes, ownTowns);
+        player.FogJson = SerializeFog(fog);
+        await SaveMapAsync(game, map);
+        return (true, null, hero);
     }
 
     private static void AddResource(Player p, string type, int amount)
@@ -587,51 +771,27 @@ public class GameService
 
     public static void GainExperience(Hero hero, int xp)
     {
-        hero.Experience += xp;
-        var newLevel = Experience.LevelFor(hero.Experience);
-        while (hero.Level < newLevel)
-        {
-            hero.Level++;
-            var rng = Random.Shared;
-            switch (rng.Next(4))
-            {
-                case 0: hero.Attack++; break;
-                case 1: hero.Defense++; break;
-                case 2: hero.Power++; break;
-                default: hero.Knowledge++; break;
-            }
-            var skills = ParseSkills(hero.SkillsJson);
-            var upgradable = skills.Where(kv => !kv.Key.StartsWith('_') && kv.Value < 3).Select(kv => kv.Key).ToList();
-            if (upgradable.Count > 0)
-            {
-                skills[upgradable[rng.Next(upgradable.Count)]]++;
-            }
-            else if (skills.Count(kv => !kv.Key.StartsWith('_')) < 8)
-            {
-                var candidates = Heroes.All.Values.SelectMany(h => h.Skills).Distinct().Where(k => !skills.ContainsKey(k)).ToArray();
-                if (candidates.Length > 0) skills[candidates[rng.Next(candidates.Length)]] = 1;
-            }
-            hero.SkillsJson = JsonSerializer.Serialize(skills, Json);
-            hero.MaxMana = ManaCapacity(hero);
-        }
+        var learning = Math.Clamp(ParseSkills(hero.SkillsJson).GetValueOrDefault("learning"), 0, 3);
+        hero.Experience = (int)Math.Min(int.MaxValue, (long)hero.Experience + Math.Max(0, (long)xp * (100 + 5 * learning) / 100));
+        HeroProgression.Advance(hero);
     }
 
     // ---------------------------------------------------------------- turns
     // TickAsync is called both by the background TurnTicker and by the _test/nextday
     // endpoint. Two concurrent ticks load the same Game row and both write it, so the
     // second SaveChanges finds 0 rows affected and throws DbUpdateConcurrencyException.
-    private static readonly SemaphoreSlim _tickLock = new(1, 1);
+    internal static readonly SemaphoreSlim MutationLock = new(1, 1);
 
-    public async Task<List<Guid>> TickAsync()
+    public async Task<List<Guid>> TickAsync(bool acquireLock = true)
     {
-        await _tickLock.WaitAsync();
+        if (acquireLock) await MutationLock.WaitAsync();
         try
         {
             return await TickCoreAsync();
         }
         finally
         {
-            _tickLock.Release();
+            if (acquireLock) MutationLock.Release();
         }
     }
 
@@ -662,12 +822,14 @@ public class GameService
             {
                 p.BuiltThisTurn = false;
                 p.WrongAnswers = 0;
+                var openingGold = p.Gold;
                 if (caravanMembers.Contains(p.Id.ToString())) p.Gold += SharedProjectCatalog.CaravanGoldPerDay;
 
-                var town = towns.FirstOrDefault(t => t.PlayerId == p.Id);
-                if (town != null)
+                foreach (var town in towns.Where(t => t.PlayerId == p.Id))
                 {
                     var built = ParseStringArray(town.BuildingsJson);
+                    if (game.Day == 1 && town.Faction == "rampart" && built.Contains("special3"))
+                        p.Gold += openingGold / 10;
                     p.Gold += TownBuildings.GoldIncome(built);
                     if (built.Contains("resourceSilo"))
                         foreach (var (r, v) in TownBuildings.SiloProduction(town.Faction))
@@ -675,24 +837,28 @@ public class GameService
                 }
 
                 var ownerIndex = Array.FindIndex(Seeded.Players, s => s.Faction == p.Faction);
+                var halfUnits = ParseSkills(p.MineRemaindersJson);
                 foreach (var t in map.Tiles)
                 {
-                    if (t.ObjectKind != "mine" || (t.Owner & (1 << ownerIndex)) == 0) continue;
-                    switch (t.ObjectData)
-                    {
-                        case "wood": p.Wood += 2; break;
-                        case "ore": p.Ore += 2; break;
-                        case "gold": p.Gold += 1000; break;
-                        case "mercury": p.Mercury++; break;
-                        case "sulfur": p.Sulfur++; break;
-                        case "crystal": p.Crystal++; break;
-                        case "gems": p.Gems++; break;
-                    }
+                    if (t.ObjectKind != "mine" || t.Owner <= 0
+                        || (!t.MineShared && (t.Owner & (1 << ownerIndex)) == 0)
+                        || !TownRules.IsResource(t.ObjectData ?? "")) continue;
+                    var resource = t.ObjectData!;
+                    var yield = resource is "wood" or "ore" ? 2 : resource == "gold" ? 1000 : 1;
+                    var credit = halfUnits.GetValueOrDefault(resource) + (t.MineShared ? yield : 2 * yield);
+                    TownRules.Add(p, resource, credit / 2);
+                    halfUnits[resource] = credit % 2;
                 }
+                p.MineRemaindersJson = JsonSerializer.Serialize(halfUnits, Json);
 
                 var heroes = await _db.Heroes.Where(h => h.PlayerId == p.Id).ToListAsync();
                 foreach (var h in heroes)
                 {
+                    var estates = Math.Clamp(ParseSkills(h.SkillsJson).GetValueOrDefault("estates"), 0, 3);
+                    p.Gold += estates switch { 1 => 125, 2 => 250, 3 => 500, _ => 0 };
+                    var effects = Effects(h);
+                    SetEffects(h, effects with { FlightTurn = 0, FlightPenalty = 0, HasteTurn = 0, HasteBonus = 0,
+                        VisionsTurn = 0, VisionsMastery = 0, DoorTurn = 0, DoorCasts = 0 });
                     // Castle Stables' bonus lasts until the end of the week it was granted in
                     h.MaxMovement = MaxMovement(h) + (TownRules.StabledThisWeek(h, game) ? 400 : 0);
                     h.Movement = h.MaxMovement;
@@ -737,8 +903,6 @@ public class GameService
                             string[] rare = ["mercury", "sulfur", "crystal", "gems"];
                             TownRules.Add(townOwner, rare[Random.Shared.Next(rare.Length)], Random.Shared.Next(1, 5));
                         }
-                        // Treasury: +10% of the gold held at the start of the week
-                        if (built.Contains("special3")) townOwner.Gold += townOwner.Gold / 10;
                     }
 
                     // the tavern offers two fresh heroes each day, never one already hired

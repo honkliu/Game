@@ -10,8 +10,10 @@ public class MapTile
     public string? ObjectKind { get; set; }
     /// <summary>Object payload (resource type, mine type, creature key, amount, ...).</summary>
     public string? ObjectData { get; set; }
+    public string? Sprite { get; set; }
     /// <summary>Owner player index for mines and towns; -1 for neutral.</summary>
     public int Owner { get; set; } = -1;
+    public bool MineShared { get; set; }
 }
 
 public class AdventureMap
@@ -37,16 +39,10 @@ public static class Footprint
     /// <summary>Blocked offsets (dx, dy) around the anchor; matches the sprites the client draws.</summary>
     public static IEnumerable<(int dx, int dy)> Offsets(string kind, string? data)
     {
-        var (x0, x1, y0) = kind switch
-        {
-            "town" => (-2, 2, -2),                       // AVC*x0: 192×192, castle body 5 wide, 3 deep
-            "mine" when data == "wood" => (-3, 1, -1),   // AVMsawg0: 160×96, sawmill 5 wide
-            "mine" => (-1, 1, -1),                       // AVM*0: 96×64
-            _ => (0, 0, 0)
-        };
-        for (var dy = y0; dy <= 0; dy++)
-        for (var dx = x0; dx <= x1; dx++)
-            if (dx != 0 || dy != 0) yield return (dx, dy);
+        var sprite = ObjectGeometry.Building(kind, data);
+        if (sprite.Length == 0) yield break;
+        foreach (var offset in ObjectGeometry.Blocked(sprite))
+            if (offset != (0, 0)) yield return offset;
     }
 
     /// <summary>True when every footprint tile and the approach tile below the entrance are open ground.</summary>
@@ -71,7 +67,11 @@ public static class Footprint
         {
             if (!map.InBounds(x + dx, y + dy)) continue;
             var t = map.At(x + dx, y + dy);
-            if (t.ObjectKind != null && t.ObjectKind != Block && t.ObjectKind is not ("tree" or "rock" or "mountain")) continue;
+            if (t.ObjectKind != null && t.ObjectKind != Block && t.ObjectKind is not ("tree" or "rock" or "mountain"))
+            {
+                t.Passable = false;
+                continue;
+            }
             t.ObjectKind = Block;
             t.ObjectData = $"{x},{y}";
             t.Owner = -1;
@@ -381,9 +381,10 @@ public static class MapGenerator
 /// <summary>A* pathfinding over the adventure map.</summary>
 public static class Pathfinder
 {
-    public static bool Pinches(MapTile t) => !t.Passable;
+    public static bool Pinches(MapTile t) => !t.Passable || !Terrain.Passable(t.Terrain)
+        || t.ObjectKind is "town" or "mine" or "monster" or "obelisk" or "shrine" or "block" or "tree" or "rock" or "mountain";
 
-    public static List<(int x, int y)>? FindPath(AdventureMap map, int sx, int sy, int tx, int ty, int pathfinding = 0)
+    public static List<(int x, int y)>? FindPath(AdventureMap map, int sx, int sy, int tx, int ty, int pathfinding = 0, string? nativeTerrain = null)
     {
         if (!map.InBounds(sx, sy) || !map.InBounds(tx, ty)) return null;
 
@@ -450,7 +451,7 @@ public static class Pathfinder
                     if (Pinches(map.At(cx + dx, cy)) || Pinches(map.At(cx, cy + dy))) continue;
                 }
 
-                var cost = isGoal ? 1.0 : Terrain.MoveCost(t.Terrain, pathfinding) / 100.0;
+                var cost = Terrain.MoveCost(map.At(cx, cy).Terrain, pathfinding, nativeTerrain, dx != 0 && dy != 0) / 100.0;
                 var ng = gScore[cur.i] + cost;
                 if (ng < gScore[ni])
                 {

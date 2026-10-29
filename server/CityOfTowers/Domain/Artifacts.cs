@@ -1,3 +1,6 @@
+using System.Text.Json;
+using CityOfTowers.Services;
+
 namespace CityOfTowers.Domain;
 
 /// <summary>
@@ -63,6 +66,58 @@ public static class Artifacts
 
     public static Def Of(string key) => ById[IdOf(key)];
 
+    public sealed record Equipment(Dictionary<string, string> Worn, List<string> Backpack);
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+
+    public static bool Fits(string slot, string key) =>
+        Slots.Contains(slot) && (slot == Of(key).Slot
+            || (Of(key).Slot is Ring or Misc && slot.StartsWith(Of(key).Slot, StringComparison.Ordinal)));
+
+    public static Equipment Layout(Hero hero)
+    {
+        var keys = TownRules.Artifacts(hero).ToList();
+        Equipment? stored = null;
+        try { stored = JsonSerializer.Deserialize<Equipment>(hero.ArtifactLayoutJson, Json); }
+        catch (JsonException) { }
+        var worn = new Dictionary<string, string>();
+        var backpack = new List<string>();
+        if (stored?.Worn != null && stored.Backpack != null)
+        {
+            foreach (var (slot, key) in stored.Worn)
+                if (Fits(slot, key) && keys.Remove(key)) worn.Add(slot, key);
+            foreach (var key in stored.Backpack)
+                if (keys.Remove(key)) backpack.Add(key);
+        }
+        foreach (var key in keys)
+        {
+            var slot = Slots.FirstOrDefault(s => !worn.ContainsKey(s) && Fits(s, key));
+            if (slot != null) worn.Add(slot, key); else backpack.Add(key);
+        }
+        return new(worn, backpack);
+    }
+
+    public static void Save(Hero hero, Equipment equipment)
+    {
+        var gear = GameService.ParseStringArray(hero.ArtifactsJson).Where(TownRules.IsGear);
+        hero.ArtifactsJson = JsonSerializer.Serialize(gear.Concat(equipment.Worn.Values).Concat(equipment.Backpack), Json);
+        hero.ArtifactLayoutJson = JsonSerializer.Serialize(equipment, Json);
+        hero.MaxMana = GameService.ManaCapacity(hero);
+    }
+
+    public static bool Add(Hero hero, string key)
+    {
+        var layout = Layout(hero);
+        var slot = Slots.FirstOrDefault(s => !layout.Worn.ContainsKey(s) && Fits(s, key));
+        if (slot != null) layout.Worn.Add(slot, key);
+        else if (layout.Backpack.Count < 64) layout.Backpack.Add(key);
+        else return false;
+        Save(hero, layout);
+        return true;
+    }
+
+    public static (int Attack, int Defense, int Power, int Knowledge) Bonus(Hero hero) =>
+        Sum(Layout(hero).Worn.Values);
+
     /// <summary>HoMM3 auto-equip: each artifact takes the first free slot of its kind, in pickup order; the rest go to the backpack.</summary>
     public static (Dictionary<string, string> Worn, List<string> Backpack) Arrange(IEnumerable<string> keys)
     {
@@ -79,9 +134,12 @@ public static class Artifacts
 
     /// <summary>Primary-skill bonus from the worn artifacts (backpack items give nothing).</summary>
     public static (int Attack, int Defense, int Power, int Knowledge) Bonus(IEnumerable<string> keys)
+        => Sum(Arrange(keys).Worn.Values);
+
+    private static (int Attack, int Defense, int Power, int Knowledge) Sum(IEnumerable<string> keys)
     {
         int a = 0, d = 0, p = 0, k = 0;
-        foreach (var key in Arrange(keys).Worn.Values)
+        foreach (var key in keys)
         {
             var def = Of(key);
             a += def.Attack; d += def.Defense; p += def.Power; k += def.Knowledge;

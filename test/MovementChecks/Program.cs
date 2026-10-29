@@ -17,6 +17,32 @@ void Check(string name, bool ok)
     if (!ok) failed++;
 }
 
+{
+    await using var f = await Fixture.Create();
+    var town = f.Map.At(2, 2);
+    town.ObjectKind = "town";
+    town.ObjectData = f.Town.Id.ToString();
+    town.Passable = false;
+    f.Hero.X = 5; f.Hero.Y = 2;
+    await f.SaveMap();
+    var move = await f.Service.MoveHeroAsync(f.Hero.Id, "alice", [(4, 2), (3, 2), (2, 2)]);
+    Check("old saves without town footprints cannot walk through the city",
+        !move.ok && f.Hero.X == 5 && f.Hero.Y == 2 && f.Hero.Movement == 1500);
+    var loaded = await f.Service.LoadMapAsync(f.Game);
+    Check("old saves rebuild the entire solid town footprint",
+        Footprint.Offsets("town", null).All(o => !loaded.At(2 + o.dx, 2 + o.dy).Passable));
+}
+
+{
+    await using var f = await Fixture.Create();
+    var monster = f.Map.At(2, 1);
+    monster.ObjectKind = "monster"; monster.ObjectData = "pikeman:5"; monster.Passable = true;
+    await f.SaveMap();
+    var move = await f.Service.MoveHeroAsync(f.Hero.Id, "alice", [(2, 1), (3, 1)]);
+    Check("old saves with walk-through creatures stop the hero beside the creature",
+        move.ok && f.Hero.X == 1 && f.Hero.Y == 1 && f.Hero.PendingEncounterJson != null);
+}
+
 foreach (var kind in new[] { "block", "town", "mine", "monster", "obelisk", "shrine", "tree" })
 {
     await using var f = await Fixture.Create();
@@ -147,6 +173,46 @@ foreach (var kind in new[] { "town", "mine", "monster", "obelisk", "shrine" })
     Check("open diagonals beside passable pickups still work", move.ok && f.Hero.X == 2 && f.Hero.Y == 2);
 }
 
+foreach (var (kind, data, expected) in new (string, string?, int)[]
+{
+    ("town", null, 13), ("mine", "wood", 6), ("mine", "ore", 6), ("mine", "gems", 6),
+    ("mine", "gold", 3), ("mine", "crystal", 3), ("mine", "mercury", 3), ("mine", "sulfur", 3)
+})
+{
+    await using var f = await Fixture.Create();
+    var anchor = f.Map.At(3, 3);
+    anchor.ObjectKind = kind; anchor.ObjectData = kind == "town" ? f.Town.Id.ToString() : data; anchor.Passable = false;
+    Footprint.Stamp(f.Map, 3, 3, kind, data);
+    var offsets = Footprint.Offsets(kind, data).ToHashSet();
+    Check($"{kind} {data} uses its native ground footprint, not a generic rectangle", offsets.Count + 1 == expected);
+    var walkable = true;
+    foreach (var (dx, dy) in offsets.Where(o => o != (0, 0)))
+    {
+        f.Hero.X = 3 + dx; f.Hero.Y = 4 + dy;
+        await f.SaveMap();
+        var result = await f.Service.MoveHeroAsync(f.Hero.Id, "alice", [(3 + dx, 3 + dy)]);
+        walkable &= !result.ok && f.Hero.Y == 4 + dy;
+    }
+    Check($"{kind} {data} blocks walking onto every non-entry body tile", walkable);
+    if (kind == "town")
+        Check("town decorative upper corners are not invisible walls",
+            f.Map.At(1, 1).Passable && f.Map.At(5, 1).Passable && !f.Map.At(3, 1).Passable);
+}
+foreach (var (kind, terrain) in new[] { ("tree", "grass"), ("tree", "dirt"), ("tree", "snow"), ("rock", "grass"), ("mountain", "grass") })
+{
+    await using var f = await Fixture.Create();
+    var obstacle = f.Map.At(3, 3);
+    obstacle.ObjectKind = kind; obstacle.Terrain = terrain; obstacle.Passable = false;
+    var pickup = f.Map.At(2, 3);
+    pickup.ObjectKind = "resource"; pickup.ObjectData = "gold:500";
+    await f.SaveMap();
+    var loaded = await f.Service.LoadMapAsync(f.Game);
+    var sprite = loaded.At(3, 3).Sprite;
+    Check($"{terrain} {kind} selects art whose solid body fits without covering a pickup or road",
+        sprite != null && ObjectGeometry.Blocked(sprite).ToHashSet().SetEquals([(0, 0)])
+        && loaded.At(2, 3).Passable && loaded.At(2, 3).ObjectKind == "resource" && loaded.At(4, 3).Passable);
+}
+
 Console.WriteLine($"{checks - failed}/{checks} movement checks passed");
 return failed == 0 ? 0 : 1;
 
@@ -178,7 +244,7 @@ sealed class Fixture : IAsyncDisposable
 
     public static async Task<Fixture> Create()
     {
-        var connection = new SqliteConnection("Data Source=:memory:");
+        var connection = new SqliteConnection($"Data Source=movement-{Guid.NewGuid():N};Mode=Memory;Cache=Shared");
         await connection.OpenAsync();
         var fixture = new Fixture(connection);
         await fixture.Db.Database.EnsureCreatedAsync();

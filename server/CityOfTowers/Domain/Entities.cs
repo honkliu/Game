@@ -21,6 +21,7 @@ public class Game
 
     public DateTime TurnStartedAt { get; set; } = DateTime.UtcNow;
     public Guid? WinnerUserId { get; set; }
+    public string EndAgreementJson { get; set; } = "[]";
 
     public int MapWidth { get; set; } = 72;
     public int MapHeight { get; set; } = 72;
@@ -62,6 +63,7 @@ public class Player
     public int Gold { get; set; }
 
     public string FogJson { get; set; } = "";
+    public string MineRemaindersJson { get; set; } = "{}";
 }
 
 public class Hero
@@ -92,9 +94,19 @@ public class Hero
     public string SkillsJson { get; set; } = "{}";
     public string SpellsJson { get; set; } = "[]";
     public string ArtifactsJson { get; set; } = "[]";
+    public string ArtifactLayoutJson { get; set; } = "{}";
+    public string? PendingLevelJson { get; set; }
     /// <summary>Set when the hero is standing on a monster tile awaiting a choice.</summary>
     public string? PendingEncounterJson { get; set; }
+    public string? PendingTreasureJson { get; set; }
+    public string AdventureEffectsJson { get; set; } = "{}";
 }
+
+public record TreasureChoice(int Gold, int Experience, int X, int Y);
+public record AdventureNotice(string Kind, string Key, decimal Amount, string Message, int? Icon = null);
+public record AdventureEffects(int FlightTurn = 0, int FlightPenalty = 0,
+    int HasteTurn = 0, int HasteBonus = 0, int MovementPenalty = 0,
+    int VisionsTurn = 0, int VisionsMastery = 0, int DoorTurn = 0, int DoorCasts = 0);
 
 public class Town
 {

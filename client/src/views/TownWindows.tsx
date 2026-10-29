@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { api, ApiError } from '../api';
 import type { ArmySlot, BuildingDef, CreatureDef, SpellDef, TownDetail } from '../types';
 import { Modal, Txt } from '../ui/Layout';
-import { toast } from '../ui/Toast';
 import { RES_ORDER, ResIcon, buildingName } from '../ui/homm';
 import { DefImg, Pcx, ScreenBackdrop, pcxUrl, useDef, useH3 } from '../h3/assets';
 import { creaturePortraitFrame } from '../h3/catalog';
@@ -15,6 +14,7 @@ type Res = TownDetail['resources'];
 const RES_X: Record<string, number> = { wood: 37, mercury: 121, ore: 205, sulfur: 289, crystal: 373, gems: 457, gold: 541 };
 
 const errText = (e: unknown) => (e instanceof ApiError ? e.message : 'Something went wrong.');
+export const TownMessageContext = createContext<(text: string) => void>(() => {});
 
 /** A HoMM3 button drawn from its 4-frame def (0 normal, 1 pressed, 2 disabled, 3 hover). */
 export function DefButton(props: {
@@ -132,6 +132,7 @@ export function HallWindow(props: {
   town: TownDetail; buildings: BuildingDef[]; onBuilt: () => void; onClose: () => void;
 }) {
   const { town, buildings, onBuilt, onClose } = props;
+  const showMessage = useContext(TownMessageContext);
   const [status, setStatus] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const built = useMemo(() => new Set(town.buildings), [town.buildings]);
@@ -176,7 +177,7 @@ export function HallWindow(props: {
           <div key={key} data-building={key} data-state={st} className="abs h3hit"
             style={{ left: x, top: y, width: 154, height: 92, cursor: st === 'forbidden' ? 'default' : 'pointer' }}
             onMouseEnter={() => setStatus(hint(key, st))} onMouseLeave={() => setStatus(null)}
-            onClick={() => { if (st !== 'forbidden') setSelected(key); else toast(hint(key, st)); }}>
+            onClick={() => { if (st !== 'forbidden') setSelected(key); else showMessage(hint(key, st)); }}>
             {key !== 'shipyard' && <HallIcon faction={town.faction} building={key} x={2} y={2} />}
             {key === 'shipyard' && <HallIcon faction={town.faction} building="villageHall" x={2} y={2} dim />}
             <DefImg name="TPTHBAR" frame={BAR[st]} x={1} y={73} />
@@ -204,6 +205,7 @@ export function BuildingDialog(props: {
   onBuilt?: () => void; onClose: () => void;
 }) {
   const { town, building: b, state, byKey, onBuilt, onClose } = props;
+  const showMessage = useContext(TownMessageContext);
   const [busy, setBusy] = useState(false);
   const built = new Set(town.buildings);
   const nm = (k: string) => buildingName(k, town.faction, byKey?.get(k)?.name);
@@ -215,9 +217,8 @@ export function BuildingDialog(props: {
     setBusy(true);
     try {
       await api.build(town.id, b.key);
-      toast(`Built ${nm(b.key)}.`);
       onBuilt?.();
-    } catch (e) { toast(errText(e)); } finally { setBusy(false); }
+    } catch (e) { showMessage(errText(e)); } finally { setBusy(false); }
   }
 
   const reqText = state === 'built' ? `${nm(b.key)} is already built.`
@@ -324,16 +325,11 @@ const SCROLL_POS: [number, number][][] = [
 ];
 const GUILD_WINDOW: Record<string, string> = { castle: 'TPMAGECS', necropolis: 'TPMAGENC' };
 /** SPELLSCR.def frame = HoMM3 spell id. */
-const SPELL_ID: Record<string, number> = {
-  bless: 41, curse: 42, haste: 53, slow: 54, magicArrow: 15, blessing: 37, fireball: 21, lightning: 17,
-  stoneSkin: 46, visions: 2, prayer: 48, inferno: 22, chainLightning: 19, animateDead: 39, teleport: 63,
-  townPortal: 9, berserk: 59, fly: 6, implosion: 18, waterWalk: 7, dimensionDoor: 8, armageddon: 26,
-  fly5: 6, resurrection: 38, sacrifice: 40
-};
 const SPELLBOOK_COST = 500;
 
 export function GuildWindow(props: { town: TownDetail; onChanged: () => void; onClose: () => void }) {
   const { town, onChanged, onClose } = props;
+  const showMessage = useContext(TownMessageContext);
   const [spells, setSpells] = useState<Record<string, SpellDef>>({});
   const [status, setStatus] = useState<string | null>(null);
   const [info, setInfo] = useState<SpellDef | null>(null);
@@ -349,11 +345,10 @@ export function GuildWindow(props: { town: TownDetail; onChanged: () => void; on
 
   async function buyBook() {
     try {
-      const r = await api.buySpellbook(town.id);
-      toast(r.learned.length ? `Bought a spellbook and learned ${r.learned.length} spell${r.learned.length === 1 ? '' : 's'}.` : 'Bought a spellbook.');
+      await api.buySpellbook(town.id);
       setAskBook(false);
       onChanged();
-    } catch (e) { toast(errText(e)); }
+    } catch (e) { showMessage(errText(e)); }
   }
 
   return (
@@ -370,7 +365,7 @@ export function GuildWindow(props: { town: TownDetail; onChanged: () => void; on
             onMouseEnter={() => setStatus(s ? `${s.name} (level ${s.level}, ${s.school})${known ? ' · known' : ''}` : 'Empty')}
             onMouseLeave={() => setStatus(null)}
             onClick={() => s && setInfo(s)}>
-            {s ? <DefImg name="SPELLSCR" frame={SPELL_ID[s.key] ?? 0} x={0} y={0} /> : <DefImg name="TPMAGES" frame={1} x={0} y={0} />}
+            {s ? <DefImg name="SPELLSCR" frame={s.id} x={0} y={0} /> : <DefImg name="TPMAGES" frame={1} x={0} y={0} />}
           </div>
         );
       }))}
@@ -382,7 +377,7 @@ export function GuildWindow(props: { town: TownDetail; onChanged: () => void; on
       {info && (
         <Modal w={320} h={200} onClose={() => setInfo(null)}>
           <DialogBox w={320} h={200} />
-          <DefImg name="SPELLSCR" frame={SPELL_ID[info.key] ?? 0} x={118} y={14} />
+          <DefImg name="SPELLSCR" frame={info.id} x={118} y={14} />
           <Txt x={10} y={82} w={300} size={13} bold align="center" color={GILT}>{info.name}</Txt>
           <Txt x={10} y={102} w={300} size={11} align="center" color={INK}>
             Level {info.level} · {info.school} · {info.cost} spell points
@@ -416,6 +411,7 @@ export const MACHINE_ART: Record<string, number> = { ballista: 4, ammoCart: 5, f
 
 export function BlacksmithWindow(props: { town: TownDetail; onChanged: () => void; onClose: () => void }) {
   const { town, onChanged, onClose } = props;
+  const showMessage = useContext(TownMessageContext);
   const [busy, setBusy] = useState(false);
   const m = town.blacksmith;
   const hero = town.heroInTown;
@@ -426,8 +422,8 @@ export function BlacksmithWindow(props: { town: TownDetail; onChanged: () => voi
 
   async function buy() {
     setBusy(true);
-    try { await api.buyWarMachine(town.id); toast(`${hero!.name} bought a ${m.name}.`); onChanged(); onClose(); }
-    catch (e) { toast(errText(e)); } finally { setBusy(false); }
+    try { await api.buyWarMachine(town.id); onChanged(); onClose(); }
+    catch (e) { showMessage(errText(e)); } finally { setBusy(false); }
   }
 
   return (
@@ -453,12 +449,14 @@ export function BlacksmithWindow(props: { town: TownDetail; onChanged: () => voi
 // ---------------------------------------------------------------------------------------------
 
 export function CreatureInfo(props: {
-  town: TownDetail; creatures: Record<string, CreatureDef>; army: 'hero' | 'garrison'; slot: number; stack: ArmySlot;
+  town?: TownDetail; creatures: Record<string, CreatureDef>; army: 'hero' | 'garrison'; slot: number; stack: ArmySlot;
+  onDismiss?: () => void;
   onChanged: () => void; onClose: () => void;
 }) {
   const { town, creatures, army, slot, stack, onChanged, onClose } = props;
+  const showMessage = useContext(TownMessageContext);
   const c = stack.creature ? creatures[stack.creature] : null;
-  const row = c ? town.available.find((a) => a.creature === c.key) : undefined;
+  const row = c ? town?.available.find((a) => a.creature === c.key) : undefined;
   const target = row?.upgradeBuilt && row.upgraded ? creatures[row.upgraded] : null;
   const unit = useMemo(() => {
     if (!c || !target) return null;
@@ -467,13 +465,14 @@ export function CreatureInfo(props: {
     return d;
   }, [c, target]);
   const total = (r: keyof Res) => (unit ? unit[r] * stack.count : 0);
-  const canPay = !!unit && RES_ORDER.every((r) => town.resources[r] >= total(r));
+  const canPay = !!town && !!unit && RES_ORDER.every((r) => town.resources[r] >= total(r));
   const [confirm, setConfirm] = useState(false);
   if (!c) return null;
 
   async function upgrade() {
-    try { await api.upgradeStack(town.id, army, slot); toast(`Upgraded to ${target!.name}.`); onChanged(); onClose(); }
-    catch (e) { toast(errText(e)); }
+    if (!town || !target) return;
+    try { await api.upgradeStack(town.id, army, slot); onChanged(); onClose(); }
+    catch (e) { showMessage(errText(e)); }
   }
 
   const stats: [string, string | number][] = [
@@ -497,6 +496,7 @@ export function CreatureInfo(props: {
       {target && unit && (
         <DefButton def="IOKAY" x={22} y={190} h={30} label={`Upgrade to ${target.name}`} onClick={() => setConfirm(true)} />
       )}
+      {props.onDismiss && <DefButton def="IViewCr2" x={132} y={190} h={30} label="Dismiss creatures" onClick={props.onDismiss} />}
       <DefButton def="IOKAY" x={214} y={190} h={30} label="OK" onClick={onClose} />
       <div className="abs h3text" style={{ left: 8, top: 290, width: 282, textAlign: 'center', fontSize: 11 }}>
         {target ? `Can be upgraded to ${target.name}` : row ? (row.upgraded ? `Build the upgraded dwelling to upgrade` : '') : ''}
@@ -510,7 +510,7 @@ export function CreatureInfo(props: {
           <div className="abs" style={{ left: 14, top: 46, width: 312, display: 'flex', justifyContent: 'center', gap: 20 }}>
             {RES_ORDER.filter((r) => total(r) > 0).map((r) => (
               <div key={r} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', fontSize: 12, fontWeight: 'bold',
-                color: town.resources[r] >= total(r) ? INK : RED }}>
+                color: town && town.resources[r] >= total(r) ? INK : RED }}>
                 <ResIcon r={r} size={30} />{total(r)}
               </div>
             ))}
@@ -560,6 +560,7 @@ export function marketRate(from: MarketRes, to: MarketRes, markets: number): { g
 }
 
 export function MarketWindow(props: { town: TownDetail; onTraded: () => void; onClose: () => void }) {
+  const showMessage = useContext(TownMessageContext);
   const { town, onTraded, onClose } = props;
   const res = town.resources;
   const markets = Math.max(1, town.marketCount ?? 1);
@@ -576,9 +577,8 @@ export function MarketWindow(props: { town: TownDetail; onTraded: () => void; on
     setBusy(true);
     try {
       await api.trade(town.id, from, to, lots);
-      toast(`Traded ${lots * rate.give} ${from} for ${lots * rate.get} ${to}.`);
       setLots(0); onTraded();
-    } catch (e) { toast(errText(e)); } finally { setBusy(false); }
+    } catch (e) { showMessage(errText(e)); } finally { setBusy(false); }
   }
 
   const cell = (side: 'from' | 'to', r: MarketRes, i: number) => {
@@ -639,13 +639,13 @@ export function TransformerWindow(props: {
   town: TownDetail; creatures: Record<string, CreatureDef>; onChanged: () => void; onClose: () => void;
 }) {
   const { town, creatures, onChanged, onClose } = props;
+  const showMessage = useContext(TownMessageContext);
   const hero = town.heroInTown;
   async function transform(slot: number) {
     try {
-      const r = await api.transformStack(town.id, slot);
-      toast(`Transformed into ${r.count} ${creatures[r.creature]?.name ?? r.creature}.`);
+      await api.transformStack(town.id, slot);
       onChanged();
-    } catch (e) { toast(errText(e)); }
+    } catch (e) { showMessage(errText(e)); }
   }
   return (
     <Modal w={485} h={240} onClose={onClose}>

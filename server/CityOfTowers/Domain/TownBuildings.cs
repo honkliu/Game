@@ -219,7 +219,7 @@ public static class TownBuildings
         if (set.Contains("capitol")) return 4000 + grail;
         if (set.Contains("cityHall")) return 2000 + grail;
         if (set.Contains("townHall")) return 1000 + grail;
-        return 500 + grail;
+        return (set.Contains("villageHall") ? 500 : 0) + grail;
     }
 
     /// <summary>Growth multiplier on base growth from fortifications and the Grail.</summary>
@@ -227,7 +227,7 @@ public static class TownBuildings
     {
         var set = built.ToHashSet();
         var m = set.Contains("castle") ? 2.0 : set.Contains("citadel") ? 1.5 : 1.0;
-        if (set.Contains("grail")) m += 0.5;
+        if (set.Contains("grail")) m *= 1.5;
         return m;
     }
 
@@ -238,11 +238,12 @@ public static class TownBuildings
         if (!HasDwelling(set, tier)) return 0;
         var tiers = Creatures.BaseTiers(faction);
         if (tiers.Length < tier) return 0;
-        var growth = (int)Math.Floor(Creatures.All[tiers[tier - 1]].Growth * GrowthMultiplier(set));
+        var fortification = set.Contains("castle") ? 2.0 : set.Contains("citadel") ? 1.5 : 1.0;
+        var growth = (int)Math.Floor(Creatures.All[tiers[tier - 1]].Growth * fortification);
         if (Hordes.TryGetValue(faction, out var hordes))
             foreach (var (key, (t, bonus)) in hordes)
                 if (t == tier && set.Contains(key)) growth += bonus;
-        return growth;
+        return growth + (set.Contains("grail") ? growth / 2 : 0);
     }
 
     /// <summary>Resources the Resource Silo produces per day.</summary>

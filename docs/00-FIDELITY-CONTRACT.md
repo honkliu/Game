@@ -26,16 +26,16 @@ in the code but not in this table is a defect.
 | --- | --- |
 | **Adventure map** | Tile map, terrain types, movement costs, fog of war (unexplored / explored / visible) |
 | **Hero** | Named hero, portrait, level, experience, four primary stats, secondary skills, movement points, 7-slot army, artifacts, spellbook |
-| **Movement** | Points per day, terrain cost, path preview, click-to-move |
+| **Movement** | Points per day from the slowest army stack, terrain cost; first left-click previews the path, a second click on that destination or Move Hero confirms. The action pointer distinguishes walking, visiting/picking up and meeting heroes, including later-day variants. Walking cannot cross solid objects or their footprints, or cut blocked diagonal corners. Only active Fly permits crossing obstacles, with a legal landing. |
 | **Resources** | Seven resources, daily mine yield, town hall income |
-| **Mines** | Capture by walking onto them; yield daily |
+| **Mines** | Claim by approaching the entrance from an adjacent tile; the structure stays solid; yield daily |
 | **Map objects** | Resource piles, treasure chests, artifacts, shrines, wandering monsters (as obstacles) |
 | **Town** | Painted clickable town view, building tree, dwellings, weekly growth, recruitment |
 | **Creatures** | 9 factions × 7 tiers × base+upgrade, real SoD statistics |
 | **Time** | Day / week / month; weekly growth; daily income |
 | **Obelisk** | Reveals fragments of a puzzle map; after all fragments, the Grail location is revealed |
 | **Grail** | Dig at the revealed location; awards the Grail |
-| **Tavern** | Hire additional heroes |
+| **Tavern** | Hire additional heroes for 2500 gold, only at an unoccupied town gate; maximum eight owned heroes |
 | **Marketplace** | Trade resources at exchange rates |
 | **Mage Guild** | Learn spells |
 | **UI composition** | Resource bar, minimap, status window, rollover bar, control buttons — in HoMM3's arrangement |
@@ -55,14 +55,63 @@ in the code but not in this table is a defect.
 
 | HoMM3 feature | Social adaptation |
 | --- | --- |
-| **Combat** | **Peaceful encounters.** Meeting a wandering monster stack offers a choice: *observe* (gain experience and a journal entry), *recruit* (if your army has room and you pay), or *pass*. No fighting. |
+| **Combat** | **Peaceful encounters.** Joining creatures use a native-style gold component and Yes/No confirmation, not an invented Observe/Recruit/Pass menu. Declining leaves the stack solid. Under the no-combat adaptation, non-joining creatures show a single native-style acknowledgment and remain solid. Recruitment eligibility retains the approved expedition-strength rule, not original diplomacy/attitude calculations. The old observe API remains compatible but is not offered by the adventure UI. |
 | **Hero battle** | **Meeting another hero** opens a dialogue: exchange messages, trade resources voluntarily, or share map knowledge. |
 | **Creature army** | **Expedition strength.** Your army's total AI value is your *expedition strength*, which gates what you can safely explore (deep terrain, guarded regions) and what you can recruit. Creatures are not combat units; they are capability. |
 | **Neutral mines** | **First discovery claims a mine.** Once claimed, it stays claimed. There is no hostile recapture. A mine may be **shared** if the owner grants access (see §4). |
 | **Obelisk** | **Puzzle map + social clues.** Visiting reveals a fragment of the puzzle map. Players post clues and theories at the Obelisk. |
 | **Grail** | **Digging.** After all fragments, the Grail tile is revealed. A hero must spend a day digging there. |
 | **Town capture** | **Visiting.** You may enter any town to read its Tower and leave messages. You may not build there. |
-| **Combat spells** | **Utility spells only:** View Air, View Earth, Town Portal, Dimension Door, Fly, Haste (movement), Cure (removes negative effects). Damage spells are removed. |
+| **Combat spells** | **Utility spells only:** View Air, View Earth, Visions, Town Portal, Dimension Door, Fly, Haste (movement), Cure (removes negative effects). Original combat spell metadata is retained, but combat casts are rejected before charging mana. |
+
+**Approved adventure spell adaptations:** Haste adds 300 movement for the current
+day, or 500 with Advanced/Expert Air Magic. It applies once per hero per day;
+recasting cannot stack or refill movement. Cure removes negative adventure
+movement effects, restoring the daily maximum without refilling remaining
+movement or removing beneficial Fly/Haste effects.
+
+Treasure chests offer **gold or experience**, never both. The choice persists
+across reloads; leaving pays nothing and retains the chest for later.
+
+Object art and collision use the same native sprite anchor and ground mask;
+decorative roofs are not extra ground walls. Resource pickups stop movement and
+show their resource component in the adventure info bar for three seconds (or
+until dismissed), not a website toast. Shrine, artifact and mine visits use
+native-style information dialogs. These requirements do not imply that every
+remaining catalogue or movement rule has been implemented.
+
+New-day feedback uses the native NEWDAY / NEWWEEK animation in the right info
+bar (1.5-second animation, 3-second display), including automatic turn advancement.
+There is no invented countdown or new-day success toast. Ending a turn warns when
+an awake hero can still move. Sleep/Wake changes local hero selection state; it
+does not advance the day or refill movement. An unaffordable first step keeps the
+red planned route without sending a failed move request or opening a popup.
+An unfinished route is retained and recalculated after the next day. Future-day
+planning must not assume that today's Fly or Haste survives.
+
+**Approved remaining-gap decisions:**
+- Keep existing combat skills in saved heroes, but do not offer ineffective
+  combat skills in new level-up choices. Retain the native class-weighted choice
+  and advancement rules for the supported adventure skills. Fire Magic is also
+  retained in saves but not newly offered: none of the approved utility spells
+  uses that school.
+- Shared mine income accumulates fractional resource units persistently; only
+  whole units enter the spendable wallet.
+- All human players must agree to end a game. Computer seats follow that
+  agreement; a human can withdraw consent before unanimity.
+
+Hero meetings within one player's army use the native exchange window for
+split/merge/swap and artifact transfers. Equipment can be rearranged between
+valid body slots and backpack positions. Creature dismissal preserves the last
+hero stack; troop and hero dismissals require confirmation. Level-up choices,
+equipment arrangement and utility-spell state survive a server restart.
+
+Town construction, recruitment, hiring, upgrades, market exchanges and gear
+purchases show their result in the native town/army/resource controls, without
+invented success toasts. Rejected town actions use a native information dialog.
+Buying creatures closes the recruitment window. Hiring uses the original
+2500-gold fee (`GameConstants::HERO_GOLD_COST`, VCMI revision
+`abe535c4418b66bae8cdb56fee1473b109e8c55e`, `lib/constants/NumericConstants.h`).
 
 ---
 
@@ -108,10 +157,10 @@ cooperative objective that replaces alliance warfare.
 
 | Rule | Detail |
 | --- | --- |
-| Claim | Walking onto a neutral mine claims it for you |
+| Claim | Approaching a neutral mine's entrance claims it for you; the hero remains adjacent |
 | Yield | The owner receives the yield every day |
 | Recapture | **Not possible.** A claimed mine stays claimed |
-| Sharing | The owner may mark a mine as *shared*; then all players receive half its yield, and the owner receives the other half |
+| Sharing | Only the owner may share or revoke sharing. While shared, the owner and each other player receive half the normal yield; fractional units carry forward until spendable |
 | Contested | If two players reach a neutral mine on the same day, the one who arrives first claims it |
 
 ---
@@ -132,7 +181,7 @@ The Grail is a trophy and a powerful building, not a game-over trigger.
 
 The game ends only when:
 - the turn limit is reached, or
-- all players agree to end it.
+- all human players agree to end it; computer seats follow their agreement.
 
 ---
 
@@ -161,21 +210,23 @@ uniformly to fit the window. The composition is never rearranged.
 
 | Region | x | y | w | h |
 | --- | --- | --- | --- | --- |
-| Adventure map view | 0 | 0 | 640 | 480 |
-| Right sidebar | 640 | 0 | 160 | 600 |
-| Minimap | 648 | 8 | 144 | 108 |
-| Control buttons | 648 | 124 | 144 | 200 |
-| Status window (hero) | 0 | 480 | 640 | 120 |
-| Resource bar | 0 | 480 | 640 | 24 |
-| Rollover bar | 0 | 456 | 640 | 24 |
-| Date | 560 | 486 | 76 | 16 |
+| Adventure map view | 7 | 7 | 594 | 546 |
+| Minimap | 630 | 26 | 144 | 144 |
+| Control buttons | 679 | 196 | 64 | 192 |
+| Right info window | 605 | 389 | 175 | 168 |
+| Resource bar | 3 | 575 | 794 | 22 |
+| Rollover text | 8 | 556 | 586 | 18 |
+| Date text | 622 | 578 | — | — |
 
 **Town screen:**
 
 | Region | x | y | w | h |
 | --- | --- | --- | --- | --- |
-| Painted town scene | 0 | 0 | 800 | 480 |
-| Building buttons | 0 | 480 | 800 | 120 |
+| Painted town scene | 0 | 0 | 800 | 374 |
+| Town/army panel | 0 | 374 | 800 | 226 |
+
+These native coordinates supersede the older 640 × 480 draft diagram and region
+tables in `09-ui-reference.md`.
 
 ### 6.3 Artwork direction
 
@@ -185,7 +236,7 @@ uniformly to fit the window. The composition is never rearranged.
 | Buildings | Isometric-ish painted sprites, 96 × 96, with a ground shadow |
 | Hero | 32 × 32 sprite with a faction-coloured flag |
 | UI chrome | Carved stone with gold trim, bevelled edges, inner shadow |
-| Cursors | Arrow (default), green arrow (move), red cross (blocked), gold arrow (enter) |
+| Cursors | Native CRADVNTR action frames and hotspots: walking, blocked, visiting/picking up, hero meeting and later-day variants |
 
 ### 6.4 Animation and timing
 
@@ -193,8 +244,8 @@ uniformly to fit the window. The composition is never rearranged.
 | --- | --- |
 | Hero step | 60 ms per tile |
 | Panel open | 120 ms fade |
-| Toast | 150 ms in, 2500 ms hold, 300 ms out |
-| Turn advance | 400 ms banner |
+| Adventure resource feedback | Native right info bar, three seconds or until dismissed; no pickup success toast |
+| Turn advance | Native NEWDAY / NEWWEEK right info bar, 1.5-second animation and three-second display; no countdown banner |
 
 ### 6.5 Sound
 

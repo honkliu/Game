@@ -35,6 +35,22 @@ using (var scope = app.Services.CreateScope())
     if (!hasIsAi)
         db.Database.ExecuteSqlRaw("ALTER TABLE Players ADD COLUMN IsAi INTEGER NOT NULL DEFAULT 0;");
 
+    var heroColumns = db.Database.SqlQueryRaw<string>("SELECT name AS Value FROM pragma_table_info('Heroes')").ToList();
+    if (!heroColumns.Contains("PendingTreasureJson"))
+        db.Database.ExecuteSqlRaw("ALTER TABLE Heroes ADD COLUMN PendingTreasureJson TEXT NULL;");
+    if (!heroColumns.Contains("AdventureEffectsJson"))
+        db.Database.ExecuteSqlRaw("ALTER TABLE Heroes ADD COLUMN AdventureEffectsJson TEXT NOT NULL DEFAULT '{{}}';");
+    if (!heroColumns.Contains("ArtifactLayoutJson"))
+        db.Database.ExecuteSqlRaw("ALTER TABLE Heroes ADD COLUMN ArtifactLayoutJson TEXT NOT NULL DEFAULT '{{}}';");
+    if (!heroColumns.Contains("PendingLevelJson"))
+        db.Database.ExecuteSqlRaw("ALTER TABLE Heroes ADD COLUMN PendingLevelJson TEXT NULL;");
+    var gameColumns = db.Database.SqlQueryRaw<string>("SELECT name AS Value FROM pragma_table_info('Games')").ToList();
+    if (!gameColumns.Contains("EndAgreementJson"))
+        db.Database.ExecuteSqlRaw("ALTER TABLE Games ADD COLUMN EndAgreementJson TEXT NOT NULL DEFAULT '[]';");
+    var playerColumns = db.Database.SqlQueryRaw<string>("SELECT name AS Value FROM pragma_table_info('Players')").ToList();
+    if (!playerColumns.Contains("MineRemaindersJson"))
+        db.Database.ExecuteSqlRaw("ALTER TABLE Players ADD COLUMN MineRemaindersJson TEXT NOT NULL DEFAULT '{{}}';");
+
     // Abandoned games accumulate: each holds a full map plus heroes, towns and messages.
     // Drop anything untouched for a day, then cap the total so the file cannot grow without bound.
     var cutoff = DateTime.UtcNow.AddDays(-1);

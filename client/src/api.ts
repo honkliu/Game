@@ -78,14 +78,22 @@ export const api = {
       const msg = json && typeof json === 'object' && 'error' in json ? String((json as { error: unknown }).error) : `Request failed (${res.status}).`;
       throw new ApiError(res.status, msg);
     }
-    return { hero: json as import('./types').HeroDetail, message: res.headers.get('X-Move-Message') };
+    const notices = JSON.parse(res.headers.get('X-Move-Events') ?? '[]') as import('./types').AdventureNotice[];
+    return { hero: json as import('./types').HeroDetail, message: res.headers.get('X-Move-Message'), notices };
   },
   resolveEncounter: (id: string, action: string) =>
     request<{ message: string }>('POST', `/api/heroes/${id}/encounter`, { action }),
-  castSpell: (id: string, spell: string, x?: number, y?: number) =>
-    request<{ message: string; mana: number; x: number; y: number }>('POST', `/api/heroes/${id}/cast`, { spell, x, y }),
+  resolveTreasure: (id: string, choice: 'gold' | 'experience' | 'leave') =>
+    request<{ message: string; notices: import('./types').AdventureNotice[] }>('POST', `/api/heroes/${id}/treasure`, { choice }),
+  castSpell: (id: string, spell: string, x?: number, y?: number, townId?: string) =>
+    request<{ message: string; mana: number; x: number; y: number; view: import('./types').WorldView | null }>('POST', `/api/heroes/${id}/cast`, { spell, x, y, townId }),
+  getVisions: (id: string) => request<import('./types').VisionTarget[]>('GET', `/api/heroes/${id}/visions`),
   endTurn: (id: string) =>
     request<{ day: number; week: number; month: number; turn: number }>('POST', `/api/games/${id}/endturn`),
+  shareMine: (id: string, x: number, y: number, shared: boolean) =>
+    request<void>('POST', `/api/games/${id}/mine-sharing`, { x, y, shared }),
+  endAgreement: (id: string, agree: boolean) =>
+    request<{ state: string; votes: string[] }>('POST', `/api/games/${id}/agreement`, { agree }),
   getTown: (id: string) => request<import('./types').TownDetail>('GET', `/api/towns/${id}`),
   recruit: (id: string, tier: number, count: number, creature?: string) =>
     request<{ recruited: number; creature: string }>('POST', `/api/towns/${id}/recruit`, { tier, count, creature }),
@@ -94,6 +102,18 @@ export const api = {
       'POST', `/api/towns/${id}/army`, { fromArmy, fromSlot, toArmy, toSlot, count }),
   moveHeroArmy: (heroId: string, fromSlot: number, toSlot: number, count = 0) =>
     request<{ army: import('./types').ArmySlot[] }>('POST', `/api/heroes/${heroId}/army`, { fromSlot, toSlot, count }),
+  exchangeHeroes: (heroId: string, otherHeroId: string, fromSlot?: number, toSlot?: number, count = 0) =>
+    request<{ hero: import('./types').HeroDetail; other: import('./types').HeroDetail }>(
+      'POST', `/api/heroes/${heroId}/exchange`, { otherHeroId, fromSlot, toSlot, count }),
+  moveArtifact: (heroId: string, from: string, to: string, toHeroId?: string) =>
+    request<{ hero: import('./types').HeroDetail; other: import('./types').HeroDetail | null }>(
+      'POST', `/api/heroes/${heroId}/artifacts`, { from, to, toHeroId }),
+  dismissStack: (heroId: string, slot: number) =>
+    request<import('./types').HeroDetail>('POST', `/api/heroes/${heroId}/dismiss-stack`, { slot, confirmed: true }),
+  dismissHero: (heroId: string) =>
+    request<void>('POST', `/api/heroes/${heroId}/dismiss`, { confirmed: true }),
+  chooseLevel: (heroId: string, skill: string | null) =>
+    request<import('./types').HeroDetail>('POST', `/api/heroes/${heroId}/level-up`, { skill }),
   upgradeStack: (id: string, army: 'hero' | 'garrison', slot: number) =>
     request<{ creature: string }>('POST', `/api/towns/${id}/upgrade`, { army, slot }),
   buyWarMachine: (id: string) => request<{ machine: string }>('POST', `/api/towns/${id}/blacksmith`),

@@ -7,6 +7,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="..\..\client\src\h3\object-geometry.json" LogicalName="CityOfTowers.ObjectGeometry.json" />
+    <EmbeddedResource Include="Domain\h3-rules.json" LogicalName="CityOfTowers.NativeRules.json" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.13">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>

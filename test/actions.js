@@ -12,16 +12,16 @@ fs.mkdirSync(output, { recursive: true });
 
 const suites = [];
 let cases = [];
+let browserCases = [];
 const gaps = [
   ['army-hero-exchange', 'Exchange armies between two friendly heroes', 'Preserve', 'Only town/hero-self exchange endpoints exist; no two-hero exchange flow.'],
   ['army-dismiss', 'Dismiss a troop or hero with confirmation', 'Preserve', 'No dismissal action; last-troop constraints alone do not cover dismissal.'],
   ['artifact-manage', 'Equip, unequip, exchange and rearrange artifacts', 'Preserve', 'Pickup auto-arranges artifacts; no player-controlled equipment action.'],
   ['hero-level-choice', 'Choose secondary skills at level-up', 'Preserve', 'Primary and secondary advancement now both occur, but secondary advancement is automatic, not a player choice.'],
   ['hero-skill-fidelity', 'Apply every preserved secondary skill and class progression', 'Preserve', 'Full class weights, eight-skill choices, Logistics, Learning, native terrain and skill effects are not comprehensively verified.'],
-  ['movement-fidelity', 'Match all terrain and daily movement rules', 'Preserve', 'Diagonal costs, native-terrain armies, slowest-unit tables and last-step rounding still need exact reference tests.'],
-  ['treasure-resolution', 'Choose and resolve either treasure reward exactly once', 'Preserve', 'The failing treasure-choice case exposes double rewards; explicit choice, cancellation and replay protection are not implemented.'],
+  ['movement-fidelity', 'Match all terrain and daily movement rules', 'Preserve', 'Slowest-stack budgets, Logistics, Fly costs and action-pointer reachability are checked; ground diagonal costs, native terrain, last-step rounding and future-day path replanning after Fly expires still need exact reference tests.'],
   ['mine-sharing', 'Owner grants or revokes peaceful mine sharing', 'Adapt', 'Unauthorized self-sharing is now rejected, but no owner-controlled sharing action exists. Half-yield sharing is not verified.'],
-  ['spell-fidelity', 'Match utility spell definitions and mastery', 'Preserve', 'Catalogue contains duplicate Fly and inaccurate levels/schools; mana mastery, daily casts and complete utility effects need dedicated tests.'],
+  ['spell-fidelity', 'Match utility spell definitions and mastery', 'Preserve', 'Fly, survey mastery and approved Haste/Cure effects are checked; the remaining spell catalogue and utility effects are not comprehensively reference-verified.'],
   ['spell-visions', 'Visions exposes useful creature information', 'Adapt', 'Current implementation returns a message only; no verified information-reveal behavior.'],
   ['spell-portal', 'Town Portal follows mastery-dependent destination/movement rules', 'Preserve', 'Current implementation chooses the first owned town and spends all movement; exact destination rules are unverified.'],
   ['spell-door', 'Dimension Door respects range, daily limits and movement costs', 'Preserve', 'Occupied/solid/unseen landing rejection is tested; daily limits, range and movement formulas are not.'],
@@ -32,8 +32,38 @@ const gaps = [
   ['social-concurrency', 'Concurrent trade/claim/project requests remain atomic', 'Adapt', 'Sequential checks do not establish atomicity for simultaneous requests.'],
   ['endgame-agreement', 'End the game by unanimous agreement', 'Adapt', 'Turn-limit ending exists; no all-player agreement action exists.'],
   ['ui-actions', 'Exercise every action through its actual screen', 'Preserve', 'The browser suite is smoke coverage, not an exhaustive army/split/upgrade/spell/market/encounter UI matrix.'],
-  ['save-resume', 'Save/resume every new action state', 'Preserve', 'Audit fixtures are deliberately transient; cross-process persistence for all actions is not established by this run.']
+  ['save-resume', 'Save/resume every new action state', 'Preserve', 'Full runs verify old-schema migration plus treasure/Fly/Haste across restarts; a cross-process matrix for every other action is not established.']
 ].map(([id, action, kind, detail]) => ({ id, action, kind, status: 'GAP', detail }));
+
+const closure = {
+  'army-hero-exchange': ['army-heroes', 'army-heroes-guards', 'hero-scholar', 'browser-S33', 'save-migration'],
+  'army-dismiss': ['army-dismiss', 'hero-dismiss', 'browser-S35', 'browser-S36', 'save-migration'],
+  'artifact-manage': ['artifact-equipment', 'artifact-exchange', 'artifact-backpack', 'artifact-sight', 'browser-S33', 'browser-S34', 'save-migration'],
+  'hero-level-choice': ['hero-level-choice', 'hero-level-queue', 'hero-level-cap', 'browser-S37', 'save-migration'],
+  'hero-skill-fidelity': ['hero-native-progression', 'hero-obligatory-offers', 'hero-learning-estates', 'hero-scholar', 'hero-scouting',
+    'hero-level-cap', 'movement-native-terrain', 'movement-speed-table', 'mana-capacity', 'mana-daily-0', 'mana-daily-1', 'mana-daily-2', 'mana-daily-3', 'guild-wisdom'],
+  'movement-fidelity': ['movement-source', 'movement-diagonal', 'movement-last-step', 'movement-exhaustion', 'movement-native-terrain',
+    'movement-pathfinding', 'movement-speed-table', 'flight-mastery-0', 'flight-mastery-1', 'flight-mastery-2', 'flight-mastery-3',
+    'movement', 'browser-S18', 'browser-S26', 'browser-S30', 'browser-S31', 'browser-S32'],
+  'mine-sharing': ['mine-share', 'mine-half-yield', 'mine-share-guards', 'browser-S41', 'save-migration'],
+  'spell-fidelity': ['spell-native-metadata', 'spell-guards', 'flight-mastery-0', 'flight-mastery-1', 'flight-mastery-2', 'flight-mastery-3',
+    'haste-day-0', 'haste-day-1', 'haste-day-2', 'haste-day-3', 'cure-penalty', 'browser-S19', 'browser-S20', 'browser-S39'],
+  'spell-visions': ['spell-visions-0', 'spell-visions-1', 'spell-visions-2', 'spell-visions-3', 'browser-S40', 'save-migration'],
+  'spell-portal': ['spell-portal-0', 'spell-portal-1', 'spell-portal-2', 'spell-portal-3', 'spell-portal-guards', 'browser-S38'],
+  'spell-door': ['spell-door-limit-0', 'spell-door-limit-1', 'spell-door-limit-2', 'spell-door-limit-3', 'spell-door-range',
+    'spell-door-water', 'spell-door-occupied', 'spell-door-land', 'browser-S39', 'save-migration'],
+  'spell-removed': ['spell-removed', 'browser-S39'],
+  'specials-complete': ['native-creature-reference', 'native-building-reference', 'special-growth-reference', 'special-pond',
+    'special-darkness', 'special-combat-only', 'special-treasury-income', 'stables-week', 'transform-stack', 'browser-S44'],
+  'social-meeting': ['social', 'browser-S42'],
+  'social-endgame': ['social-endgame', 'game-finished'],
+  'social-concurrency': ['social-concurrent-trade', 'social-concurrent-project', 'social-concurrent-claim', 'treasure-concurrent'],
+  'endgame-agreement': ['endgame-agreement', 'endgame-ai-agreement', 'browser-S43', 'save-migration'],
+  'ui-actions': ['browser', 'browser-S5', 'browser-S7', 'browser-S8', 'browser-S9b', 'browser-S10', 'browser-S12', 'browser-S15',
+    'browser-S17', 'browser-S21', 'browser-S22', 'browser-S23', 'browser-S24', 'browser-S27', 'browser-S28', 'browser-S29',
+    'browser-S31', 'browser-S32', ...Array.from({ length: 13 }, (_, i) => `browser-S${33 + i}`)],
+  'save-resume': ['save-migration', 'browser-S17', 'browser-S27', 'browser-S32', 'browser-S34', 'browser-S37']
+};
 
 // Each current public mutation must have named evidence. This is coverage inventory,
 // not a claim that every rule or branch of that endpoint has been verified.
@@ -48,16 +78,24 @@ const evidence = {
   '/api/towns/{townId:guid}/garrison': ['army-legacy'],
   '/api/towns/{townId:guid}/army': ['army-move', 'army-merge', 'army-swap', 'army-split', 'army-invalid', 'army-last'],
   '/api/heroes/{heroId:guid}/army': ['army-rearrange'],
+  '/api/heroes/{heroId:guid}/exchange': ['army-heroes', 'army-heroes-guards', 'hero-scholar'],
+  '/api/heroes/{heroId:guid}/dismiss-stack': ['army-dismiss'],
+  '/api/heroes/{heroId:guid}/dismiss': ['hero-dismiss'],
+  '/api/heroes/{heroId:guid}/artifacts': ['artifact-equipment', 'artifact-exchange', 'artifact-backpack'],
+  '/api/heroes/{heroId:guid}/level-up': ['hero-level-choice', 'hero-level-queue', 'hero-level-cap'],
   '/api/towns/{townId:guid}/upgrade': ['upgrade-price', 'upgrade-locked', 'upgrade-army', 'upgrade-garrison'],
   '/api/towns/{townId:guid}/blacksmith': ['blacksmith'],
   '/api/towns/{townId:guid}/spellbook': ['spellbook-buy', 'guild-wisdom'],
   '/api/towns/{townId:guid}/transform': ['transform-stack'],
   '/api/heroes/{heroId:guid}/cast': ['spell-guards', 'spell-flight', 'spell-haste', 'spell-door-occupied', 'spell-door-land'],
   '/api/games/{id:guid}/endturn': ['dwelling-growth', 'guild-rest', 'town-income', 'game-finished'],
+  '/api/games/{id:guid}/mine-sharing': ['mine-share', 'mine-half-yield', 'mine-share-guards'],
+  '/api/games/{id:guid}/agreement': ['endgame-agreement', 'endgame-ai-agreement'],
   '/api/games/{id:guid}/obelisk/visit': ['obelisk-reveal'],
   '/api/games/{id:guid}/obelisk/solve': ['adventure'],
   '/api/games/{id:guid}/obelisk/message': ['adventure'],
   '/api/heroes/{heroId:guid}/encounter': ['encounter-observe', 'encounter-recruit', 'encounter-pass', 'encounter-strength', 'encounter-invalid'],
+  '/api/heroes/{heroId:guid}/treasure': ['treasure-gold', 'treasure-experience', 'treasure-leave', 'treasure-concurrent'],
   '/api/games/{id:guid}/messages': ['social'],
   '/api/games/{id:guid}/trades': ['social'],
   '/api/trades/{offerId:guid}/respond': ['social'],
@@ -80,7 +118,7 @@ function run(id, command, args, options = {}) {
   fs.writeFileSync(path.join(output, `${id}.log`), text);
   const status = result.status === 0 && !result.error ? 'PASS' : 'FAIL';
   suites.push({ id, status, exitCode: result.status, durationMs: Date.now() - started, log: `test-results/action-audit/${id}.log` });
-  console.log(text.split(/\r?\n/).filter(line => !line.startsWith('ACTION_RESULTS ')).join('\n').trim());
+  console.log(text.split(/\r?\n/).filter(line => !line.startsWith('ACTION_RESULTS ') && !line.startsWith('BROWSER_RESULTS ')).join('\n').trim());
   return text;
 }
 
@@ -129,9 +167,12 @@ async function integration() {
     run('adventure', process.execPath, [path.join(__dirname, 'adventure.js'), base]);
     run('social', process.execPath, [path.join(__dirname, 'social.js'), base]);
     const playwright = path.join(path.dirname(require.resolve('@playwright/test/package.json')), 'cli.js');
-    run('browser', process.execPath, [playwright, 'test', '--output', path.join(root, 'test-results', 'action-browser')], {
+    const browserLog = run('browser', process.execPath, [playwright, 'test', '--reporter', `list,${path.join(__dirname, 'action-reporter.cjs')}`,
+      '--output', path.join(root, 'test-results', 'action-browser')], {
       env: { ...process.env, PLAYWRIGHT_BASE_URL: base }
     });
+    const browserResult = browserLog.match(/^BROWSER_RESULTS (.+)$/m);
+    if (browserResult) browserCases = JSON.parse(browserResult[1]);
   } finally {
     if (server && server.exitCode === null && !startError) {
       const stopped = new Promise(resolve => server.once('close', resolve));
@@ -141,6 +182,9 @@ async function integration() {
     try {
       fs.mkdirSync(output, { recursive: true });
       fs.writeFileSync(path.join(output, 'server.log'), serverLog);
+      if (server && !startError && fs.existsSync(path.join(temp, 'audit.db')))
+        run('save-migration', process.execPath, [path.join(__dirname, 'save-migration.js'),
+          path.join(temp, 'audit.db'), path.join(temp, 'migration.db')]);
     } finally {
       fs.rmSync(temp, { recursive: true, force: true });
     }
@@ -158,8 +202,22 @@ function escape(value) {
 }
 
 function save() {
-  const known = new Map([...cases, ...suites].map(item => [item.id, item]));
-  const endpointSource = fs.readFileSync(path.join(root, 'server', 'CityOfTowers', 'Api', 'Endpoints.cs'), 'utf8');
+  const browserGroups = [...new Set(browserCases.map(c => c.id))].map(id => ({
+    id, status: browserCases.filter(c => c.id === id).every(c => c.status === 'PASS') ? 'PASS'
+      : browserCases.some(c => c.id === id && c.status === 'FAIL') ? 'FAIL' : 'NOT RUN'
+  }));
+  const known = new Map([...cases, ...suites, ...browserGroups].map(item => [item.id, item]));
+  for (const gap of gaps) {
+    gap.originalFinding = gap.detail;
+    gap.evidence = closure[gap.id];
+    const missing = gap.evidence.filter(id => !known.has(id) || known.get(id).status === 'NOT RUN');
+    gap.status = gap.evidence.some(id => known.get(id)?.status === 'FAIL') ? 'FAIL' : missing.length ? 'NOT RUN' : 'PASS';
+    gap.detail = gap.status === 'PASS' ? 'All named evidence passed for the recorded peaceful-ruleset scope.'
+      : missing.length ? `Missing current-run evidence: ${missing.join(', ')}` : 'A required assertion failed; see its recorded detail.';
+  }
+  const apiDir = path.join(root, 'server', 'CityOfTowers', 'Api');
+  const endpointSource = fs.readdirSync(apiDir).filter(name => name.endsWith('.cs'))
+    .map(name => fs.readFileSync(path.join(apiDir, name), 'utf8')).join('\n');
   const endpoints = [...endpointSource.matchAll(/app\.Map(Post|Put|Patch|Delete)\("([^"]+)"/g)]
     .filter(match => !match[2].includes('/_test/'))
     .map(match => {
@@ -170,23 +228,26 @@ function save() {
       return { method: match[1].toUpperCase(), route: match[2], evidence: refs, status, missing };
     });
   const expectedSuites = ['actions', 'movement', 'creatures', 'creature-sanity',
-    'server-build', 'client-build', 'isolated-server', 'adventure', 'social', 'browser'];
+    'server-build', 'client-build', 'isolated-server', 'adventure', 'social', 'browser', 'save-migration'];
   for (const id of expectedSuites) {
     if (!suites.some(s => s.id === id)) suites.push({ id, status: 'NOT RUN' });
   }
   const counts = {
     pass: cases.filter(c => c.status === 'PASS').length,
     fail: cases.filter(c => c.status === 'FAIL').length,
-    gaps: gaps.length,
+    gaps: gaps.filter(g => g.status !== 'PASS').length,
+    originalGaps: gaps.length,
+    browserPass: browserCases.filter(c => c.status === 'PASS').length,
+    browserFail: browserCases.filter(c => c.status === 'FAIL').length,
     publicMutationRoutes: endpoints.length,
     unmappedRoutes: endpoints.filter(e => !e.evidence.length).length
   };
   const result = {
     generatedAt: new Date().toISOString(), revision: git(['rev-parse', 'HEAD']),
     worktree: git(['status', '--short']), mode: full ? 'full' : 'deterministic',
-    command: `npm test --${full ? ' --full' : ''}${record ? ' --record' : ''}`,
-    status: counts.fail || gaps.length || suites.some(s => s.status !== 'PASS') || endpoints.some(e => e.status !== 'PASS') ? 'INCOMPLETE' : 'PASS',
-    counts, cases, gaps, endpoints, suites,
+    command: `node test\\actions.js${full ? ' --full' : ''}${record ? ' --record' : ''}`,
+    status: counts.fail || counts.gaps || suites.some(s => s.status !== 'PASS') || endpoints.some(e => e.status !== 'PASS') ? 'INCOMPLETE' : 'PASS',
+    counts, cases, gaps, browserCases, endpoints, suites,
     scope: 'Current public mutation routes and action rules in docs/00-FIDELITY-CONTRACT.md; not all mechanics in the original game. Query/catalogue and development-only routes are excluded from mutation inventory. PASS only describes the stated assertion, not exhaustive conformance.'
   };
   fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(result, null, 2) + '\n');
@@ -198,24 +259,57 @@ function save() {
 Generated: ${result.generatedAt}  
 Revision: \`${result.revision}\` (worktree changes listed below)  
 Command: \`${result.command}\`  
-Overall: **${result.status} — not full Heroes III alignment.**
+Overall: **${result.status} — the recorded peaceful-ruleset checklist, not a complete Heroes III implementation.**
 
 ## Scope and ruleset
 
 ${result.scope}
 
-Keep the peaceful adaptations: no battles, hostile recapture, stealing or town capture. Mines require owner consent to share; encounters remain observe/recruit/pass; the Grail remains a milestone.
+Keep the peaceful adaptations: no battles, hostile recapture, stealing or town capture. Mines require owner consent to share; creature joining uses a gold component and native Yes/No, while non-joining stacks remain solid after a native acknowledgment. The legacy observe API is retained but no longer offered as an invented adventure menu. Expedition-strength eligibility is an adaptation, not original diplomacy. The Grail remains a milestone.
 
 The checklist below is executable: every action row comes from the actual in-memory HTTP audit, with fresh SQLite state per case. Movement checks execute the real client pathfinder and server movement service. Integration/browser suites use a separate temporary database and ephemeral port, never the normal play database.
 
 **${counts.pass} action cases passed; ${counts.fail} failed; ${counts.gaps} additional coverage/implementation gaps.** All ${counts.publicMutationRoutes} current public mutation routes are inventoried; ${counts.unmappedRoutes} have no evidence mapping. Route evidence is deliberately narrower than complete behavioral coverage.
 
-PASS means only the written assertions passed. FAIL is a reproducible mismatch. GAP is an inspected missing feature or missing reference test, not a test pass. NOT RUN means no evidence was collected in this run. Existing creature checks validate catalogue structure and selected reference statistics, not every number in the catalogue. Browser tests are smoke coverage only.
+PASS means only the written assertions passed. FAIL is a reproducible mismatch. NOT RUN means required current-run evidence is missing. All 19 original obligations remain below; their status is derived from named assertions, never deleted or manually marked complete. The native reference case compares every retained creature and every supported purchasable town building. Browser cases cover real controls and persistence is tested with actual process restarts.
+
+## Map-object and action-pointer inventory
+
+This is the acceptance inventory, not an additional set of automatically passing cases.
+Use the execution record below to determine whether its cited tests actually passed.
+Native ground masks are numerical metadata decoded from the installed game's
+\`OBJECTS.TXT\`; artwork stays in the player's local installation.
+
+${table(['Object / destination', 'Physical and interaction rule', 'Pointer / feedback', 'Evidence and limits'], [
+  ['Open ground', 'First click plans without moving; second click or Move Hero executes.', 'Walking horse; later-day pointer and red path beyond the movement budget.', 'movement client cursor/source/diagonal/native/last-step/Fly-expiry tests; browser S5, S21 and S26 (actual red-cross pixels).'],
+  ['Resources: wood, ore, mercury, sulfur, crystal, gems, gold', 'Collect once and stop at the pile.', 'Visiting horse; native resource component in the right info bar for 3 seconds or until dismissed.', 'actions resource-*; browser S21 for every resource, real cursor image pixels, HTTP event, wallet debit/credit and dismissal.'],
+  ['Treasure chest', 'Stop for an explicit, persisted gold/XP/leave choice; select then confirm.', 'Visiting horse; native choice dialog.', 'actions treasure-*; browser S17 and S24; save-migration restart checks.'],
+  ['Artifact', 'Collect without disturbing manual equipment; equip, unequip, rearrange or exchange on the hero screens.', 'Visiting horse; native information dialog with artifact icon.', 'actions artifact-*; browser S24, S33, S34; cross-process persistence.'],
+  ['Creature', 'Solid; stop beside it; declined/non-joining stacks remain solid, accepted stacks merge and charge the quoted gold.', 'Visiting horse; native gold component and Yes/No; non-joining OK is a no-combat adaptation. No Observe/Pass menu or success toast.', 'actions encounter-* including quote/legacy/full-army merge; browser S24, S27-29 accept/decline/reload/weak/gold/full errors. Original diplomacy and battle/flee are not implemented.'],
+  ['Mines: all seven types', 'Native ground shapes; claim from beside the entry; owner alone grants or revokes half-yield sharing.', 'Visiting horse; daily-yield component and native notice.', 'actions mine-*; native-body movement checks; browser S22 and S41; fractional carry and permissions survive restart.'],
+  ['Shrines: levels 1-3', 'Native one-tile ground body; stay adjacent; spellbook/Wisdom/known-spell checks.', 'Visiting horse; native shrine/spell information dialog.', 'actions shrine-*; movement; actual renderer; browser S23 compares original base pixels with the map canvas and checks learn/revisit.'],
+  ['Obelisk', 'Native one-tile ground body; visit from beside it.', 'Visiting horse; opens puzzle screen.', 'actions obelisk-*; client anchor; movement; browser S24.'],
+  ['Own / other town', 'Native 13-tile ground mask, not the old 15-tile rectangle; own gate may be occupied, body is not transit.', 'Visiting horse; town pointer when standing in own gate; opens town on arrival.', 'actions town-*; movement body/gate/legacy-save tests; client cursor tests; browser S25 clicks own town body and enters the gate only after confirmation. Other-faction town pixel matrix not established.'],
+  ['Other hero', 'Occupied tile; approach without walking through it.', 'Native meeting pointer; native owned-hero exchange or approved peaceful social meeting.', 'movement occupancy/cursor tests; browser S33 and S42; split/merge/swap, artifacts, Scholar, messages, trade and map-marker linkage.'],
+  ['Trees, rocks, mountains', 'Choose artwork whose native solid cells fit existing obstacles; preserve roads and pickups in old saves.', 'No visit pointer for an inaccessible obstacle; Fly remains the explicit transit exception.', 'movement fit/corner tests; client dirt-tree anchors; flight-cross-*; browser S18.'],
+  ['Grail site', 'A marked digging site, not an obelisk-shaped building; digging spends the remaining movement.', 'Visiting pointer; Grail notice; approved milestone adaptation.', 'actions grail-*; client cursor tests; browser S24 visits and checks the digging movement debit. Dedicated site-pixel case not established.']
+])}
+
+## Turn and movement feedback inventory
+
+Browser S26 checks that an unaffordable first step makes no move request, opens no
+popup and retains its red path; the same route can execute after the new day.
+S30 checks partial route exhaustion and continuation. S31 covers end-turn
+confirmation/cancellation, native NEWDAY/NEWWEEK graphics, three-second dismissal
+and automatic server turn events. S32 checks persisted local sleep/wake, no date
+or movement mutation on sleep, and waking on actual movement. Daily feedback uses
+a 1.5-second animation in the native info bar, not a countdown or success toast.
+The movement suite additionally verifies source terrain, diagonal rounding, army-native terrain, last-step exhaustion and ground replanning after Fly expires.
 
 ## Reproduce
 
 \`npm test\` runs deterministic actions, client/server movement and creature checks.  
-\`npm test -- --full --record\` also builds both projects, runs adventure/social/browser suites, and refreshes this file.
+\`node test\\actions.js --full --record\` also builds both projects, runs adventure/social/browser and save-migration suites, and refreshes this file.
 
 Results and individual suite logs: \`test-results\\action-audit\\results.json\` and sibling \`*.log\` files (ignored generated artifacts). The process exits nonzero for failures or unresolved gaps; a green smoke suite must not mask a red fidelity audit. Dependencies must already be restored/installed.
 
@@ -224,16 +318,20 @@ Results and individual suite logs: \`test-results\\action-audit\\results.json\` 
 ${table(['ID', 'Action', 'Rule', 'Expected / asserted behavior', 'Result', 'Failure detail'],
       cases.map(c => [c.id, c.action, c.kind, c.expected, c.status, c.detail]))}
 
-## Remaining requirements and coverage gaps
+## Original 19 requirements: evidence-driven closure
 
 These are not silently counted as passes. Requirements absent from the current contract (for example ships, underground maps, campaign play) are not added as new implementation scope.
 
 ${table(['ID', 'Action / requirement', 'Rule', 'Status', 'Evidence / limitation'],
-      gaps.map(g => [g.id, g.action, g.kind, g.status, g.detail]))}
+      gaps.map(g => [g.id, g.action, g.kind, g.status, `${g.evidence.join(', ')}. ${g.detail}`]))}
+
+## Browser execution record
+
+${table(['Evidence group', 'Actual screen assertion', 'Result'], browserCases.map(c => [c.id, c.action, c.status]))}
 
 ## Public mutation inventory
 
-Automatically extracted from \`Endpoints.cs\`; adding a route without a mapping makes the audit incomplete. GET/catalogue routes and development-only fixture endpoints are not gameplay mutations and are excluded here. Evidence is named test cases or suite IDs from the next table.
+Automatically extracted from all \`Api\\*.cs\` files; adding a route without a mapping makes the audit incomplete. GET/catalogue routes and development-only fixture endpoints are not gameplay mutations and are excluded here. Evidence is named test cases or suite IDs from the next table.
 
 ${table(['Method', 'Route', 'Evidence', 'Result'],
       endpoints.map(e => [e.method, e.route, e.evidence.join(', '), e.status]))}
@@ -252,6 +350,21 @@ Manual distribution and searchable transcription:
 \`\`\`text
 https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/297000/manuals/BONUS_Heroes_of_Might_and_Magic_III_HDEdition_OldManual1999_EN.pdf
 https://device.report/m/94ee8e7055ce6a4f1f8f920ebd8e230c1fcf319f564890831ff6c5fbbae1f9d8
+\`\`\`
+
+Primary implementation references for pointer frames/hotspots, the ADAG end cross,
+and native resource information-bar presentation (not a claim that the full VCMI
+ruleset is implemented):
+
+\`\`\`text
+https://github.com/vcmi/vcmi/blob/develop/config/cursors.json
+https://github.com/vcmi/vcmi/blob/develop/client/mapView/MapRenderer.cpp
+https://github.com/vcmi/vcmi/blob/develop/lib/mapObjects/CGResource.cpp
+https://github.com/vcmi/vcmi/blob/develop/client/adventureMap/CInfoBar.cpp
+https://github.com/vcmi/vcmi/blob/develop/client/adventureMap/AdventureMapShortcuts.cpp
+https://github.com/vcmi/vcmi/blob/develop/client/PlayerLocalState.cpp
+https://github.com/vcmi/vcmi/blob/develop/client/HeroMovementController.cpp
+https://github.com/vcmi/vcmi/blob/develop/lib/mapObjects/CGCreature.cpp
 \`\`\`
 
 The original 63-case baseline was 47 PASS / 16 FAIL. This expanded record supersedes older blanket all-green claims in the requirements matrix. The baseline identified invalid recruitment/trades, transfer mutation on rejection, invalid upgrade selectors, occupied hiring, missing overnight mana, unauthorized mine sharing, treasure double rewards, shrine Wisdom, unconsumed Grail, sand/Pathfinding costs, incomplete level advancement, inert Fly, occupied teleport landing, and finished-game economics.

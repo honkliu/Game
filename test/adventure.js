@@ -69,7 +69,7 @@ async function call(method, path, playerId, body) {
   const hero = r.body[0];
   check('hero is Christian', hero.name === 'Christian', hero.name);
   check('level 1', hero.level === 1);
-  check('movement 1500', hero.maxMovement === 1500, hero.maxMovement);
+  check('movement 1560 for the slowest speed-4 creature', hero.maxMovement === 1560, hero.maxMovement);
   check('army has 2 stacks', hero.army.filter(s => s.creature).length === 2, JSON.stringify(hero.army));
   check('tier 1 count 25', hero.army[0].creature === 'pikeman' && hero.army[0].count === 25, JSON.stringify(hero.army[0]));
   check('two skills', Object.keys(hero.skills).length === 2, JSON.stringify(hero.skills));
@@ -93,7 +93,7 @@ async function call(method, path, playerId, body) {
     r = await call('POST', `/api/heroes/${hero.id}/move`, 'alice', { path: [target] });
     check('move accepted', r.status === 200, JSON.stringify(r.body).slice(0, 200));
     check('hero moved', r.body.x === target.x && r.body.y === target.y, `${r.body.x},${r.body.y}`);
-    check('movement spent', r.body.movement < 1500, r.body.movement);
+    check('movement spent', r.body.movement < hero.movement, r.body.movement);
   }
 
   // no teleporting: every step must be adjacent
@@ -354,13 +354,15 @@ async function call(method, path, playerId, body) {
       const path = [];
       for (let k = goal; k !== me.y * W + me.x; k = prev.get(k)) path.unshift({ x: k % W, y: Math.floor(k / W) });
       r = await call('POST', `/api/heroes/${carol.id}/move`, 'carol', { path });
-      const msg = r.headers.get('x-move-message');
-      if (msg && msg.startsWith('Found the')) picked = { msg, hero: r.body };
+      const notice = JSON.parse(r.headers.get('x-move-events') ?? '[]')
+        .find(n => n.kind === 'artifact' && n.key === target.key);
+      if (r.status === 200 && notice) picked = { notice, hero: r.body };
       else await call('POST', `/api/games/${gameId}/_test/nextday`);
     }
     if (picked) {
       const art = [...Object.values(picked.hero.worn), ...picked.hero.backpack].find(a => a.key === target.key);
-      check('picking up names the artifact', art && picked.msg === `Found the ${art.name}.`, picked.msg);
+      check('picking up names the artifact', art && picked.notice.message === `You discover the ${art.name}.`
+        && picked.notice.icon === art.id && picked.notice.amount === 1, JSON.stringify(picked.notice));
       check('picked-up artifact is worn in its own slot', art && picked.hero.worn[art.slot === 'ring' ? 'ring1' : art.slot === 'misc' ? 'misc1' : art.slot]?.key === target.key,
         JSON.stringify(picked.hero.worn));
       const m = (await call('GET', `/api/games/${gameId}/map`, 'carol')).body;

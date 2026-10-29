@@ -75,6 +75,7 @@ export interface GamePlayer {
 }
 
 export interface GameDetail extends Omit<GameSummary, 'players'> {
+  endAgreement: string[];
   turnSeconds: number;
   turnLimit: number;
   turnStartedAt: string;
@@ -99,9 +100,11 @@ export interface ArtifactInfo {
 }
 
 export interface HeroDetail {
+  nativeTerrain: string | null;
   id: string;
   name: string;
   heroKey: string;
+  heroClass: string;
   faction: string;
   level: number;
   experience: number;
@@ -130,14 +133,46 @@ export interface HeroDetail {
   /** War machines bought at a Blacksmith: ballista, ammoCart, firstAidTent. */
   warMachines: string[];
   pendingEncounter: string | null;
+  encounterOffer: { creature: string; name: string; count: number; gold: number; canRecruit: boolean } | null;
+  pendingTreasure: { gold: number; experience: number; x: number; y: number } | null;
+  pendingLevel: { level: number; primary: number; choices: { key: string; level: number }[] } | null;
+  flying: boolean;
+  flightPenalty: number;
+  hasteBonus: number;
+  movementPenalty: number;
+  visions: boolean;
+  visionRadius: number;
+  doorCasts: number;
+}
+
+export interface VisionTarget {
+  kind: string; name: string; x: number; y: number; army: ArmySlot[];
+  level: number | null; canRecruit: boolean | null; gold: number | null;
+}
+
+export interface WorldView {
+  width: number;
+  height: number;
+  terrain: (string | null)[];
+  locations: { kind: string; x: number; y: number; name: string }[];
+}
+
+export interface AdventureNotice {
+  kind: 'resource' | 'experience' | 'artifact' | 'shrine' | 'mine' | 'grail' | 'message';
+  key: string;
+  amount: number;
+  message: string;
+  icon?: number | null;
 }
 
 export interface MapTile {
+  sprite?: string | null;
   terrain: string | null;
   variant: number;
   objectKind: string | null;
   objectData: string | null;
   owner: number;
+  mineShared?: boolean;
   /** False for water, rock, trees, mountains, towns, mines and monster stacks. */
   passable: boolean;
   fog: number;
@@ -222,6 +257,9 @@ export interface SpellDef {
   school: string;
   cost: number;
   description: string;
+  id: number;
+  adventure: boolean;
+  manaCosts: number[];
 }
 
 export interface CityView {
@@ -292,7 +330,7 @@ export interface BuildingDef {
 
 /** Realtime event from the SignalR hub at /hubs/game (method name "event"). */
 export type WsEventType =
-  | 'turnAdvanced' | 'heroMoved' | 'encounter' | 'message' | 'trade' | 'project'
+  | 'turnAdvanced' | 'turnEnded' | 'heroMoved' | 'encounter' | 'message' | 'trade' | 'project' | 'agreement'
   | 'annotation' | 'wall' | 'tower';
 
 export interface WsEvent {

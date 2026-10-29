@@ -1,7 +1,8 @@
 namespace CityOfTowers.Domain;
 
 /// <summary>Hero roster per faction. Might heroes favour Attack/Defense; magic heroes Power/Knowledge.</summary>
-public record HeroDef(string Key, string Name, string Faction, bool Might, int Attack, int Defense, int Power, int Knowledge, string[] Skills);
+public record HeroDef(string Key, string Name, string Faction, bool Might, int Attack, int Defense, int Power, int Knowledge, string[] Skills,
+    IReadOnlyDictionary<string, int>? InitialSkills = null, string[]? StartingSpells = null);
 
 public static class Heroes
 {
@@ -62,6 +63,19 @@ public static class Heroes
         ["ciele"] = new("ciele", "Ciele", "conflux", false, 1, 1, 2, 2, ["wisdom", "water"])
     };
 
+    static Heroes()
+    {
+        string[] might = ["knight", "ranger", "alchemist", "demoniac", "deathknight", "overlord", "barbarian", "beastmaster", "planeswalker"];
+        foreach (var (key, def) in All.ToArray())
+        {
+            if (!NativeRules.Data.Heroes.TryGetValue(NativeRules.HeroKey(key), out var native)) continue;
+            var profile = NativeRules.Classes[native.Class.ToLowerInvariant()];
+            All[key] = def with { Name = native.Name, Faction = native.Faction, Might = might.Contains(native.Class.ToLowerInvariant()),
+                Attack = profile.Initial[0], Defense = profile.Initial[1], Power = profile.Initial[2], Knowledge = profile.Initial[3],
+                Skills = native.Skills.Keys.ToArray(), InitialSkills = native.Skills, StartingSpells = native.Spells };
+        }
+    }
+
     public static HeroDef[] ForFaction(string faction) =>
         All.Values.Where(h => h.Faction == faction).ToArray();
 }
@@ -74,7 +88,7 @@ public static class Skills
         "pathfinding", "archery", "logistics", "scouting", "diplomacy", "navigation",
         "leadership", "luck", "ballistics", "eagleEye", "estates", "wisdom",
         "mysticism", "intelligence", "sorcery", "resistance", "firstAid", "artillery",
-        "learning", "tactics", "armorer", "air", "earth", "fire", "water"
+        "learning", "tactics", "armorer", "air", "earth", "fire", "water", "scholar", "offence", "necromancy"
     ];
 
     public static readonly string[] Names =
@@ -82,7 +96,7 @@ public static class Skills
         "Pathfinding", "Archery", "Logistics", "Scouting", "Diplomacy", "Navigation",
         "Leadership", "Luck", "Ballistics", "Eagle Eye", "Estates", "Wisdom",
         "Mysticism", "Intelligence", "Sorcery", "Resistance", "First Aid", "Artillery",
-        "Learning", "Tactics", "Armorer", "Air Magic", "Earth Magic", "Fire Magic", "Water Magic"
+        "Learning", "Tactics", "Armorer", "Air Magic", "Earth Magic", "Fire Magic", "Water Magic", "Scholar", "Offense", "Necromancy"
     ];
 
     public static string Name(string key)
@@ -92,22 +106,26 @@ public static class Skills
     }
 
     public static readonly string[] Levels = ["None", "Basic", "Advanced", "Expert"];
+    public static readonly string[] Adventure =
+        ["pathfinding", "logistics", "scouting", "wisdom", "mysticism", "intelligence", "estates", "learning", "scholar", "air", "earth", "water"];
 }
 
 /// <summary>Experience thresholds (HoMM3 table).</summary>
 public static class Experience
 {
-    private static readonly int[] Thresholds =
-    [
-        0, 1000, 2000, 3200, 4600, 6200, 8000, 10000, 12200, 14700,
-        17500, 20600, 24320, 28784, 34000, 40000, 47000, 55000, 64000, 74000,
-        85000, 97000, 110000, 124000, 139000, 155000, 172000, 190000, 209000, 229000,
-        250000, 272000, 295000, 319000, 344000, 370000, 397000, 425000, 454000, 484000,
-        515000, 547000, 580000, 614000, 649000, 685000, 722000, 760000, 799000, 839000,
-        880000, 922000, 965000, 1009000, 1054000, 1100000, 1147000, 1195000, 1244000, 1294000,
-        1345000, 1397000, 1450000, 1504000, 1559000, 1615000, 1672000, 1730000, 1789000, 1849000,
-        1910000, 1972000, 2035000, 2099000, 2164000
-    ];
+    private static readonly int[] Thresholds = BuildThresholds();
+
+    private static int[] BuildThresholds()
+    {
+        var result = new List<int> { 0, 1000, 2000, 3200, 4600, 6200, 8000, 10000, 12200, 14700, 17500, 20600, 24320, 28784, 34140 };
+        while (true)
+        {
+            var difference = result[^1] - result[^2];
+            var next = (long)result[^1] + difference + difference / 5;
+            if (next > int.MaxValue) return result.ToArray();
+            result.Add((int)next);
+        }
+    }
 
     public static int LevelFor(int xp)
     {
@@ -121,7 +139,7 @@ public static class Experience
     }
 
     public static int NextThreshold(int level) =>
-        level < Thresholds.Length ? Thresholds[level] : Thresholds[^1];
+        level < Thresholds.Length ? Thresholds[level] : int.MaxValue;
 }
 
 /// <summary>Terrain types and their movement costs.</summary>
@@ -130,7 +148,7 @@ public static class Terrain
     public static readonly string[] Types =
         ["dirt", "sand", "grass", "snow", "swamp", "rough", "subterranean", "lava", "water", "rock"];
 
-    public static int MoveCost(string t, int pathfinding = 0)
+    public static int MoveCost(string t, int pathfinding = 0, string? nativeTerrain = null, bool diagonal = false)
     {
         var cost = t switch
         {
@@ -140,7 +158,16 @@ public static class Terrain
             "water" or "rock" => 0,
             _ => 100
         };
-        return cost == 0 ? 0 : Math.Max(100, cost - 25 * Math.Clamp(pathfinding, 0, 3));
+        if (cost == 0) return 0;
+        cost = t == nativeTerrain ? 100 : Math.Max(100, cost - 25 * Math.Clamp(pathfinding, 0, 3));
+        return diagonal ? (int)(cost * Math.Sqrt(2)) : cost;
+    }
+
+    public static int StepCost(string source, int pathfinding, string? nativeTerrain, bool diagonal, int remaining)
+    {
+        var straight = MoveCost(source, pathfinding, nativeTerrain);
+        var cost = MoveCost(source, pathfinding, nativeTerrain, diagonal);
+        return diagonal && remaining >= straight && remaining < cost ? remaining : cost;
     }
 
     public static bool Passable(string t) => t != "water" && t != "rock";

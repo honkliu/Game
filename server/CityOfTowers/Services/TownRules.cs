@@ -61,9 +61,9 @@ public static class TownRules
         if (!HasGear(hero, Spellbook)) return [];
         var wisdom = ParseSkills(hero.SkillsJson).TryGetValue("wisdom", out var w) ? w : 0;
         var max = Spells.MaxLearnable(wisdom);
-        var known = ParseStringArray(hero.SpellsJson).ToList();
+        var known = ParseStringArray(hero.SpellsJson).Select(Spells.CanonicalKey).Distinct().ToList();
         var learned = new List<string>();
-        foreach (var key in ParseStringArray(town.MageGuildJson))
+        foreach (var key in ParseStringArray(town.MageGuildJson).Select(Spells.CanonicalKey))
         {
             if (known.Contains(key) || !Spells.All.TryGetValue(key, out var s) || s.Level > max) continue;
             known.Add(key);
@@ -79,7 +79,7 @@ public static class TownRules
         if (!buildingKey.StartsWith("mageGuild")) return;
         var level = int.TryParse(buildingKey.AsSpan("mageGuild".Length), out var lv) ? lv : 1;
         var known = ParseStringArray(town.MageGuildJson).ToList();
-        foreach (var spell in Spells.ForGuildLevel(level, Random.Shared))
+        foreach (var spell in Spells.ForGuildLevel(level, Random.Shared, town.Faction))
             if (!known.Contains(spell)) known.Add(spell);
         town.MageGuildJson = JsonSerializer.Serialize(known, Json);
     }
