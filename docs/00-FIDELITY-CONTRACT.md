@@ -47,7 +47,7 @@ in the code but not in this table is a defect.
 | Hero-vs-hero battles | Meeting another hero opens **conversation and voluntary trade** instead |
 | Creature battles | Wandering monsters are **impassable obstacles**; they never move or fight |
 | Sieges | Towns have no walls to breach; entering a town is always peaceful |
-| Town capture | You cannot take another player's town |
+| Town capture | You cannot take another player's town. An unowned (neutral) town is claimed by the first hero who enters it, as in HoMM3 |
 | Stealing | You cannot take another player's resources or creatures |
 | Combat spells | Spells are utility only (see §2.3) |
 
@@ -59,9 +59,9 @@ in the code but not in this table is a defect.
 | **Hero battle** | **Meeting another hero** opens a dialogue: exchange messages, trade resources voluntarily, or share map knowledge. |
 | **Creature army** | **Expedition strength.** Your army's total AI value is your *expedition strength*, which gates what you can safely explore (deep terrain, guarded regions) and what you can recruit. Creatures are not combat units; they are capability. |
 | **Neutral mines** | **First discovery claims a mine.** Once claimed, it stays claimed. There is no hostile recapture. A mine may be **shared** if the owner grants access (see §4). |
-| **Obelisk** | **Puzzle map + social clues.** Visiting reveals a fragment of the puzzle map. Players post clues and theories at the Obelisk. |
+| **Obelisk** | **Puzzle map + social clues.** Walking up to an obelisk reads it (once per player per obelisk). The obelisk screen is the original HoMM3 puzzle map: each obelisk read uncovers its share of the 48 pieces of your faction's puzzle, hiding the terrain around the X. The same screen is a board where players post clues and theories for each other. There is no Visit button or riddle. |
 | **Grail** | **Digging.** After all fragments, the Grail tile is revealed. A hero must spend a day digging there. |
-| **Town capture** | **Visiting.** You may enter any town to read its Tower and leave messages. You may not build there. |
+| **Town capture** | **Visiting.** You may enter another player's town to read its Tower and leave messages. You may not build there or take it. Neutral towns on the map have no owner; the first hero to enter one claims it for good. |
 | **Combat spells** | **Utility spells only:** View Air, View Earth, Visions, Town Portal, Dimension Door, Fly, Haste (movement), Cure (removes negative effects). Original combat spell metadata is retained, but combat casts are rejected before charging mana. |
 
 **Approved adventure spell adaptations:** Haste adds 300 movement for the current
@@ -169,8 +169,8 @@ cooperative objective that replaces alliance warfare.
 
 | Step | Detail |
 | --- | --- |
-| 1 | Visit the Obelisk. Each visit reveals one of 10 puzzle-map fragments |
-| 2 | After 10 fragments, the Grail tile is revealed on your map |
+| 1 | Walk up to obelisks. Each one read uncovers part of the puzzle map |
+| 2 | When every obelisk on the map has been read, the puzzle is complete and the Grail tile is revealed |
 | 3 | Walk a hero to the Grail tile and **dig** (spends the rest of that day's movement) |
 | 4 | Digging awards the **Grail** |
 | 5 | The Grail unlocks the **Grail Structure** in your town |

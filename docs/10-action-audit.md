@@ -1,9 +1,9 @@
 # Action audit: checklist and latest evidence
 
-Generated: 2026-10-29T17:22:00.131Z  
-Revision: `d2e6689059924cab8187fb84156b6f473c5291f5` (worktree changes listed below)  
+Generated: 2026-10-29T17:29:33.094Z  
+Revision: `2a0160a10a55bd2a35da7a549e4a7e23bc0761ed` (worktree changes listed below)  
 Command: `node test\actions.js --full --record`  
-Overall: **INCOMPLETE — the recorded peaceful-ruleset checklist, not a complete Heroes III implementation.**
+Overall: **PASS — the recorded peaceful-ruleset checklist, not a complete Heroes III implementation.**
 
 ## Scope and ruleset
 
@@ -356,7 +356,7 @@ Automatically extracted from all `Api\*.cs` files; adding a route without a mapp
 
 | Method | Route | Evidence | Result |
 | --- | --- | --- | --- |
-| POST | /api/games | adventure | FAIL |
+| POST | /api/games | adventure | PASS |
 | POST | /api/games/{id:guid}/join | game-join | PASS |
 | POST | /api/heroes/{heroId:guid}/move | movement, movement-pathfinding, resource-gold, shrine-learn, obelisk-visit, town-claim-neutral | PASS |
 | POST | /api/heroes/{heroId:guid}/treasure | treasure-gold, treasure-experience, treasure-leave, treasure-concurrent | PASS |
@@ -373,7 +373,7 @@ Automatically extracted from all `Api\*.cs` files; adding a route without a mapp
 | POST | /api/towns/{townId:guid}/transform | transform-stack | PASS |
 | POST | /api/heroes/{heroId:guid}/cast | spell-guards, spell-flight, spell-haste, spell-door-occupied, spell-door-land | PASS |
 | POST | /api/games/{id:guid}/endturn | dwelling-growth, guild-rest, town-income, game-finished | PASS |
-| POST | /api/games/{id:guid}/obelisk/message | obelisk-visit, adventure | FAIL |
+| POST | /api/games/{id:guid}/obelisk/message | obelisk-visit, adventure | PASS |
 | POST | /api/heroes/{heroId:guid}/encounter | encounter-observe, encounter-recruit, encounter-pass, encounter-strength, encounter-invalid | PASS |
 | POST | /api/games/{id:guid}/messages | social | PASS |
 | POST | /api/games/{id:guid}/trades | social | PASS |
@@ -396,17 +396,17 @@ Automatically extracted from all `Api\*.cs` files; adding a route without a mapp
 
 | Suite | Result | Duration (ms) | Log / detail |
 | --- | --- | --- | --- |
-| actions | PASS | 13620 | test-results/action-audit/actions.log |
-| movement | PASS | 11611 | test-results/action-audit/movement.log |
-| creatures | PASS | 77 | test-results/action-audit/creatures.log |
-| creature-sanity | PASS | 72 | test-results/action-audit/creature-sanity.log |
-| server-build | PASS | 1807 | test-results/action-audit/server-build.log |
-| client-build | PASS | 7696 | test-results/action-audit/client-build.log |
+| actions | PASS | 15211 | test-results/action-audit/actions.log |
+| movement | PASS | 11679 | test-results/action-audit/movement.log |
+| creatures | PASS | 80 | test-results/action-audit/creatures.log |
+| creature-sanity | PASS | 80 | test-results/action-audit/creature-sanity.log |
+| server-build | PASS | 1782 | test-results/action-audit/server-build.log |
+| client-build | PASS | 8500 | test-results/action-audit/client-build.log |
 | isolated-server | PASS |  | Ephemeral port, temporary SQLite database, readiness verified. |
-| adventure | FAIL | 74 | test-results/action-audit/adventure.log |
-| social | PASS | 1207 | test-results/action-audit/social.log |
-| browser | PASS | 127672 | test-results/action-audit/browser.log |
-| save-migration | PASS | 13461 | test-results/action-audit/save-migration.log |
+| adventure | PASS | 1597 | test-results/action-audit/adventure.log |
+| social | PASS | 616 | test-results/action-audit/social.log |
+| browser | PASS | 126278 | test-results/action-audit/browser.log |
+| save-migration | PASS | 13545 | test-results/action-audit/save-migration.log |
 
 ## References and limits
 
@@ -439,22 +439,5 @@ The original 63-case baseline was 47 PASS / 16 FAIL. This expanded record supers
 ## Audited worktree
 
 ```text
-M client/src/api.ts
- M client/src/i18n.ts
- M client/src/types.ts
- M client/src/views/AdventureMap.tsx
- M client/src/views/Obelisk.tsx
- M client/src/views/Social.tsx
- M docs/08-requirements-matrix.md
- M e2e/game.spec.ts
- M server/CityOfTowers/Api/Endpoints.cs
- M server/CityOfTowers/Domain/AdventureMap.cs
- M server/CityOfTowers/Domain/Entities.cs
- M server/CityOfTowers/Program.cs
- M server/CityOfTowers/Services/GameService.cs
- M test/MovementChecks/ActionChecks.cs
- M test/MovementChecks/Program.cs
- M test/actions.js
- M test/adventure.js
-?? client/src/h3/puzzle-map.json
+M docs/10-action-audit.md
 ```
