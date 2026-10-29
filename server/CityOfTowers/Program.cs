@@ -50,6 +50,8 @@ using (var scope = app.Services.CreateScope())
     var playerColumns = db.Database.SqlQueryRaw<string>("SELECT name AS Value FROM pragma_table_info('Players')").ToList();
     if (!playerColumns.Contains("MineRemaindersJson"))
         db.Database.ExecuteSqlRaw("ALTER TABLE Players ADD COLUMN MineRemaindersJson TEXT NOT NULL DEFAULT '{{}}';");
+    if (!playerColumns.Contains("ObelisksVisitedJson"))
+        db.Database.ExecuteSqlRaw("ALTER TABLE Players ADD COLUMN ObelisksVisitedJson TEXT NOT NULL DEFAULT '[]';");
 
     // Abandoned games accumulate: each holds a full map plus heroes, towns and messages.
     // Drop anything untouched for a day, then cap the total so the file cannot grow without bound.
@@ -72,6 +74,9 @@ using (var scope = app.Services.CreateScope())
         db.SaveChanges();
         db.Database.ExecuteSqlRaw("VACUUM;");
     }
+
+    scope.ServiceProvider.GetRequiredService<GameService>().EnsureNeutralTownsAsync().GetAwaiter().GetResult();
+    scope.ServiceProvider.GetRequiredService<GameService>().EnsureStartObelisksAsync().GetAwaiter().GetResult();
 }
 
 app.UseDefaultFiles();

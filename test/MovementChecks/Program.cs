@@ -213,6 +213,57 @@ foreach (var (kind, terrain) in new[] { ("tree", "grass"), ("tree", "dirt"), ("t
         && loaded.At(2, 3).Passable && loaded.At(2, 3).ObjectKind == "resource" && loaded.At(4, 3).Passable);
 }
 
+for (var seed = 0; seed < 25; seed++)
+{
+    const int size = 72;
+    var map = MapGenerator.Generate(size, size, 3, seed);
+    var reachable = true;
+    foreach (var (sx, sy) in new[] { (8, 8), (size - 9, 8), (8, size - 9) })
+    {
+        map.At(sx, sy).ObjectKind = "town"; map.At(sx, sy).Passable = false;
+        Footprint.Stamp(map, sx, sy, "town", null);
+        var seen = Enumerable.Range(0, size * size).Select(i => (x: i % size, y: i / size))
+            .Where(p => map.At(p.x, p.y).ObjectKind == "obelisk" && (p.x - sx) * (p.x - sx) + (p.y - sy) * (p.y - sy) <= 25);
+        reachable &= seen.Any(p => Pathfinder.FindPath(map, sx, sy + 1, p.x, p.y) != null);
+    }
+    if (!reachable) { Check($"seed {seed}: every start sees a reachable obelisk on day one", false); break; }
+    if (seed == 24) Check("every generated start sees a reachable obelisk on day one", true);
+}
+
+{
+    await using var f = await Fixture.Create();
+    f.Map.At(f.Town.X, f.Town.Y).ObjectKind = "town";
+    await f.SaveMap();
+    var first = await f.Service.EnsureStartObelisksAsync();
+    var second = await f.Service.EnsureStartObelisksAsync();
+    var loaded = await f.Service.LoadMapAsync(f.Game);
+    Check("old saves gain one obelisk inside each town's sight, once",
+        first >= 1 && second == 0 && loaded.Tiles.Count(t => t.ObjectKind == "obelisk") == first);
+}
+
+foreach (var size in new[] { 36, 72, 144 })
+{
+    var ok = true;
+    for (var seed = 0; seed < 10 && ok; seed++)
+    {
+        var map = MapGenerator.Generate(size, size, 3, seed);
+        var starts = new[] { (8, 8), (size - 9, 8), (8, size - 9) }.Select(s =>
+        {
+            map.At(s.Item1, s.Item2).ObjectKind = "town"; map.At(s.Item1, s.Item2).Passable = false;
+            Footprint.Stamp(map, s.Item1, s.Item2, "town", null);
+            map.At(s.Item1, s.Item2 + 1).ObjectKind = null; map.At(s.Item1, s.Item2 + 1).Passable = true;
+            return new Town { PlayerId = Guid.NewGuid(), X = s.Item1, Y = s.Item2 };
+        }).ToList();
+        var neutral = GameService.PlaceNeutralTowns(Guid.NewGuid(), map, starts, new HashSet<(int x, int y)>(),
+            GameService.NeutralTownCount(size), new Random(seed));
+        ok = neutral.Count >= 1 && neutral.All(t => t.PlayerId == Guid.Empty && map.At(t.X, t.Y).ObjectKind == "town"
+            && map.At(t.X, t.Y).Owner == -1 && starts.All(s => Math.Max(Math.Abs(s.X - t.X), Math.Abs(s.Y - t.Y)) >= 6)
+            && starts.Any(s => Pathfinder.FindPath(map, s.X, s.Y + 1, t.X, t.Y + 1) != null));
+        if (!ok) Check($"{size}x{size} seed {seed}: an unowned, reachable town is placed", false);
+    }
+    if (ok) Check($"{size}x{size} maps place unowned towns away from starts and reachable from them", true);
+}
+
 Console.WriteLine($"{checks - failed}/{checks} movement checks passed");
 return failed == 0 ? 0 : 1;
 

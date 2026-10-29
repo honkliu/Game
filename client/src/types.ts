@@ -183,7 +183,7 @@ export interface MapData {
   height: number;
   tiles: MapTile[];
   heroes: (Pick<HeroDetail, 'id' | 'name' | 'faction' | 'x' | 'y' | 'level' | 'movement' | 'maxMovement'> & { isMine: boolean })[];
-  towns: { id: string; name: string; faction: string; x: number; y: number; isMine: boolean }[];
+  towns: { id: string; name: string; faction: string; x: number; y: number; isMine: boolean; neutral?: boolean }[];
 }
 
 export interface TownDetail {
@@ -312,11 +312,14 @@ export interface TowerMessage {
 }
 
 export interface ObeliskState {
-  visits: number;
+  visited: number;
   total: number;
-  fragments: string[];
-  wrongAnswers: number;
-  messages: { id: string; author: string; body: string; createdAt: string }[];
+  complete: boolean;
+  faction: string;
+  grailFound: boolean;
+  /** terrain-only window centred on the Grail; grailX/grailY are local tile coordinates */
+  puzzle: { width: number; height: number; grailX: number; grailY: number; tiles: MapTile[] };
+  messages: { id: string; author: string; mine: boolean; body: string; createdAt: string }[];
 }
 
 export interface BuildingDef {

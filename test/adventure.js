@@ -375,9 +375,26 @@ async function call(method, path, playerId, body) {
   // ---------------------------------------------------------------- obelisk
   console.log('\nObelisk');
   r = await call('GET', `/api/games/${gameId}/obelisk`, 'alice');
-  check('obelisk state', r.status === 200 && r.body.total === 10, JSON.stringify(r.body).slice(0, 150));
+  check('obelisk board shows the puzzle map', r.status === 200 && r.body.total >= 3 && r.body.visited === 0
+    && r.body.puzzle.tiles.length === r.body.puzzle.width * r.body.puzzle.height, JSON.stringify(r.body).slice(0, 150));
+  r = await call('POST', `/api/games/${gameId}/obelisk/message`, 'alice', { body: 'Look south of the lake.' });
+  check('leave a note at the obelisk', r.status === 200, JSON.stringify(r.body));
+  r = await call('GET', `/api/games/${gameId}/obelisk`, 'bob');
+  check('others read the note with its author', r.body.messages.some(m => m.body === 'Look south of the lake.' && /^Alice/.test(m.author) && !m.mine),
+    JSON.stringify(r.body.messages));
   r = await call('POST', `/api/games/${gameId}/obelisk/visit`, 'alice');
-  check('visit reveals fragment', r.status === 200 && r.body.visits === 1, JSON.stringify(r.body).slice(0, 150));
+  check('obelisks are read by walking up, not by a Visit button', r.status === 404 || r.status === 405, String(r.status));
+
+  // ---------------------------------------------------------------- neutral towns
+  console.log('\nNeutral towns');
+  r = await call('POST', `/api/games/${gameId}/_test/explore`, 'alice');
+  const revealed = (await call('GET', `/api/games/${gameId}/map`, 'alice')).body;
+  const neutral = revealed.towns.find(t => t.neutral);
+  check('new maps have an unowned town', !!neutral, JSON.stringify(revealed.towns));
+  if (neutral) {
+    r = await call('GET', `/api/towns/${neutral.id}`, 'alice');
+    check('an unowned town reads as Neutral', r.status === 200 && r.body.ownerName === 'Neutral' && !r.body.isOwner, JSON.stringify(r.body).slice(0, 150));
+  }
 
   // ---------------------------------------------------------------- summary
   console.log('\n' + '='.repeat(60));

@@ -325,6 +325,11 @@ public class GameService
             player.FogJson = SerializeFog(fog);
         }
 
+        var playerTowns = _db.Towns.Local.Where(t => t.GameId == game.Id).ToList();
+        var avoidTiles = new HashSet<(int x, int y)> { (game.GrailX, game.GrailY) };
+        foreach (var t in playerTowns) avoidTiles.Add((t.X, t.Y + 1));
+        _db.Towns.AddRange(PlaceNeutralTowns(game.Id, map, playerTowns, avoidTiles, NeutralTownCount(mapSize), rng));
+
         game.MapJson = JsonSerializer.Serialize(map, Json);
         _db.SharedProjects.AddRange(SharedProjectCatalog.Seed(game.Id));
         await _db.SaveChangesAsync();
@@ -365,6 +370,163 @@ public class GameService
     {
         game.MapJson = JsonSerializer.Serialize(map, Json);
         await _db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Saves from before multiple obelisks: add one inside each town's sight when none is visible
+    /// there, avoiding tiles where heroes stand. Idempotent.
+    /// </summary>
+    public async Task<int> EnsureStartObelisksAsync()
+    {
+        var added = 0;
+        foreach (var game in await _db.Games.Where(g => g.State == GameState.InProgress).ToListAsync())
+        {
+            var map = JsonSerializer.Deserialize<AdventureMap>(game.MapJson, Json);
+            if (map == null || map.Tiles.Count != map.Width * map.Height) continue;
+            var towns = await _db.Towns.Where(t => t.GameId == game.Id && t.PlayerId != Guid.Empty).ToListAsync();
+            var heroTiles = (await _db.Heroes.Where(h => h.GameId == game.Id).Select(h => new { h.X, h.Y }).ToListAsync())
+                .Select(h => (h.X, h.Y)).ToHashSet();
+            var changed = false;
+            foreach (var town in towns)
+            {
+                var visible = false;
+                for (var y = town.Y - TownSight; y <= town.Y + TownSight && !visible; y++)
+                for (var x = town.X - TownSight; x <= town.X + TownSight && !visible; x++)
+                    visible = map.InBounds(x, y) && map.At(x, y).ObjectKind == "obelisk"
+                        && (x - town.X) * (x - town.X) + (y - town.Y) * (y - town.Y) <= TownSight * TownSight;
+                if (visible || MapGenerator.PlaceStartObelisk(map, town.X, town.Y, heroTiles) == null) continue;
+                changed = true;
+                added++;
+            }
+            if (changed) game.MapJson = JsonSerializer.Serialize(map, Json);
+        }
+        await _db.SaveChangesAsync();
+        return added;
+    }
+
+    // ---------------------------------------------------------------- neutral towns
+    // original HoMM3 town names (townname.txt) for unowned towns
+    private static readonly Dictionary<string, string[]> NeutralNames = new()
+    {
+        ["castle"] = ["Castellatus", "Cornerstone", "Kanan", "Highcastle", "Whitemoon", "Transom", "Middleheim", "Brettonia"],
+        ["rampart"] = ["Wise Oak", "Forest", "Fortune Keep", "Still Water", "Elfwind", "Serenity", "Gladeroot", "Rainhaven"],
+        ["necropolis"] = ["Haunt's Wind", "Cessacioun", "Agony", "Sanctum", "Terminus", "Blackquarter", "Death's Gate", "Grave Raven"]
+    };
+
+    public static int NeutralTownCount(int mapSize) => Math.Max(1, mapSize / 30);
+
+    /// <summary>
+    /// Places unowned towns on open ground, away from other towns and reachable from the first start.
+    /// The first hero to enter one claims it.
+    /// </summary>
+    public static List<Town> PlaceNeutralTowns(Guid gameId, AdventureMap map, IReadOnlyCollection<Town> existing,
+        ISet<(int x, int y)> avoid, int count, Random rng)
+    {
+        var placed = new List<Town>();
+        var all = existing.ToList();
+        var starts = all.Where(t => t.PlayerId != Guid.Empty).ToList();
+        // small maps are crowded: shrink the gap to other towns, then let the walls cover scenery
+        foreach (var (gap, overScenery) in new[] { (10, false), (8, false), (10, true), (8, true), (6, true) })
+        for (var attempt = 0; attempt < 4000 && placed.Count < count; attempt++)
+        {
+            var x = rng.Next(3, map.Width - 3);
+            var y = rng.Next(3, map.Height - 4);
+            if (all.Any(t => Math.Max(Math.Abs(t.X - x), Math.Abs(t.Y - y)) < gap)) continue;
+            if (avoid.Any(a => a.x >= x - 5 && a.x <= x + 2 && a.y >= y - 4 && a.y <= y + 2)) continue;
+            if (!map.At(x, y).Passable || map.At(x, y).ObjectKind != null) continue;
+            if (!(overScenery ? FitsOverScenery(map, x, y) : Footprint.Fits(map, x, y, "town", null))) continue;
+            if (starts.Count > 0 && !starts.Any(s => Pathfinder.FindPath(map, s.X, s.Y + 1, x, y + 1) != null)) continue;
+            if (!StampIfStillReachable(map, x, y, starts)) continue;
+
+            var faction = TownBuildings.Factions[rng.Next(TownBuildings.Factions.Length)];
+            var used = all.Select(t => t.Name).ToHashSet();
+            var name = NeutralNames[faction].Where(n => !used.Contains(n)).DefaultIfEmpty($"Outpost {placed.Count + 1}")
+                .ElementAt(0);
+            string[] buildings = ["villageHall", "fort", "dwelling1"];
+            var town = new Town
+            {
+                GameId = gameId,
+                PlayerId = Guid.Empty,
+                Name = name,
+                Faction = faction,
+                X = x,
+                Y = y,
+                BuildingsJson = JsonSerializer.Serialize(buildings, Json),
+                AvailableJson = JsonSerializer.Serialize(new Dictionary<string, int>
+                {
+                    ["1"] = TownBuildings.WeeklyGrowth(faction, buildings, 1)
+                }, Json),
+                GarrisonJson = SerializeArmy(Enumerable.Range(0, 7).Select(_ => new ArmySlot(null, 0)).ToArray()),
+                TavernJson = "[]",
+                MageGuildJson = "[]"
+            };
+            var tile = map.At(x, y);
+            tile.ObjectData = town.Id.ToString();
+            placed.Add(town);
+            all.Add(town);
+        }
+        return placed;
+    }
+
+    /// <summary>
+    /// Stamps a neutral town at (x, y) unless its walls would cut its gate off from every start
+    /// or cut the starts off from each other; in that case the map is left untouched.
+    /// </summary>
+    private static bool StampIfStillReachable(AdventureMap map, int x, int y, List<Town> starts)
+    {
+        var cells = Footprint.Offsets("town", null).Append((0, 0))
+            .Select(o => (x: x + o.Item1, y: y + o.Item2)).Where(p => map.InBounds(p.x, p.y)).ToList();
+        var saved = cells.Select(p => map.At(p.x, p.y)).Select(t => (t.ObjectKind, t.ObjectData, t.Owner, t.Passable)).ToList();
+        bool Reach((int x, int y) a, (int x, int y) b) => Pathfinder.FindPath(map, a.x, a.y, b.x, b.y) != null;
+        var gates = starts.Select(s => (s.X, s.Y + 1)).ToList();
+        var linked = gates.Skip(1).Select(g => Reach(gates[0], g)).ToList();
+
+        var tile = map.At(x, y);
+        tile.ObjectKind = "town";
+        tile.Owner = -1;
+        tile.Passable = false;
+        Footprint.Stamp(map, x, y, "town", null);
+        var ok = gates.Count == 0
+            || (gates.Any(g => Reach(g, (x, y + 1))) && gates.Skip(1).Select(g => Reach(gates[0], g)).SequenceEqual(linked));
+        if (ok) return true;
+        for (var i = 0; i < cells.Count; i++)
+        {
+            var t = map.At(cells[i].x, cells[i].y);
+            (t.ObjectKind, t.ObjectData, t.Owner, t.Passable) = saved[i];
+        }
+        return false;
+    }
+
+    private static bool FitsOverScenery(AdventureMap map, int x, int y)
+    {
+        if (!map.InBounds(x, y + 1) || !map.At(x, y + 1).Passable || map.At(x, y + 1).ObjectKind != null) return false;
+        return Footprint.Offsets("town", null).All(o =>
+            map.InBounds(x + o.dx, y + o.dy)
+            && (map.At(x + o.dx, y + o.dy) is var t && (t.ObjectKind is "tree" or "rock" or "mountain"
+                || (t.ObjectKind == null && t.Passable))));
+    }
+
+    /// <summary>Startup migration: games created before neutral towns existed get them now.</summary>
+    public async Task<int> EnsureNeutralTownsAsync()
+    {
+        var added = 0;
+        foreach (var game in await _db.Games.Where(g => g.State == GameState.InProgress).ToListAsync())
+        {
+            var towns = await _db.Towns.Where(t => t.GameId == game.Id).ToListAsync();
+            if (towns.Count > Seeded.Players.Length) continue;
+            var map = JsonSerializer.Deserialize<AdventureMap>(game.MapJson, Json);
+            if (map == null || map.Tiles.Count != map.Width * map.Height) continue;
+            var avoid = (await _db.Heroes.Where(h => h.GameId == game.Id).Select(h => new { h.X, h.Y }).ToListAsync())
+                .Select(h => (h.X, h.Y)).ToHashSet();
+            if (game.GrailX >= 0) avoid.Add((game.GrailX, game.GrailY));
+            var placed = PlaceNeutralTowns(game.Id, map, towns, avoid, NeutralTownCount(map.Width), new Random(game.Id.GetHashCode()));
+            if (placed.Count == 0) continue;
+            _db.Towns.AddRange(placed);
+            game.MapJson = JsonSerializer.Serialize(map, Json);
+            added += placed.Count;
+        }
+        await _db.SaveChangesAsync();
+        return added;
     }
 
     // ---------------------------------------------------------------- movement
@@ -452,10 +614,18 @@ public class GameService
                     var townId = Guid.TryParse(tile.ObjectData, out var tid) ? tid : (Guid?)null;
                     var town = townId == null ? null : await _db.Towns.FirstOrDefaultAsync(t => t.Id == townId);
                     var townOwner = town == null ? null : await _db.Players.FirstOrDefaultAsync(p => p.Id == town.PlayerId);
-                    if (town != null && townOwner != null && townOwner.Faction == player.Faction)
+                    // an unowned town is claimed by the first hero to enter it; another player's town
+                    // is only visited, never taken
+                    var claim = town != null && town.PlayerId == Guid.Empty;
+                    if (town != null && (claim || townOwner != null && townOwner.Faction == player.Faction))
                     {
                         // own town: walk onto the tile so the hero is visibly inside
                         if (hero.Movement < cost) { blocked = "Not enough movement left today."; break; }
+                        if (claim)
+                        {
+                            town.PlayerId = player.Id;
+                            tile.Owner = Array.FindIndex(Seeded.Players, s => s.Faction == player.Faction);
+                        }
                         hero.Movement -= cost;
                         hero.X = x;
                         hero.Y = y;
@@ -496,7 +666,8 @@ public class GameService
         {
             var fog = ParseFog(player.FogJson, map.Width * map.Height);
             var heroes = await _db.Heroes.Where(h => h.PlayerId == player.Id).ToListAsync();
-            var ownTowns = await _db.Towns.Where(t => t.PlayerId == player.Id).ToListAsync();
+            var ownTowns = (await _db.Towns.Where(t => t.PlayerId == player.Id).ToListAsync())
+                .Union(_db.Towns.Local.Where(t => t.PlayerId == player.Id)).ToList();
             RecomputeFog(fog, map.Width, map.Height, heroes, ownTowns);
             player.FogJson = SerializeFog(fog);
             await SaveMapAsync(game, map);
@@ -623,9 +794,10 @@ public class GameService
             }
             case "obelisk":
             {
-                // walking up opens the Obelisk; its Visit action (VisitObeliskAsync) reveals the
-                // next fragment, so a walk-up and a visit never count twice
-                return (true, (string?)"obelisk:open");
+                // reading the obelisk is the visit: the first time uncovers part of the puzzle map,
+                // and the client opens the obelisk board
+                var fresh = RecordObeliskVisit(game, map, player, tx, ty);
+                return (true, (string?)(fresh ? "obelisk:open:new" : "obelisk:open"));
             }
             case "grail":
             {
@@ -952,65 +1124,35 @@ public class GameService
     }
 
     // ---------------------------------------------------------------- obelisk
-    public async Task<(int visits, string[] fragments, string? error)> VisitObeliskAsync(Guid gameId, string playerId)
+    public static int ObeliskTotal(AdventureMap map) => map.Tiles.Count(t => t.ObjectKind == "obelisk");
+
+    public static HashSet<string> ParseVisitedObelisks(string json) => ParseStringArray(json).ToHashSet();
+
+    /// <summary>
+    /// A hero standing at an obelisk reads it: the first visit to each obelisk uncovers part of the
+    /// player's puzzle map (as in HoMM3). Once every obelisk has been read the dig site is marked.
+    /// </summary>
+    private static bool RecordObeliskVisit(Game game, AdventureMap map, Player player, int x, int y)
     {
-        var sp = Seeded.Find(playerId);
-        if (sp == null) return (0, [], "Unknown player.");
-
-        var player = await _db.Players.FirstOrDefaultAsync(p => p.GameId == gameId && p.Faction == sp.Faction);
-        if (player == null) return (0, [], "You are not in this game.");
-
-        var game = await _db.Games.FirstAsync(g => g.Id == gameId);
-        if (game.State != GameState.InProgress) return (player.ObeliskVisits, [], "The game is not in progress.");
-
-        var all = ParseStringArray(game.FragmentsJson);
-        if (player.ObeliskVisits >= all.Length)
-            return (player.ObeliskVisits, all, "You have seen every fragment.");
-
-        player.ObeliskVisits++;
-        if (player.ObeliskVisits >= all.Length) await RevealGrailAsync(game);
-        await _db.SaveChangesAsync();
-        return (player.ObeliskVisits, all.Take(player.ObeliskVisits).ToArray(), null);
+        var visited = ParseVisitedObelisks(player.ObelisksVisitedJson);
+        if (!visited.Add($"{x},{y}")) return false;
+        player.ObelisksVisitedJson = JsonSerializer.Serialize(visited.ToArray(), Json);
+        player.ObeliskVisits = visited.Count;
+        if (visited.Count >= ObeliskTotal(map)) RevealGrail(game, map);
+        return true;
     }
 
-    /// <summary>Marks the Grail tile on the map so a hero can walk there and dig.</summary>
-    private async Task RevealGrailAsync(Game game)
+    /// <summary>Marks the Grail tile on the in-hand map so a hero can walk there and dig.</summary>
+    public static void RevealGrail(Game game, AdventureMap map)
     {
         if (game.GrailRevealed || game.GrailFound) return;
         game.GrailRevealed = true;
-        var map = await LoadMapAsync(game);
         if (game.GrailX >= 0 && game.GrailY >= 0 && map.InBounds(game.GrailX, game.GrailY))
         {
             var t = map.At(game.GrailX, game.GrailY);
             t.ObjectKind = "grail";
             t.ObjectData = null;
             t.Passable = true;
-            game.MapJson = JsonSerializer.Serialize(map, Json);
         }
-    }
-
-    public async Task<(bool correct, string? error)> SolveAsync(Guid gameId, string playerId, string answer)
-    {
-        var sp = Seeded.Find(playerId);
-        if (sp == null) return (false, "Unknown player.");
-
-        var player = await _db.Players.FirstOrDefaultAsync(p => p.GameId == gameId && p.Faction == sp.Faction);
-        if (player == null) return (false, "You are not in this game.");
-
-        var game = await _db.Games.FirstAsync(g => g.Id == gameId);
-        if (game.State != GameState.InProgress) return (false, "The game is not in progress.");
-        if (player.WrongAnswers >= 10) return (false, "Locked until next turn.");
-
-        if (HashAnswer(answer) == game.PuzzleAnswerHash)
-        {
-            // Solving the puzzle reveals where to dig; the Grail itself must be dug up.
-            await RevealGrailAsync(game);
-            await _db.SaveChangesAsync();
-            return (true, null);
-        }
-
-        player.WrongAnswers++;
-        await _db.SaveChangesAsync();
-        return (false, "That is not the answer. Try again.");
     }
 }

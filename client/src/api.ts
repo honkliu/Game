@@ -160,12 +160,8 @@ export const api = {
 
   // obelisk
   getObelisk: (gameId: string) => request<import('./types').ObeliskState>('GET', `/api/games/${gameId}/obelisk`),
-  visitObelisk: (gameId: string) =>
-    request<{ visits: number; fragments: string[] }>('POST', `/api/games/${gameId}/obelisk/visit`),
   addObeliskMessage: (gameId: string, body: string) =>
     request<{ messageId: string }>('POST', `/api/games/${gameId}/obelisk/message`, { body }),
-  solveObelisk: (gameId: string, answer: string) =>
-    request<{ correct: boolean }>('POST', `/api/games/${gameId}/obelisk/solve`, { body: answer }),
 
   // catalogue
   getBuildings: (faction: string) => request<import('./types').BuildingDef[]>('GET', `/api/buildings?faction=${encodeURIComponent(faction)}`),

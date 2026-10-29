@@ -565,7 +565,7 @@ export function AdventureMap() {
     const enter = /^(?:enter|visit)-town:(.+)$/.exec(message ?? '');
     if (enter) { navigate(`/game/${gameId}/town/${enter[1]}`); return pos; }
     // walking up to the Obelisk opens it
-    if (message === 'obelisk:open') { navigate(`/game/${gameId}/obelisk`); return pos; }
+    if (message?.startsWith('obelisk:open')) { navigate(`/game/${gameId}/obelisk`); return pos; }
     if (notices.length) showNotices(notices);
     else if (message && message !== 'treasure:choose' && !hasEncounter)
       showNotices([{ kind: 'message', key: 'Adventure', amount: 0, message }]);
@@ -946,7 +946,7 @@ export function AdventureMap() {
           {res ? String(res[r]) : '—'}
         </div>
       ))}
-      <div className={'abs' + (h3 ? ' h3text' : '')} title={`Mines claimed ${minesOwned} · Obelisks ${me?.obeliskVisits ?? 0}/10`}
+      <div className={'abs' + (h3 ? ' h3text' : '')} title={`Mines claimed ${minesOwned} · Obelisks read ${me?.obeliskVisits ?? 0}`}
         style={{ left: 3 + 619, top: 578, fontSize: 12 }}>{dateText}</div>
 
       {/* spellbook */}
@@ -1192,7 +1192,7 @@ function terrainView(map: MapData, x: number, y: number, terrain: string): { ran
   return null;
 }
 
-function renderH3(ctx: CanvasRenderingContext2D, map: MapData, cam: { x: number; y: number }, tick: number,
+export function renderH3(ctx: CanvasRenderingContext2D, map: MapData, cam: { x: number; y: number }, tick: number,
   facing: Map<string, Facing>, moving: string | null,
   notes: { x: number; y: number }[] = [], glide: Glide | null = null) {
   const { startX, startY, cols, rows } = viewBounds(cam);
@@ -1326,7 +1326,7 @@ function renderH3(ctx: CanvasRenderingContext2D, map: MapData, cam: { x: number;
 
 // ---------------------------------------------------------------- built-in art renderer
 
-function renderFallback(ctx: CanvasRenderingContext2D, map: MapData, cam: { x: number; y: number }) {
+export function renderFallback(ctx: CanvasRenderingContext2D, map: MapData, cam: { x: number; y: number }) {
   const { startX, startY, cols, rows } = viewBounds(cam);
   for (let ry = 0; ry < rows; ry++) {
     for (let rx = 0; rx < cols; rx++) {
@@ -1767,7 +1767,7 @@ function Minimap(props: { map: MapData; cam: { x: number; y: number }; h3: boole
       }
     }
     for (const t of map.towns) {
-      ctx.fillStyle = FACTION_COLOR[t.faction] ?? '#fff';
+      ctx.fillStyle = t.neutral ? '#a0a0a0' : FACTION_COLOR[t.faction] ?? '#fff';
       ctx.fillRect(t.x * sx - 2, t.y * sy - 2, 5, 5);
     }
     for (const h of map.heroes) {

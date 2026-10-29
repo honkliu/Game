@@ -279,17 +279,31 @@ test.describe('City of Towers', () => {
     await expect(page.locator('.town-scene')).toBeVisible({ timeout: 15_000 });
   });
 
-  test('S10 obelisk reveals a fragment', async ({ page }) => {
+  test('S10 obelisk board shows the puzzle map and notes', async ({ page }) => {
     await choosePlayer(page, 'Alice');
     await createGame(page, 'Obelisk Test');
     await page.getByRole('button', { name: 'Obelisk', exact: true }).click();
 
-    await expect(page.getByText('THE OBELISK').first()).toBeVisible();
-    await expect(page.getByText(/You have seen 0 of 10/)).toBeVisible();
-    await page.getByRole('button', { name: 'Visit the Obelisk' }).click();
-    await expect(page.getByText(/You have seen 1 of 10/)).toBeVisible({ timeout: 10_000 });
+    const board = page.getByTestId('obelisk-board');
+    await expect(board.getByText('Puzzle Map')).toBeVisible();
+    await expect(board.getByText(/Obelisks read: 0 of \d+/)).toBeVisible();
+    await expect(page.getByRole('button', { name: /visit/i })).toHaveCount(0);
+    await expect(board.locator('[data-testid="puzzle-piece"][data-covered="true"]')).toHaveCount(48);
+    await board.getByPlaceholder('leave a message…').fill('The X is near the river.');
+    await board.getByRole('button', { name: 'Post', exact: true }).click();
+    await expect(board.getByTestId('obelisk-messages').getByText('The X is near the river.')).toBeVisible();
+    await expect(board.getByTestId('obelisk-messages').getByText(/^Alice of /)).toBeVisible();
   });
 
+  test('S10b a hero claims an unowned town by entering it', async ({ page }) => {
+    await choosePlayer(page, 'Alice');
+    await createGame(page, 'Neutral town');
+    const { hero, gameId } = await adventureFixture(page, 'Neutral town', { objectKind: 'town', objectData: 'rampart' });
+    await clickTile(page, hero, hero.x, hero.y - 1);
+    await expect(page).toHaveURL(/\/town\//, { timeout: 10_000 });
+    const map = await (await page.request.get(`${BASE}/api/games/${gameId}/map`, { headers: { 'X-Player-Id': 'alice' } })).json() as MapData;
+    expect(map.towns.find(t => t.x === hero.x && t.y === hero.y - 1)).toMatchObject({ isMine: true, neutral: false });
+  });
   test('S11 social screen shows players and trade form', async ({ page }) => {
     await choosePlayer(page, 'Alice');
     await createGame(page, 'Social Test');
@@ -538,6 +552,9 @@ test.describe('City of Towers', () => {
       if (kind === 'obelisk') {
         await expect(page).toHaveURL(/\/obelisk$/);
         expect(await readHero(page, hero.id)).toMatchObject({ x: hero.x, y: hero.y });
+        // the fixture leaves one obelisk, so reading it completes the puzzle
+        await expect(page.getByText('The puzzle is complete. Dig at the X.')).toBeVisible();
+        await expect(page.locator('[data-testid="puzzle-piece"][data-covered="false"]')).toHaveCount(48);
       }
       if (kind === 'grail') expect(await readHero(page, hero.id)).toMatchObject({ x: hero.x, y: hero.y - 1, movement: 0 });
     });

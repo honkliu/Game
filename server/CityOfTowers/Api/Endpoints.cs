@@ -196,7 +196,8 @@ public static partial class Endpoints
                     faction = t.Faction,
                     x = t.X,
                     y = t.Y,
-                    isMine = t.PlayerId == player.Id
+                    isMine = t.PlayerId == player.Id,
+                    neutral = t.PlayerId == Guid.Empty
                 })
             });
         });
@@ -252,11 +253,11 @@ public static partial class Endpoints
             if (await TownHiddenAsync(db, townId, ctx.Request.Headers["X-Player-Id"]))
                 return Results.BadRequest(new { error = "You have not discovered that town yet." });
 
-            var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
+            var player = await db.Players.FirstOrDefaultAsync(p => p.Id == town.PlayerId);
             var built = GameService.ParseStringArray(town.BuildingsJson);
             var avail = JsonSerializer.Deserialize<Dictionary<string, int>>(town.AvailableJson, Json) ?? [];
             var tiers = Creatures.BaseTiers(town.Faction);
-            var owner = Seeded.Players.FirstOrDefault(p => p.Faction == player.Faction);
+            var owner = player == null ? null : Seeded.Players.FirstOrDefault(p => p.Faction == player.Faction);
             var selected = Seeded.Find(ctx.Request.Headers["X-Player-Id"]);
             var tree = TownBuildings.For(town.Faction);
             var (machine, machinePrice) = TownBuildings.Blacksmith.TryGetValue(town.Faction, out var bs) ? bs : ("ballista", 2500);
@@ -266,13 +267,13 @@ public static partial class Endpoints
                 id = town.Id,
                 gameId = town.GameId,
                 name = town.Name,
-                ownerName = owner?.Name ?? "?",
-                isOwner = selected?.Faction == player.Faction,
+                ownerName = player == null ? "Neutral" : owner?.Name ?? "?",
+                isOwner = player != null && selected?.Faction == player.Faction,
                 faction = town.Faction,
                 x = town.X,
                 y = town.Y,
                 buildings = built,
-                builtThisTurn = player.BuiltThisTurn,
+                builtThisTurn = player?.BuiltThisTurn ?? false,
                 postSlots = SocialService.TowerSlots(built),
                 goldIncome = TownBuildings.GoldIncome(built),
                 growthMultiplier = TownBuildings.GrowthMultiplier(built),
@@ -290,13 +291,13 @@ public static partial class Endpoints
                 }),
                 blacksmith = new { machine, name = TownBuildings.MachineNames[machine], gold = machinePrice },
                 garrison = GameService.ParseArmy(town.GarrisonJson),
-                heroInTown = await HeroInTownAsync(db, player.Id, town.X, town.Y),
+                heroInTown = player == null ? null : await HeroInTownAsync(db, player.Id, town.X, town.Y),
                 tavern = GameService.ParseStringArray(town.TavernJson),
                 mageGuild = GameService.ParseStringArray(town.MageGuildJson).Select(Spells.CanonicalKey).Distinct(),
                 resources = new
                 {
-                    wood = player.Wood, ore = player.Ore, mercury = player.Mercury, sulfur = player.Sulfur,
-                    crystal = player.Crystal, gems = player.Gems, gold = player.Gold
+                    wood = player?.Wood ?? 0, ore = player?.Ore ?? 0, mercury = player?.Mercury ?? 0, sulfur = player?.Sulfur ?? 0,
+                    crystal = player?.Crystal ?? 0, gems = player?.Gems ?? 0, gold = player?.Gold ?? 0
                 }
             });
         });
@@ -309,8 +310,8 @@ public static partial class Endpoints
             var town = await db.Towns.FirstOrDefaultAsync(t => t.Id == townId);
             if (town == null) return Results.NotFound();
 
-            var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
-            if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "You can only build in your own town." });
+            var player = await db.Players.FirstOrDefaultAsync(p => p.Id == town.PlayerId);
+            if (player == null || player.Faction != sp.Faction) return Results.BadRequest(new { error = "You can only build in your own town." });
 
             var game = await db.Games.FirstAsync(g => g.Id == town.GameId);
             if (game.State != GameState.InProgress) return Results.BadRequest(new { error = "The game is not in progress." });
@@ -371,8 +372,8 @@ public static partial class Endpoints
             var town = await db.Towns.FirstOrDefaultAsync(t => t.Id == townId);
             if (town == null) return Results.NotFound();
 
-            var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
-            if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "You can only recruit in your own town." });
+            var player = await db.Players.FirstOrDefaultAsync(p => p.Id == town.PlayerId);
+            if (player == null || player.Faction != sp.Faction) return Results.BadRequest(new { error = "You can only recruit in your own town." });
             if (await InactiveGameAsync(db, town.GameId) is { } inactive) return inactive;
 
             var built = GameService.ParseStringArray(town.BuildingsJson);
@@ -430,8 +431,8 @@ public static partial class Endpoints
 
             var town = await db.Towns.FirstOrDefaultAsync(t => t.Id == townId);
             if (town == null) return Results.NotFound();
-            var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
-            if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your town." });
+            var player = await db.Players.FirstOrDefaultAsync(p => p.Id == town.PlayerId);
+            if (player == null || player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your town." });
             if (await InactiveGameAsync(db, town.GameId) is { } inactive) return inactive;
 
             var built = GameService.ParseStringArray(town.BuildingsJson);
@@ -466,8 +467,8 @@ public static partial class Endpoints
 
             var town = await db.Towns.FirstOrDefaultAsync(t => t.Id == townId);
             if (town == null) return Results.NotFound();
-            var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
-            if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your town." });
+            var player = await db.Players.FirstOrDefaultAsync(p => p.Id == town.PlayerId);
+            if (player == null || player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your town." });
             if (await InactiveGameAsync(db, town.GameId) is { } inactive) return inactive;
 
             var built = GameService.ParseStringArray(town.BuildingsJson);
@@ -504,8 +505,8 @@ public static partial class Endpoints
 
             var town = await db.Towns.FirstOrDefaultAsync(t => t.Id == townId);
             if (town == null) return Results.NotFound();
-            var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
-            if (player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your town." });
+            var player = await db.Players.FirstOrDefaultAsync(p => p.Id == town.PlayerId);
+            if (player == null || player.Faction != sp.Faction) return Results.BadRequest(new { error = "Not your town." });
             if (await InactiveGameAsync(db, town.GameId) is { } inactive) return inactive;
 
             var hero = await db.Heroes.FirstOrDefaultAsync(h =>
@@ -857,7 +858,9 @@ public static partial class Endpoints
         });
 
         // ------------------------------------------------------------ obelisk
-        app.MapGet("/api/games/{id:guid}/obelisk", async (Guid id, AppDb db, HttpContext ctx) =>
+        // The obelisk board: the player's HoMM3 puzzle map (a terrain-only view centred on the Grail,
+        // uncovered piece by piece as obelisks are read) and the notes players left on the stone.
+        app.MapGet("/api/games/{id:guid}/obelisk", async (Guid id, AppDb db, GameService games, HttpContext ctx) =>
         {
             var sp = Seeded.Find(ctx.Request.Headers["X-Player-Id"]);
             if (sp == null) return Results.BadRequest(new { error = "Unknown player." });
@@ -866,36 +869,63 @@ public static partial class Endpoints
             if (player == null) return Results.NotFound();
 
             var game = await db.Games.FirstAsync(g => g.Id == id);
-            var all = GameService.ParseStringArray(game.FragmentsJson);
+            var map = await games.LoadMapAsync(game);
+            var visited = GameService.ParseVisitedObelisks(player.ObelisksVisitedJson).Count;
+            var total = GameService.ObeliskTotal(map);
+            var players = await db.Players.Where(p => p.GameId == id).ToListAsync();
             var msgs = await db.ObeliskMessages.Where(m => m.GameId == id).OrderBy(m => m.CreatedAt).ToListAsync();
+
+            const int w = 21, h = 19;
+            var gx = game.GrailX >= 0 ? game.GrailX : map.Width / 2;
+            var gy = game.GrailY >= 0 ? game.GrailY : map.Height / 2;
+            int ox = gx - w / 2, oy = gy - h / 2;
+            var tiles = new List<object>(w * h);
+            for (var y = oy; y < oy + h; y++)
+            for (var x = ox; x < ox + w; x++)
+            {
+                if (!map.InBounds(x, y))
+                {
+                    tiles.Add(new { terrain = (string?)null, variant = 0, objectKind = (string?)null, objectData = (string?)null, owner = -1, passable = false, fog = 0 });
+                    continue;
+                }
+                var t = map.At(x, y);
+                var natural = t.ObjectKind is "tree" or "rock" or "mountain";
+                tiles.Add(new
+                {
+                    terrain = t.Terrain,
+                    variant = t.Variant,
+                    objectKind = natural ? t.ObjectKind : null,
+                    objectData = natural ? t.ObjectData : null,
+                    sprite = natural ? t.Sprite : null,
+                    owner = -1,
+                    passable = natural ? t.Passable : Terrain.Passable(t.Terrain),
+                    fog = 2
+                });
+            }
 
             return Results.Ok(new
             {
-                visits = player.ObeliskVisits,
-                total = all.Length,
-                fragments = all.Take(player.ObeliskVisits).ToArray(),
-                wrongAnswers = player.WrongAnswers,
-                grailRevealed = game.GrailRevealed,
-                messages = msgs.Select(m => new { id = m.Id, author = m.AuthorUserId.ToString(), body = m.Body, createdAt = m.CreatedAt })
+                visited,
+                total,
+                complete = total > 0 && visited >= total,
+                faction = player.Faction,
+                grailFound = game.GrailFound,
+                puzzle = new { width = w, height = h, grailX = gx - ox, grailY = gy - oy, tiles },
+                messages = msgs.Select(m =>
+                {
+                    var author = players.FirstOrDefault(p => p.Id == m.AuthorUserId);
+                    var who = author == null ? null : Seeded.Players.FirstOrDefault(s => s.Faction == author.Faction);
+                    return new
+                    {
+                        id = m.Id,
+                        author = who == null ? "A traveller" : $"{who.Name} of {author!.CityName}",
+                        mine = author?.Id == player.Id,
+                        body = m.Body,
+                        createdAt = m.CreatedAt
+                    };
+                })
             });
         });
-
-        app.MapPost("/api/games/{id:guid}/obelisk/visit", async (Guid id, GameService games, HttpContext ctx) =>
-        {
-            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
-            var (visits, fragments, error) = await games.VisitObeliskAsync(id, playerId);
-            if (error != null) return Results.BadRequest(new { error });
-            return Results.Ok(new { visits, fragments });
-        });
-
-        app.MapPost("/api/games/{id:guid}/obelisk/solve", async (Guid id, BodyReq req, GameService games, HttpContext ctx) =>
-        {
-            var playerId = ctx.Request.Headers["X-Player-Id"].ToString();
-            var (correct, error) = await games.SolveAsync(id, playerId, req.Body ?? "");
-            if (error != null) return Results.BadRequest(new { error, correct = false });
-            return Results.Ok(new { correct });
-        });
-
         app.MapPost("/api/games/{id:guid}/obelisk/message", async (Guid id, BodyReq req, AppDb db, HttpContext ctx) =>
         {
             var sp = Seeded.Find(ctx.Request.Headers["X-Player-Id"]);
@@ -1110,14 +1140,6 @@ public static partial class Endpoints
         });
 
         // ------------------------------------------------------------ test-only
-        app.MapGet("/api/games/{id:guid}/_test/answer", async (Guid id, AppDb db, IHostEnvironment env) =>
-        {
-            if (!env.IsDevelopment()) return Results.NotFound();
-            var game = await db.Games.FirstOrDefaultAsync(g => g.Id == id);
-            if (game == null) return Results.NotFound();
-            return Results.Ok(new { answer = Riddles.All[game.RiddleId].Answer });
-        });
-
         // reveals the whole map for one player so API tests can reach distant towns
         app.MapPost("/api/games/{id:guid}/_test/explore", async (Guid id, AppDb db, IHostEnvironment env, HttpContext ctx) =>
         {
@@ -1203,11 +1225,29 @@ public static partial class Endpoints
                 if (req.ObjectKind == "obelisk")
                     foreach (var old in map.Tiles.Where(t => t.ObjectKind == "obelisk"))
                     { old.ObjectKind = null; old.ObjectData = null; old.Passable = true; }
+                if (req.ObjectKind == "town")
+                {
+                    // an unowned town whose entrance is the tile above the hero
+                    var ax = hero.X; var ay = hero.Y - 1;
+                    var neutral = new Town
+                    {
+                        GameId = game.Id, PlayerId = Guid.Empty, Name = "Castellatus", Faction = req.ObjectData ?? "castle",
+                        X = ax, Y = ay, BuildingsJson = "[\"villageHall\",\"fort\",\"dwelling1\"]", AvailableJson = "{\"1\":14}",
+                        GarrisonJson = GameService.SerializeArmy(Enumerable.Range(0, 7).Select(_ => new GameService.ArmySlot(null, 0)).ToArray())
+                    };
+                    db.Towns.Add(neutral);
+                    var anchor = map.At(ax, ay);
+                    anchor.ObjectKind = "town"; anchor.ObjectData = neutral.Id.ToString(); anchor.Owner = -1; anchor.Passable = false;
+                    Footprint.Stamp(map, ax, ay, "town", null);
+                }
                 var target = map.At(hero.X, hero.Y - 1);
+                if (req.ObjectKind != "town")
+                {
                 target.ObjectKind = req.ObjectKind;
                 target.ObjectData = req.ObjectData;
                 target.Owner = 0;
                 target.Passable = req.ObjectKind is "resource" or "artifact" or "treasure" or "grail";
+                }
                 if (req.ObjectKind == "grail")
                 {
                     game.GrailX = hero.X; game.GrailY = hero.Y - 1;
@@ -1313,8 +1353,8 @@ public static partial class Endpoints
         if (sp == null) return (null, null, Results.BadRequest(new { error = "Unknown player." }));
         var town = await db.Towns.FirstOrDefaultAsync(t => t.Id == townId);
         if (town == null) return (null, null, Results.NotFound());
-        var player = await db.Players.FirstAsync(p => p.Id == town.PlayerId);
-        if (player.Faction != sp.Faction) return (null, null, Results.BadRequest(new { error = "Not your town." }));
+        var player = await db.Players.FirstOrDefaultAsync(p => p.Id == town.PlayerId);
+        if (player == null || player.Faction != sp.Faction) return (null, null, Results.BadRequest(new { error = "Not your town." }));
         if (await InactiveGameAsync(db, town.GameId) is { } inactive) return (null, null, inactive);
         return (town, player, null);
     }

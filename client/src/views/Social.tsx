@@ -184,7 +184,7 @@ export function Social() {
             <Txt x={72} y={30} w={156} size={10} color={FACTION_COLOR[p.faction] ? 'var(--text)' : 'var(--text-dim)'}>{FACTION_LABEL[p.faction] ?? p.faction}</Txt>
             <Txt x={72} y={46} w={156} size={10} color="var(--text-dim)">{p.cityName}</Txt>
             <Txt x={12} y={74} size={10} color="var(--text-dim)">
-              Obelisk: {p.obeliskVisits}/10 fragments
+              Obelisks read: {p.obeliskVisits}
             </Txt>
             {p.precious && <Txt x={12} y={92} size={10} color="var(--accent)">Holds the Grail</Txt>}
             {RES.map((r, j) => (

@@ -309,7 +309,48 @@ public static class MapGenerator
             t.Passable = false;
         }
 
+        // more obelisks: one inside every start's day-one sight, and a few more to discover
+        foreach (var (sx, sy) in starts) PlaceStartObelisk(map, sx, sy);
+        for (var i = 0; i < 3; i++)
+        {
+            var (x, y) = Take();
+            var t = map.At(x, y);
+            if (t.ObjectKind != null || !t.Passable) continue;
+            t.ObjectKind = "obelisk";
+            t.ObjectData = null;
+            t.Passable = false;
+        }
+
         return map;
+    }
+
+    // Offsets from a town anchor inside its day-one sight (town radius 5), clear of its footprint and gate.
+    private static readonly (int dx, int dy)[] StartObeliskOffsets =
+        [(4, 1), (-4, 1), (4, 2), (-4, 2), (4, 0), (-4, 0), (3, 3), (-3, 3), (4, -1), (-4, -1), (2, 4), (-2, 4)];
+
+    /// <summary>Places an obelisk visible from the town at (sx, sy) on day one; returns null when no spot fits.</summary>
+    public static (int x, int y)? PlaceStartObelisk(AdventureMap map, int sx, int sy, ICollection<(int x, int y)>? occupied = null)
+    {
+        var footprint = Footprint.Offsets("town", null).Append((0, 0)).Append((0, 1)).ToHashSet();
+        bool Blocked(int x, int y) => footprint.Contains((x - sx, y - sy)) || occupied?.Contains((x, y)) == true;
+        foreach (var (dx, dy) in StartObeliskOffsets)
+        {
+            var (x, y) = (sx + dx, sy + dy);
+            if (!map.InBounds(x, y) || Blocked(x, y)) continue;
+            var t = map.At(x, y);
+            if (!t.Passable || t.ObjectKind != null) continue;
+            var approachable = false;
+            for (var ny = y - 1; ny <= y + 1 && !approachable; ny++)
+            for (var nx = x - 1; nx <= x + 1 && !approachable; nx++)
+                approachable = (nx, ny) != (x, y) && map.InBounds(nx, ny) && !Blocked(nx, ny)
+                    && map.At(nx, ny) is { Passable: true, ObjectKind: null };
+            if (!approachable) continue;
+            t.ObjectKind = "obelisk";
+            t.ObjectData = null;
+            t.Passable = false;
+            return (x, y);
+        }
+        return null;
     }
 
     private static void CarvePath(AdventureMap map, (int x, int y) a, (int x, int y) b, Random rng)

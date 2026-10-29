@@ -955,14 +955,72 @@ static class ActionChecks
             Require(GameService.ParseArmy((await Hero(f)).ArmyJson)[0].Count == 30
                 && (await Player(f)).Gold == 20000 - price, "A full matching army was rejected, or the joining price was charged more than once.");
         }, "Adapt");
-        await Case("obelisk-reveal", "Visit the Obelisk and reveal the Grail", "Ten fragments reveal the Grail tile without ending the game.", async f =>
+        await Case("obelisk-visit", "Read obelisks by walking up to them",
+            "Each obelisk counts once per player; reading every obelisk marks the Grail tile; the board shows a terrain puzzle centred on the Grail and the notes left there.", async f =>
         {
-            for (var i = 0; i < 10; i++) await Post($"/api/games/{f.Game.Id}/obelisk/visit");
+            f.Map.At(4, 4).ObjectKind = "obelisk"; f.Map.At(4, 4).Passable = false;
+            await MoveObject(f, "obelisk", null, false);
+            Require((await Player(f)).ObeliskVisits == 1 && !(await f.Db.Games.AsNoTracking().SingleAsync()).GrailRevealed,
+                "Walking up to the first obelisk did not count once.");
+            var board = await Request("GET", $"/api/games/{f.Game.Id}/obelisk");
+            var puzzle = board.GetProperty("puzzle");
+            Require(board.GetProperty("visited").GetInt32() == 1 && board.GetProperty("total").GetInt32() == 2
+                && !board.GetProperty("complete").GetBoolean()
+                && puzzle.GetProperty("tiles").GetArrayLength() == puzzle.GetProperty("width").GetInt32() * puzzle.GetProperty("height").GetInt32()
+                && puzzle.GetProperty("grailX").GetInt32() == puzzle.GetProperty("width").GetInt32() / 2
+                && puzzle.GetProperty("tiles").EnumerateArray().All(t => t.GetProperty("objectKind").ValueKind == JsonValueKind.Null
+                    || t.GetProperty("objectKind").GetString() is "tree" or "rock" or "mountain"),
+                "The obelisk board is not a terrain-only puzzle map centred on the Grail.");
+            await Post($"/api/heroes/{f.Hero.Id}/move", new { path = new[] { new { x = 2, y = 4 } } });
+            Require((await Player(f)).ObeliskVisits == 1, "Revisiting the same obelisk counted twice.");
+            f.Hero.X = 4; f.Hero.Y = 3; await f.Db.SaveChangesAsync();
+            await Post($"/api/heroes/{f.Hero.Id}/move", new { path = new[] { new { x = 4, y = 4 } } });
             var game = await f.Db.Games.AsNoTracking().SingleAsync();
             Require(game.GrailRevealed && game.State == GameState.InProgress
-                && JsonSerializer.Deserialize<AdventureMap>(game.MapJson, Json)!.At(5, 5).ObjectKind == "grail", "Grail reveal is incorrect.");
+                && JsonSerializer.Deserialize<AdventureMap>(game.MapJson, Json)!.At(5, 5).ObjectKind == "grail", "Reading every obelisk did not mark the Grail.");
+            await Post($"/api/games/{f.Game.Id}/obelisk/message", new { body = "Dig near the lake." });
+            board = await Request("GET", $"/api/games/{f.Game.Id}/obelisk");
+            var note = board.GetProperty("messages")[0];
+            Require(board.GetProperty("complete").GetBoolean() && note.GetProperty("mine").GetBoolean()
+                && note.GetProperty("author").GetString()!.StartsWith("Alice"), "The board did not show the completed puzzle or the named note.");
         }, "Adapt");
-        await Case("grail-dig", "Dig the revealed Grail", "Award the Grail, remove its tile and spend remaining movement; do not end the game.", async f =>
+        await Case("town-claim-neutral", "Enter an unowned town", "The first hero to enter an unowned town claims it for his player; another player's town can be visited but never taken.", async f =>
+        {
+            Town Make(Guid owner, int x, int y, string name) => new()
+            {
+                GameId = f.Game.Id, PlayerId = owner, Name = name, Faction = "rampart", X = x, Y = y,
+                BuildingsJson = Strings("villageHall", "fort", "dwelling1"), AvailableJson = "{\"1\":14}", GarrisonJson = Army(("centaur", 0))
+            };
+            var rival = new Player { GameId = f.Game.Id, Faction = "rampart", CityName = "Rampart" };
+            var neutral = Make(Guid.Empty, 5, 4, "Castellatus");
+            var owned = Make(rival.Id, 1, 5, "Elfwind");
+            f.Db.AddRange(rival, neutral, owned);
+            foreach (var t in new[] { neutral, owned })
+            {
+                var tile = f.Map.At(t.X, t.Y);
+                tile.ObjectKind = "town"; tile.ObjectData = t.Id.ToString(); tile.Owner = -1; tile.Passable = false;
+            }
+            f.Player.FogJson = GameService.SerializeFog(Enumerable.Repeat((byte)2, 49).ToArray());
+            f.Hero.X = 5; f.Hero.Y = 5;
+            await f.SaveMap();
+            var before = await Request("GET", $"/api/towns/{neutral.Id}");
+            Require(before.GetProperty("ownerName").GetString() == "Neutral" && !before.GetProperty("isOwner").GetBoolean(), "An unowned town was shown with an owner.");
+            await Post($"/api/towns/{neutral.Id}/build", new { buildingKey = "tavern" }, 400);
+            await Post($"/api/heroes/{f.Hero.Id}/move", new { path = new[] { new { x = 5, y = 4 } } });
+            var claimed = await f.Db.Towns.AsNoTracking().SingleAsync(t => t.Id == neutral.Id);
+            var hero = await Hero(f);
+            Require(claimed.PlayerId == f.Player.Id && hero.X == 5 && hero.Y == 4
+                && (await Request("GET", $"/api/towns/{neutral.Id}")).GetProperty("isOwner").GetBoolean()
+                && JsonSerializer.Deserialize<AdventureMap>((await f.Db.Games.AsNoTracking().SingleAsync()).MapJson, Json)!.At(5, 4).Owner == 0,
+                "Entering an unowned town did not claim it.");
+            f.Db.ChangeTracker.Clear();
+            var h = await f.Db.Heroes.SingleAsync(x => x.Id == f.Hero.Id);
+            h.X = 2; h.Y = 5; h.Movement = h.MaxMovement; await f.Db.SaveChangesAsync();
+            await Post($"/api/heroes/{f.Hero.Id}/move", new { path = new[] { new { x = 1, y = 5 } } });
+            Require((await f.Db.Towns.AsNoTracking().SingleAsync(t => t.Id == owned.Id)).PlayerId == rival.Id
+                && (await Hero(f)).X == 2,
+                "Another player's town was taken over.");
+        }, "Adapt");        await Case("grail-dig", "Dig the revealed Grail", "Award the Grail, remove its tile and spend remaining movement; do not end the game.", async f =>
         {
             f.Game.GrailRevealed = true;
             await MoveObject(f, "grail", null);

@@ -64,6 +64,8 @@ public class Player
 
     public string FogJson { get; set; } = "";
     public string MineRemaindersJson { get; set; } = "{}";
+    /// <summary>Obelisk tiles ("x,y") this player's heroes have visited; each uncovers part of the puzzle map.</summary>
+    public string ObelisksVisitedJson { get; set; } = "[]";
 }
 
 public class Hero

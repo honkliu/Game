@@ -1,9 +1,9 @@
 # Action audit: checklist and latest evidence
 
-Generated: 2026-10-29T05:27:04.202Z  
-Revision: `d78c247136b26777f3b7ffc1574988964ff1a048` (worktree changes listed below)  
+Generated: 2026-10-29T17:22:00.131Z  
+Revision: `d2e6689059924cab8187fb84156b6f473c5291f5` (worktree changes listed below)  
 Command: `node test\actions.js --full --record`  
-Overall: **PASS — the recorded peaceful-ruleset checklist, not a complete Heroes III implementation.**
+Overall: **INCOMPLETE — the recorded peaceful-ruleset checklist, not a complete Heroes III implementation.**
 
 ## Scope and ruleset
 
@@ -13,7 +13,7 @@ Keep the peaceful adaptations: no battles, hostile recapture, stealing or town c
 
 The checklist below is executable: every action row comes from the actual in-memory HTTP audit, with fresh SQLite state per case. Movement checks execute the real client pathfinder and server movement service. Integration/browser suites use a separate temporary database and ephemeral port, never the normal play database.
 
-**186 action cases passed; 0 failed; 0 additional coverage/implementation gaps.** All 37 current public mutation routes are inventoried; 0 have no evidence mapping. Route evidence is deliberately narrower than complete behavioral coverage.
+**187 action cases passed; 0 failed; 0 additional coverage/implementation gaps.** All 35 current public mutation routes are inventoried; 0 have no evidence mapping. Route evidence is deliberately narrower than complete behavioral coverage.
 
 PASS means only the written assertions passed. FAIL is a reproducible mismatch. NOT RUN means required current-run evidence is missing. All 19 original obligations remain below; their status is derived from named assertions, never deleted or manually marked complete. The native reference case compares every retained creature and every supported purchasable town building. Browser cases cover real controls and persistence is tested with actual process restarts.
 
@@ -33,7 +33,7 @@ Native ground masks are numerical metadata decoded from the installed game's
 | Creature | Solid; stop beside it; declined/non-joining stacks remain solid, accepted stacks merge and charge the quoted gold. | Visiting horse; native gold component and Yes/No; non-joining OK is a no-combat adaptation. No Observe/Pass menu or success toast. | actions encounter-* including quote/legacy/full-army merge; browser S24, S27-29 accept/decline/reload/weak/gold/full errors. Original diplomacy and battle/flee are not implemented. |
 | Mines: all seven types | Native ground shapes; claim from beside the entry; owner alone grants or revokes half-yield sharing. | Visiting horse; daily-yield component and native notice. | actions mine-*; native-body movement checks; browser S22 and S41; fractional carry and permissions survive restart. |
 | Shrines: levels 1-3 | Native one-tile ground body; stay adjacent; spellbook/Wisdom/known-spell checks. | Visiting horse; native shrine/spell information dialog. | actions shrine-*; movement; actual renderer; browser S23 compares original base pixels with the map canvas and checks learn/revisit. |
-| Obelisk | Native one-tile ground body; visit from beside it. | Visiting horse; opens puzzle screen. | actions obelisk-*; client anchor; movement; browser S24. |
+| Obelisk | Native one-tile ground body; visit from beside it. | Visiting horse; walking up reads it once and opens the puzzle map. | actions obelisk-visit; client anchor; movement; browser S10, S24. |
 | Own / other town | Native 13-tile ground mask, not the old 15-tile rectangle; own gate may be occupied, body is not transit. | Visiting horse; town pointer when standing in own gate; opens town on arrival. | actions town-*; movement body/gate/legacy-save tests; client cursor tests; browser S25 clicks own town body and enters the gate only after confirmation. Other-faction town pixel matrix not established. |
 | Other hero | Occupied tile; approach without walking through it. | Native meeting pointer; native owned-hero exchange or approved peaceful social meeting. | movement occupancy/cursor tests; browser S33 and S42; split/merge/swap, artifacts, Scholar, messages, trade and map-marker linkage. |
 | Trees, rocks, mountains | Choose artwork whose native solid cells fit existing obstacles; preserve roads and pickups in old saves. | No visit pointer for an inaccessible obstacle; Fly remains the explicit transit exception. | movement fit/corner tests; client dirt-tree anchors; flight-cross-*; browser S18. |
@@ -162,7 +162,8 @@ Results and individual suite logs: `test-results\action-audit\results.json` and 
 | encounter-offer-weak | Load a non-joining creature encounter | Adapt | The offer's eligibility uses the same strength rule as recruitment; acknowledging it leaves the creature solid. | PASS |  |
 | encounter-offer-legacy | Read absent or malformed legacy encounter metadata | Adapt | Hero queries remain usable and omit an offer for malformed, empty, unknown or absent encounter state. | PASS |  |
 | encounter-merge-full | Accept joining creatures with seven occupied matching stacks | Adapt | A full army can merge joining creatures into its matching stack and pays the quoted price exactly once. | PASS |  |
-| obelisk-reveal | Visit the Obelisk and reveal the Grail | Adapt | Ten fragments reveal the Grail tile without ending the game. | PASS |  |
+| obelisk-visit | Read obelisks by walking up to them | Adapt | Each obelisk counts once per player; reading every obelisk marks the Grail tile; the board shows a terrain puzzle centred on the Grail and the notes left there. | PASS |  |
+| town-claim-neutral | Enter an unowned town | Adapt | The first hero to enter an unowned town claims it for his player; another player's town can be visited but never taken. | PASS |  |
 | grail-dig | Dig the revealed Grail | Adapt | Award the Grail, remove its tile and spend remaining movement; do not end the game. | PASS |  |
 | grail-build | Build a Grail structure | Preserve | Require and consume the Grail when constructing its unique structure. | PASS |  |
 | native-creature-reference | Compare all 126 creatures with original numerical tables | Preserve | Every retained creature matches native recruitment resources, statistics, growth and its upgrade price difference. | PASS |  |
@@ -290,7 +291,8 @@ These are not silently counted as passes. Requirements absent from the current c
 | browser-S9a | S9a artifacts sit in their own paper-doll slot | PASS |
 | browser-S9b | S9b tavern shows hero details and hires | PASS |
 | browser-S9c | S9c walking into your town opens the town screen | PASS |
-| browser-S10 | S10 obelisk reveals a fragment | PASS |
+| browser-S10 | S10 obelisk board shows the puzzle map and notes | PASS |
+| browser-S10b | S10b a hero claims an unowned town by entering it | PASS |
 | browser-S11 | S11 social screen shows players and trade form | PASS |
 | browser-S12 | S12 send a message to another player | PASS |
 | browser-S13 | S13 projects screen renders | PASS |
@@ -354,9 +356,9 @@ Automatically extracted from all `Api\*.cs` files; adding a route without a mapp
 
 | Method | Route | Evidence | Result |
 | --- | --- | --- | --- |
-| POST | /api/games | adventure | PASS |
+| POST | /api/games | adventure | FAIL |
 | POST | /api/games/{id:guid}/join | game-join | PASS |
-| POST | /api/heroes/{heroId:guid}/move | movement, movement-pathfinding, resource-gold, shrine-learn | PASS |
+| POST | /api/heroes/{heroId:guid}/move | movement, movement-pathfinding, resource-gold, shrine-learn, obelisk-visit, town-claim-neutral | PASS |
 | POST | /api/heroes/{heroId:guid}/treasure | treasure-gold, treasure-experience, treasure-leave, treasure-concurrent | PASS |
 | POST | /api/towns/{townId:guid}/build | build-once, build-prerequisites, build-new-pool, grail-build | PASS |
 | POST | /api/towns/{townId:guid}/recruit | recruit-base, recruit-amount, recruit-minerals, recruit-capacity | PASS |
@@ -371,9 +373,7 @@ Automatically extracted from all `Api\*.cs` files; adding a route without a mapp
 | POST | /api/towns/{townId:guid}/transform | transform-stack | PASS |
 | POST | /api/heroes/{heroId:guid}/cast | spell-guards, spell-flight, spell-haste, spell-door-occupied, spell-door-land | PASS |
 | POST | /api/games/{id:guid}/endturn | dwelling-growth, guild-rest, town-income, game-finished | PASS |
-| POST | /api/games/{id:guid}/obelisk/visit | obelisk-reveal | PASS |
-| POST | /api/games/{id:guid}/obelisk/solve | adventure | PASS |
-| POST | /api/games/{id:guid}/obelisk/message | adventure | PASS |
+| POST | /api/games/{id:guid}/obelisk/message | obelisk-visit, adventure | FAIL |
 | POST | /api/heroes/{heroId:guid}/encounter | encounter-observe, encounter-recruit, encounter-pass, encounter-strength, encounter-invalid | PASS |
 | POST | /api/games/{id:guid}/messages | social | PASS |
 | POST | /api/games/{id:guid}/trades | social | PASS |
@@ -396,17 +396,17 @@ Automatically extracted from all `Api\*.cs` files; adding a route without a mapp
 
 | Suite | Result | Duration (ms) | Log / detail |
 | --- | --- | --- | --- |
-| actions | PASS | 12006 | test-results/action-audit/actions.log |
-| movement | PASS | 6078 | test-results/action-audit/movement.log |
-| creatures | PASS | 80 | test-results/action-audit/creatures.log |
-| creature-sanity | PASS | 75 | test-results/action-audit/creature-sanity.log |
-| server-build | PASS | 1532 | test-results/action-audit/server-build.log |
-| client-build | PASS | 7538 | test-results/action-audit/client-build.log |
+| actions | PASS | 13620 | test-results/action-audit/actions.log |
+| movement | PASS | 11611 | test-results/action-audit/movement.log |
+| creatures | PASS | 77 | test-results/action-audit/creatures.log |
+| creature-sanity | PASS | 72 | test-results/action-audit/creature-sanity.log |
+| server-build | PASS | 1807 | test-results/action-audit/server-build.log |
+| client-build | PASS | 7696 | test-results/action-audit/client-build.log |
 | isolated-server | PASS |  | Ephemeral port, temporary SQLite database, readiness verified. |
-| adventure | PASS | 1386 | test-results/action-audit/adventure.log |
-| social | PASS | 471 | test-results/action-audit/social.log |
-| browser | PASS | 105466 | test-results/action-audit/browser.log |
-| save-migration | PASS | 11071 | test-results/action-audit/save-migration.log |
+| adventure | FAIL | 74 | test-results/action-audit/adventure.log |
+| social | PASS | 1207 | test-results/action-audit/social.log |
+| browser | PASS | 127672 | test-results/action-audit/browser.log |
+| save-migration | PASS | 13461 | test-results/action-audit/save-migration.log |
 
 ## References and limits
 
@@ -440,47 +440,21 @@ The original 63-case baseline was 47 PASS / 16 FAIL. This expanded record supers
 
 ```text
 M client/src/api.ts
- M client/src/h3/catalog.ts
+ M client/src/i18n.ts
  M client/src/types.ts
  M client/src/views/AdventureMap.tsx
- M client/src/views/HeroScreen.tsx
+ M client/src/views/Obelisk.tsx
  M client/src/views/Social.tsx
- M client/src/views/TownScreen.tsx
- M client/src/views/TownWindows.tsx
- M client/tsconfig.json
- M docs/00-FIDELITY-CONTRACT.md
  M docs/08-requirements-matrix.md
  M e2e/game.spec.ts
  M server/CityOfTowers/Api/Endpoints.cs
- M server/CityOfTowers/CityOfTowers.csproj
- M server/CityOfTowers/Data/AppDb.cs
  M server/CityOfTowers/Domain/AdventureMap.cs
- M server/CityOfTowers/Domain/Artifacts.cs
  M server/CityOfTowers/Domain/Entities.cs
- M server/CityOfTowers/Domain/Heroes.cs
- M server/CityOfTowers/Domain/Spells.cs
- M server/CityOfTowers/Domain/TownBuildings.cs
  M server/CityOfTowers/Program.cs
- M server/CityOfTowers/Services/AiService.cs
  M server/CityOfTowers/Services/GameService.cs
- M server/CityOfTowers/Services/SocialService.cs
- M server/CityOfTowers/Services/TownRules.cs
  M test/MovementChecks/ActionChecks.cs
  M test/MovementChecks/Program.cs
  M test/actions.js
  M test/adventure.js
- M test/movement.js
-?? client/src/h3/object-geometry.json
-?? client/src/views/HeroWindows.tsx
-?? client/src/views/Spellbook.tsx
-?? docs/10-action-audit.md
-?? server/CityOfTowers/Api/HeroActions.cs
-?? server/CityOfTowers/Api/PeacefulActions.cs
-?? server/CityOfTowers/Domain/NativeRules.cs
-?? server/CityOfTowers/Domain/ObjectGeometry.cs
-?? server/CityOfTowers/Domain/h3-rules.json
-?? server/CityOfTowers/Services/HeroProgression.cs
-?? test/action-reporter.cjs
-?? test/save-migration.js
-?? tools/extract-h3-rules.cjs
+?? client/src/h3/puzzle-map.json
 ```
