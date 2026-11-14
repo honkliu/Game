@@ -13,6 +13,16 @@ server/CityOfTowers/wwwroot/
 *.db-shm
 *.db-wal
 
+# --- Rust build output (engine/, native-browser/) ---
+engine/target/
+native-browser/target/
+engine/**/*.pdb
+native-browser/**/*.pdb
+engine/build-*.txt
+
+# --- Qwen Code local scratch (the agent definitions in .qwen/agents/ are tracked) ---
+.qwen/tmp/
+
 # --- scratch / generated art / screenshots ---
 build/
 

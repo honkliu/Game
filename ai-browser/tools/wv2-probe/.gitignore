@@ -1,0 +1,4 @@
+/target/
+# Raw run logs. Regenerate any of them with the command in ../README.md; the numbers
+# that matter, and the ones that could not be measured, are in RESULTS.md.
+results/

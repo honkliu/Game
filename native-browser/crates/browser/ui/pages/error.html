@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<title>Can't reach this page</title>
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  html, body { background: var(--bg-page); overflow: auto; }
+  .err { max-width: 640px; margin: 12vh auto 0; padding: 0 var(--space-5); display: grid; gap: var(--space-4); }
+  .warn { font-size: 28px; line-height: 1; }
+  h1 { font: var(--text-xl); margin: 0; }
+  .code { font: var(--text-xs); font-family: var(--font-mono); color: var(--fg-muted); }
+  .hint { font: var(--text-sm); color: var(--fg-muted); margin: 0; }
+  .urlfield {
+    height: 44px; display: flex; align-items: center;
+    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    padding: 0 var(--space-3); font: var(--text-base); font-family: var(--font-mono);
+    color: var(--fg-primary); background: var(--bg-surface);
+    overflow-x: auto; white-space: nowrap; user-select: text;
+  }
+  .actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+  .btn {
+    height: 32px; padding: 0 var(--space-4);
+    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    font: var(--text-base); background: var(--bg-surface);
+  }
+  .btn:hover { background: var(--bg-surface-hover); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--fg-on-accent); }
+  .btn.primary:hover { background: var(--accent-hover); }
+  details pre { font: var(--text-xs); font-family: var(--font-mono); color: var(--fg-muted); white-space: pre-wrap; margin: 0; }
+  summary { font: var(--text-sm); color: var(--fg-muted); cursor: default; }
+</style>
+</head>
+<body>
+<!-- §4.7. Rendered in the page webview on NavigationCompleted failure. The host
+     passes {code, url, navigation_id} in the fragment — no server contact. -->
+<main class="err" role="alert">
+  <div class="warn" aria-hidden="true">⚠</div>
+  <div>
+    <h1 id="title">Can't reach this page</h1>
+    <div class="code" id="code">&nbsp;</div>
+  </div>
+  <p class="hint" id="hint" hidden></p>
+  <div class="urlfield" id="url" role="textbox" aria-readonly="true" aria-label="Failed URL"></div>
+  <div class="actions">
+    <button class="btn primary" id="retry">Retry</button>
+    <button class="btn" id="copy">Copy URL</button>
+    <button class="btn" id="newtab">Open in new tab</button>
+    <button class="btn" id="details-toggle" aria-expanded="false">Details ▾</button>
+  </div>
+  <details id="details" hidden>
+    <summary>Navigation details</summary>
+    <pre id="details-body"></pre>
+  </details>
+</main>
+<script src="error.js"></script>
+</body>
+</html>

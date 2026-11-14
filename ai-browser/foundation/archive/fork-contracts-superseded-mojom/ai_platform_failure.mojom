@@ -1,0 +1,86 @@
+// Copyright 2026 The Chromium Authors
+// Use of this source code or applicable license file.
+
+// The one typed failure taxonomy for the AI platform (backlog FND-04).
+//
+// In-tree location: //ai_browser/foundation/mojom/
+//
+// There is exactly one failure enumeration in this program. Context, action,
+// progress and cancellation messages all reference `Failure` here; no module
+// declares its own error enum. A new failure mode is added by adding a member
+// here (or a new `code` string below an existing member), not by inventing a
+// second taxonomy. `tools/contract/contract_check.py` fails if any other mojom
+// or schema file declares an error enum.
+
+module ai_browser.mojom;
+
+// Machine-readable failure class. Values are stable on the wire and must never
+// be renumbered; append only.
+//
+// This enum is intentionally not [Extensible]. Both endpoints are compiled from
+// one Chromium build (see the format decision in ../README.md), so an unknown
+// value here means a build mismatch rather than a rolling-upgrade skew, and
+// tearing down the pipe is the correct, loud response. If the AI utility
+// process is ever shipped out of build, revisit this together with the major
+// version gate.
+enum FailureKind {
+  // The capability exists but cannot be reached right now: model provider
+  // unreachable, local model not loaded, renderer probe not attached.
+  kUnavailable = 0,
+
+  // A policy, permission, or user setting refused the operation. Retrying
+  // without a policy change cannot succeed. Also the class used when a
+  // document or task token is presented outside the scope that owns it.
+  kBlocked = 1,
+
+  // The context the operation was planned against no longer describes the
+  // document: navigated, replaced, tab closed, or the snapshot assumption was
+  // violated. Never retried as-is; requires replanning (backlog §5).
+  kStale = 2,
+
+  // The user or the browser ended the task. Distinct from an error: the
+  // partial result may be valid and the UI must not present it as a failure.
+  kCancelled = 3,
+
+  // A deadline elapsed. The operation may still have side effects; callers
+  // must re-observe rather than assume nothing happened.
+  kTimedOut = 4,
+
+  // The request is well formed and in scope but this build cannot do it:
+  // unsupported page type, unsupported provider capability, action level not
+  // compiled in behind a kill switch.
+  kUnsupported = 5,
+
+  // The operation succeeded but the result was truncated to stay inside a
+  // bound (token budget, byte budget, block count). Always carries
+  // `OutputLimit`. Reporting this as success would be a false claim of
+  // completeness (backlog §4.1).
+  kOutputLimited = 6,
+};
+
+// Quantifies kOutputLimited: what the bound was and how much was emitted.
+// Attached where a bounded result is returned, not inside Failure, so a
+// truncated payload is never representable without its bound.
+struct OutputLimit {
+  uint32 byte_limit;
+  uint32 emitted_bytes;
+  uint32 dropped_items;
+};
+
+// A failure carried in a response payload.
+//
+// `code` is a stable, namespaced telemetry identifier chosen by the producer
+// (e.g. "context.third_party_frame_inaccessible"). `detail` is developer-facing
+// free text. Neither may contain page text, coordinates, credentials, or
+// customer content: the action audit records metadata only (backlog §8).
+struct Failure {
+  FailureKind kind;
+  string code;
+  // Whether re-issuing the same request could succeed without new context or a
+  // policy change. kStale and kBlocked are never retryable in this sense.
+  boolean retryable;
+  // Whether the caller must build a new plan from freshly observed context
+  // before continuing. True for kStale.
+  boolean replan_required;
+  string? detail;
+};

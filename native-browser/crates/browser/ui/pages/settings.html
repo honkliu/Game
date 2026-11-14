@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<title>Settings</title>
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  html, body { background: var(--bg-page); overflow: auto; }
+  .settings { display: grid; grid-template-columns: 180px 1fr; max-width: 880px; margin: 0 auto; padding: var(--space-7) var(--space-5); gap: var(--space-6); }
+  h1 { grid-column: 1 / -1; font: var(--text-xl); margin: 0; }
+  nav { display: flex; flex-direction: column; gap: 2px; }
+  nav a { font: var(--text-base); color: var(--fg-muted); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); text-decoration: none; }
+  nav a:hover, nav a:focus-visible { background: var(--bg-surface-hover); color: var(--fg-primary); }
+  section { display: grid; gap: var(--space-4); align-content: start; }
+  section + section { margin-top: var(--space-6); }
+  h2 { font: var(--text-base-strong); margin: 0 0 var(--space-2); color: var(--fg-primary); }
+  .row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: var(--space-4); padding: var(--space-2) 0; border-bottom: 1px solid var(--border-subtle); }
+  .row .label { font: var(--text-base); }
+  .row .desc { font: var(--text-sm); color: var(--fg-muted); }
+  .stack { display: flex; gap: var(--space-4); flex-wrap: wrap; }
+  label.choice { display: inline-flex; align-items: center; gap: var(--space-2); font: var(--text-base); }
+  input[type="text"], input[type="number"], select {
+    height: 28px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    background: var(--bg-surface); color: var(--fg-primary); font: var(--text-base);
+    padding: 0 var(--space-2); min-width: 120px;
+  }
+  input[type="text"].wide { width: 340px; }
+  .btn { height: 28px; padding: 0 var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font: var(--text-sm); background: var(--bg-surface); }
+  .btn:hover { background: var(--bg-surface-hover); }
+  .note { font: var(--text-sm); color: var(--fg-muted); max-width: 60ch; }
+  .meta { font: var(--text-xs); font-family: var(--font-mono); color: var(--fg-subtle); }
+  #toast { position: fixed; }
+</style>
+</head>
+<body>
+<!-- §4.8. Every control writes immediately; there is no Save button. Because
+     this page is an ordinary page webview it cannot reach the host's IPC, so
+     changes are persisted by re-navigating with the new value in the fragment
+     (`#set=<key>=<value>`), which the host intercepts. That keeps the page
+     unprivileged while still making every control real. -->
+<main class="settings">
+  <h1>Settings</h1>
+
+  <nav aria-label="Settings sections">
+    <a href="#appearance">Appearance</a>
+    <a href="#search">Search</a>
+    <a href="#privacy">Privacy</a>
+    <a href="#advanced">Advanced</a>
+  </nav>
+
+  <div>
+    <section id="appearance">
+      <h2>Appearance</h2>
+      <div class="row">
+        <div><div class="label">Theme</div><div class="desc">Follow the system, or pin light/dark.</div></div>
+        <div class="stack" role="radiogroup" aria-label="Theme">
+          <label class="choice"><input type="radio" name="theme" value="light">Light</label>
+          <label class="choice"><input type="radio" name="theme" value="dark">Dark</label>
+          <label class="choice"><input type="radio" name="theme" value="system">System</label>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="label">Rail collapsed</div><div class="desc">Show the rail as a 44 px icon strip.</div></div>
+        <label class="choice"><input type="checkbox" id="rail_collapsed">Collapsed</label>
+      </div>
+      <div class="row">
+        <div><div class="label">Compact tab rows</div><div class="desc">24 px rows instead of 28 px.</div></div>
+        <label class="choice"><input type="checkbox" id="compact_tab_rows">Compact</label>
+      </div>
+      <div class="row">
+        <div><div class="label">Density</div><div class="desc">Row padding across the rail and panels.</div></div>
+        <select id="density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select>
+      </div>
+    </section>
+
+    <section id="search">
+      <h2>Search</h2>
+      <div class="row">
+        <div><div class="label">Search engine</div><div class="desc">One local default, no suggest API, no vendor calls. <code>%s</code> is replaced with the query.</div></div>
+        <input type="text" id="search_template" class="wide" spellcheck="false" aria-label="Search URL template" />
+      </div>
+      <p class="note">Default: <code>https://html.duckduckgo.com/html/?q=%s</code></p>
+    </section>
+
+    <section id="privacy">
+      <h2>Privacy</h2>
+      <div class="row">
+        <div><div class="label">Clear history on exit</div></div>
+        <label class="choice"><input type="checkbox" id="clear_history_on_exit">Enabled</label>
+      </div>
+      <div class="row">
+        <div><div class="label">Clear cookies on exit</div></div>
+        <label class="choice"><input type="checkbox" id="clear_cookies_on_exit">Enabled</label>
+      </div>
+      <div class="row">
+        <div><div class="label">Clear cache on exit</div></div>
+        <label class="choice"><input type="checkbox" id="clear_cache_on_exit">Enabled</label>
+      </div>
+      <div class="row">
+        <div><div class="label">Show full URL</div><div class="desc">No truncation in the address bar.</div></div>
+        <label class="choice"><input type="checkbox" id="always_show_full_url">Enabled</label>
+      </div>
+      <p class="note">Nothing else is collected. On disk the browser writes: <code>settings.json</code> (these settings), <code>session.json</code> (window and tab layout), <code>data.db</code> (history and bookmarks), and WebView2's own profile directory. No telemetry, no update checks, no crash reports.</p>
+    </section>
+
+    <section id="advanced">
+      <h2>Advanced</h2>
+      <div class="row">
+        <div><div class="label">History limit</div><div class="desc">Oldest entries are evicted beyond this count. Currently <span id="history_count">–</span> stored.</div></div>
+        <input type="number" id="history_cap" min="1000" max="1000000" step="1000" aria-label="History limit" />
+      </div>
+      <div class="row">
+        <div><div class="label">Sleep tabs after</div><div class="desc">Minutes of inactivity. Not yet implemented in this build.</div></div>
+        <input type="number" id="sleep_after_minutes" min="1" max="240" aria-label="Sleep after minutes" />
+      </div>
+      <div class="row">
+        <div><div class="label">Download directory</div></div>
+        <input type="text" id="download_dir" class="wide" spellcheck="false" aria-label="Download directory" />
+      </div>
+      <div class="row">
+        <div><div class="label">Data folder</div><div class="meta" id="data_note"></div></div>
+        <button class="btn" id="open_folder">Open data folder</button>
+      </div>
+      <p class="note meta" id="build"></p>
+    </section>
+  </div>
+</main>
+<script src="settings.js"></script>
+</body>
+</html>

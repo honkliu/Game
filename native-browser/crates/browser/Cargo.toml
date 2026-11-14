@@ -1,0 +1,61 @@
+[package]
+name = "browser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "native-browser: a Rust shell over WebView2"
+
+[[bin]]
+name = "browser"
+path = "src/main.rs"
+
+[dependencies]
+# windowing + webview (WebView2 on Windows)
+wry = "=0.57.2"
+tao = "=0.37.2"
+# typed IPC envelope + JSON state files
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The AI platform contract: document identity, action levels, the typed failure
+# taxonomy, and the shell<->utility frame codec. One set of Rust types on both
+# sides of the shell/utility boundary is the point of that design, so the shell
+# consumes these types directly rather than mirroring them. Path dependency,
+# serde + serde_json only, builds offline.
+ai-platform-contract = { path = "../../../ai-browser/foundation" }
+# history/bookmarks store; bundled = no system SQLite dependency
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+# url-template encoding (%s substitution) for the search engine
+percent-encoding = "2"
+# Shared WebView2 environment. wry's `WebContext` is a zero-sized token on
+# Windows (see wry-0.57.2/src/web_context.rs), so every webview would otherwise
+# create its own browser process. Creating one environment ourselves and passing
+# it to every builder via `with_environment` is what keeps the process count
+# near Chrome's. Version must match the one wry links (0.39.x).
+webview2-com = "=0.39.1"
+# raw Win32: monotonic timing, HWND work, process enumeration for W10,
+# and reveal-in-Explorer for the downloads panel.
+# Pinned to the version wry links so COM/FFI types line up exactly.
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",
+    # `sys::command_line` reads a target process's PEB to get its command line,
+    # which is the only way to tell a WebView2 browser process from a renderer
+    # (`--type=`) without a WMI dependency: Toolhelp32 carries no command line.
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Wdk_System_Threading",
+    "Win32_System_Performance",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+] }
+
+[dev-dependencies]
+tempfile = "3"

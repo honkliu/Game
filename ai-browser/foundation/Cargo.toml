@@ -1,0 +1,27 @@
+[package]
+name = "ai-platform-contract"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+description = "AI-native browser: document identity model, versioned contracts, typed failure taxonomy, and the shell<->AI-utility-process frame codec"
+
+# This crate is deliberately dependency-light and builds offline. serde and
+# serde_json are the same crates native-browser/crates/browser already pins, and
+# both are present in this machine's cargo registry cache, so `cargo test
+# --offline` needs no network. Adding a codegen toolchain (protoc, capnp,
+# schemars) here was considered and rejected -- see README.md, "Contract format
+# and transport decision".
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+# The contract layer is a boundary: a silent default here becomes a wrong
+# security decision downstream.
+unwrap_used = "deny"

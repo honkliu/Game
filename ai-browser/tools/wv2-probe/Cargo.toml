@@ -1,0 +1,55 @@
+[package]
+name = "wv2-probe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+publish = false
+description = "Measurement spike for the three WebView2 behaviours Epic B rests on: NavigationId semantics, second-controller cost, overlay over live content"
+
+# Standalone on purpose. It must not join a workspace with ../foundation, which
+# has to keep building with only serde + serde_json.
+[dependencies]
+# Pinned with `=` to the exact set native-browser resolves, because this crate
+# ships a Cargo.lock copied from native-browser and `cargo run --offline` may
+# only use what is already in the local registry cache.
+wry = "=0.57.2"
+tao = "=0.37.2"
+webview2-com = "=0.39.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Must be the same `windows` version wry and webview2-com link, or the COM and
+# HWND types do not line up across the FFI boundary.
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Performance",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+    # `PrintWindow` lives under Storage::Xps in windows 0.62.2. It is the fallback
+    # pixel instrument: screen-DC readback fails on this machine's non-interactive
+    # desktop, so a window-targeted render is the only way to see a repaint here.
+    "Win32_Storage_Xps",
+] }
+
+[[bin]]
+name = "wv2-probe"
+path = "src/main.rs"
+
+[lints.clippy]
+unwrap_used = "deny"
+
+# Measurement code: timings must not be perturbed by a debug-runtime tax, and
+# the fling test needs the real frame pacing of an optimised build.
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 16

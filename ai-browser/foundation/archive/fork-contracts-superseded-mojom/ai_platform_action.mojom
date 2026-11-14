@@ -1,0 +1,128 @@
+// Copyright 2026 The Chromium Authors
+// Use of this source code or applicable license file.
+
+// Versioned action contracts (backlog FND-02, shapes from backlog §7).
+//
+// In-tree location: //ai_browser/foundation/mojom/
+
+module ai_browser.mojom;
+
+import "ai_browser/foundation/mojom/ai_platform_common.mojom";
+import "ai_browser/foundation/mojom/ai_platform_failure.mojom";
+
+// The four capability levels from backlog §7.1. Ordered by consequence; the
+// numeric values encode that order and must not be renumbered.
+enum ActionLevel {
+  // Read-only: read page, find passage, inspect links.
+  kObserve = 0,
+  // Reversible: open, close, switch, preview, scroll.
+  kNavigate = 1,
+  // Page mutation: type, filter, select, expand.
+  kInteract = 2,
+  // Consequential: submit, upload, add to cart, purchase.
+  kCommit = 3,
+};
+
+// How the target of an action should be resolved, in the preference order of
+// backlog §7.2. A request that cannot name a semantic target must say so;
+// coordinate fallback is a separate, visible decision rather than an implicit
+// degradation inside the runtime.
+enum TargetResolution {
+  kBrowserSemanticCommand = 0,
+  kPageStructuredTool = 1,
+  kAccessibilityOrDomLocator = 2,
+  kVisualTarget = 3,
+  kCoordinateFallback = 4,
+};
+
+// Target of an action. `opaque_target` is interpreted by the browser process
+// against `expected_document` only; a target descriptor is never portable
+// across documents or snapshots, which is what makes navigation invalidate
+// element handles (backlog §2.3 step 3).
+struct ActionTarget {
+  TargetResolution resolution;
+  array<uint8> opaque_target;
+};
+
+// Idempotency declaration affects retry policy after kTimedOut, where the
+// outcome is genuinely unknown. "unsafe" means the runtime must never
+// auto-retry: a double submit is a different purchase.
+enum Idempotency {
+  kSafe = 0,
+  kConditional = 1,
+  kUnsafe = 2,
+};
+
+// A request to change something. The document identity is a token plus the
+// snapshot version the plan was built against; the browser re-resolves both
+// before dispatch and refuses with kStale if either moved (backlog §7.3
+// "Before action").
+//
+// Two deliberate deviations from the backlog's sketch:
+//   - no `expectedDocument: DocumentKey`; it carries `DocumentRef` instead, so
+//     profile and workspace come from the brokered pipe, not the payload;
+//   - no `approvalClass`. The requester does not grade its own approval
+//     requirement; the browser process decides it and reports it in
+//     ActionDecision.
+struct ActionRequest {
+  SchemaVersion schema_version;
+  string action_id;
+  TaskId task;
+  DocumentRef expected_document;
+  SnapshotVersion expected_snapshot_version;
+  // Stable action name chosen by the browser, e.g. "navigate", "scroll_to".
+  string action_kind;
+  ActionTarget? target;
+  array<uint8> arguments;
+  // Upper bound on wall-clock time the browser may spend. Compared against the
+  // browser clock; an already-expired deadline fails kTimedOut before dispatch
+  // rather than executing an abandoned plan.
+  int64 deadline_ms_since_epoch;
+  Idempotency idempotency;
+};
+
+// The browser-process policy verdict recorded before dispatch. Persisted as
+// metadata only (backlog §8): the audit may say an action at level kCommit was
+// approved by the user, never which coordinates were clicked.
+struct ActionDecision {
+  ActionLevel level;
+  // Whether user confirmation was required, obtained, refused, or waived by
+  // policy for this level.
+  boolean approval_required;
+  boolean approval_granted;
+  // Kill switch / per-domain automation setting that suppressed the action, if
+  // any. Empty when policy allowed it.
+  string? blocked_by;
+};
+
+// A completed action. `observation` is the fresh snapshot taken after the
+// action so the caller can verify the expected state change instead of
+// trusting that the action did what the model intended (backlog §7.3 "After
+// action").
+struct ActionResult {
+  SchemaVersion schema_version;
+  string action_id;
+  ActionDecision decision;
+  // The document the action actually executed against, resolved by the browser
+  // process. If this differs from the request's token, the action did not run
+  // and `failure` is kStale.
+  DocumentRef executed_on;
+  SnapshotVersion observation_snapshot_version;
+  // True when the observed state matched what the request declared it would
+  // cause. False is reported, not silently retried.
+  boolean verified;
+  array<uint8> result_payload;
+  OutputLimit? limit;
+};
+
+// Browser-process service. Only the browser process implements it and only the
+// AI utility process is handed a remote; no renderer-bound pipe carries this
+// type, which is contract_check.py's enforced rule for this file.
+// @implemented_by: browser_process
+// @called_by: ai_utility_process
+interface ActionDispatcher {
+  // Validates identity, origin, snapshot assumptions and policy, then dispatches
+  // exactly once. Never resolves "the active tab" from an earlier lookup.
+  Dispatch(ActionRequest request)
+      => (ActionResult? result, Failure? failure);
+};

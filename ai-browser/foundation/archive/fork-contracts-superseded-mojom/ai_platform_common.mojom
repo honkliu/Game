@@ -1,0 +1,92 @@
+// Copyright 2026 The Chromium Authors
+// Use of this source code or applicable license file.
+
+// Identity primitives for the AI platform (backlog FND-01).
+//
+// In-tree location: //ai_browser/foundation/mojom/
+//
+// These types are the *wire* projection of identity. They are deliberately
+// smaller than the browser-process types in //ai_browser/foundation/cpp/
+// identity.h. The rule that keeps the authority boundary intact:
+//
+//   Identity crosses a process boundary only as an opaque, browser-minted
+//   token. No endpoint is allowed to assert identity by value.
+//
+// The backlog's `DocumentKey` (§2.3) carries `profileId` and `workspaceId` as
+// plain fields. As wire data that is a substitution hole: any peer could claim
+// another profile or workspace by filling in two integers. The fields are real,
+// but they are resolved by the browser process from the token *and* from the
+// brokered pipe the message arrived on, never from the payload. That is why
+// `DocumentRef` below carries only the token.
+
+module ai_browser.mojom;
+
+// Major version of every schema in this directory. A message whose
+// `schema_version.major` differs from this value must be rejected before its
+// payload is interpreted (FND-02). Consumers must not soften this into a
+// downgrade attempt.
+const uint16 kSchemaMajorVersion = 1;
+
+// Highest minor version this producer emits. Minor versions are additive-only:
+// a consumer at a higher minor must ignore fields it does not know.
+const uint16 kSchemaMinorVersion = 0;
+
+// Version header carried by every top-level, cross-process message. Nested
+// structs do not repeat it; the header gates the whole envelope.
+struct SchemaVersion {
+  uint16 major;
+  uint16 minor;
+};
+
+// A browser profile. Minted by the browser process. Single-field structs are
+// used instead of bare integers so that the generated bindings reject a
+// WorkspaceId passed where a ProfileId is expected; mojom has no typedef, so a
+// struct is the only nominal type available.
+struct ProfileId {
+  uint64 value;
+};
+
+// A workspace: a set of tabs whose contents the assistant is allowed to read
+// together. Workspaces are the unit of context isolation, so every context and
+// action request is scoped to one.
+struct WorkspaceId {
+  uint64 value;
+};
+
+// A tab, as assigned by the browser process. Distinct from a tab index, which
+// the user can change by dragging.
+struct TabId {
+  uint64 value;
+};
+
+// Opaque handle for one committed document. The value is meaningless outside
+// the process that minted it and is single-use: closing the tab, a
+// cross-document navigation, or a back/forward entry that creates a new
+// document invalidates it and the value is never reused.
+struct DocumentTokenId {
+  uint64 value;
+};
+
+// The only identity a peer may present. The browser process resolves this to a
+// full DocumentKey (profile, workspace, tab, frame tree node, navigation
+// sequence) before acting. Resolution failure is typed, never silent:
+// kStale for a token that belonged to a destroyed document, kBlocked for a
+// token presented outside the workspace or tab that owns it.
+struct DocumentRef {
+  DocumentTokenId token;
+};
+
+// A monotonically increasing capture generation for one document. 0 is
+// reserved to mean "no snapshot captured yet" and is never a valid argument to
+// an action. Restart numbering for a new document; a token is never recycled,
+// so (token, version) is globally unique.
+struct SnapshotVersion {
+  uint64 value;
+};
+
+// A unit of assistant work spanning multiple model calls and actions. Scoped to
+// the workspace that created it; a TaskId from another workspace does not
+// resolve.
+struct TaskId {
+  uint64 value;
+};

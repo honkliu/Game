@@ -1,0 +1,105 @@
+// Copyright 2026 The Chromium Authors
+// Use of this source code or applicable license file.
+
+// Versioned progress and cancellation contracts (backlog FND-02).
+//
+// In-tree location: //ai_browser/foundation/mojom/
+//
+// Cancellation is a contract, not a flag. The backlog records it as a known gap
+// in browser-automation tooling that is cheap to specify now and expensive to
+// retrofit later; the shape below is the reason it costs little: stopping is a
+// typed message with a typed answer that states what may have already happened.
+
+module ai_browser.mojom;
+
+import "ai_browser/foundation/mojom/ai_platform_common.mojom";
+import "ai_browser/foundation/mojom/ai_platform_failure.mojom";
+
+// Where a task is in its lifecycle. Reported for display and for the
+// cancellation audit; not used for control flow inside the browser.
+enum TaskStage {
+  kPlanning = 0,
+  kAwaitingApproval = 1,
+  kExecuting = 2,
+  kVerifying = 3,
+  kFinished = 4,
+};
+
+// Why a task was cancelled. Distinguishing user intent from policy and from a
+// deadline matters because the UI must say "stopped" for the first and must not
+// present the other two as the user's decision.
+enum CancelReason {
+  kUserStopped = 0,
+  kSuperseded = 1,
+  kDeadlineElapsed = 2,
+  kPolicyRevoked = 3,
+};
+
+// How far a cancellation actually got.
+enum CancelledAt {
+  // Nothing was in flight; no observable effect.
+  kBeforeFirstAction = 0,
+  // Stopped between actions; earlier actions remain applied.
+  kBetweenActions = 1,
+  // An action was already dispatched when the stop arrived. Its effect is
+  // unknown until re-observed.
+  kInFlightAction = 2,
+  // The task had already completed; the stop changed nothing.
+  kAlreadyFinished = 3,
+};
+
+struct TaskProgress {
+  SchemaVersion schema_version;
+  TaskId task;
+  TaskStage stage;
+  uint32 completed_steps;
+  // Absent when the total is genuinely unknown. The UI must not render a
+  // percentage from a guessed total.
+  uint32? total_steps;
+  // Set when progress reporting itself was bounded.
+  OutputLimit? limit;
+};
+
+struct CancellationRequest {
+  SchemaVersion schema_version;
+  TaskId task;
+  CancelReason reason;
+};
+
+struct CancellationResult {
+  SchemaVersion schema_version;
+  TaskId task;
+  CancelledAt cancelled_at;
+  // Count of actions that completed before the stop. Reported so the user can
+  // see what the task did even after stopping it.
+  uint32 actions_completed;
+  // True when cancelled_at is kInFlightAction: the side effect of that action
+  // is unknown and must be re-observed, not assumed absent.
+  boolean effect_unverified;
+};
+
+// Progress sink in the browser process. The utility process reports; it cannot
+// decide what the UI shows.
+// @implemented_by: browser_process
+// @called_by: ai_utility_process
+interface TaskReporter {
+  PublishProgress(TaskProgress progress);
+
+  // Terminal state. `failure` is null for success and non-null for
+  // kCancelled as well as real errors, so a stop is reported through the same
+  // channel the UI already handles rather than a special case.
+  FinishTask(TaskId task, Failure? failure);
+};
+
+// Stop control in the AI utility process, driven by the browser. The browser
+// owns the user's stop button; the utility process owns in-flight model calls,
+// so cancellation has to cross the boundary in this direction too.
+//
+// This interface deliberately cannot carry an ActionRequest: stopping work must
+// not grant the utility process action authority (contract_check.py enforces
+// that no utility-implemented interface accepts action types).
+// @implemented_by: ai_utility_process
+// @called_by: browser_process
+interface TaskControl {
+  CancelTask(CancellationRequest request) => (CancellationResult result);
+};

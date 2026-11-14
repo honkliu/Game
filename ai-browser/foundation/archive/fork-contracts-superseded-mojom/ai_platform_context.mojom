@@ -1,0 +1,138 @@
+// Copyright 2026 The Chromium Authors
+// Use of this source code or applicable license file.
+
+// Versioned context contracts (backlog FND-02, shapes from backlog §4.1 and §5).
+//
+// In-tree location: //ai_browser/foundation/mojom/
+//
+// Scope note: the semantic content types (SemanticBlock, LinkDescriptor,
+// ControlDescriptor, ...) belong to Epic C (CTX-01..04). They are referenced
+// here as opaque ids and bounded byte payloads so this file can be frozen as
+// the versioned envelope without pre-empting the extraction design.
+
+module ai_browser.mojom;
+
+import "ai_browser/foundation/mojom/ai_platform_common.mojom";
+import "ai_browser/foundation/mojom/ai_platform_failure.mojom";
+
+// Why a requested region could not be captured. The three kinds are distinct
+// because the remedy differs: an inaccessible frame needs a permission change,
+// an unloaded region needs scrolling, unsupported content needs an extractor.
+enum CoverageGapKind {
+  kInaccessibleFrame = 0,
+  kUnloadedRegion = 1,
+  kUnsupportedContent = 2,
+};
+
+struct CoverageGap {
+  CoverageGapKind kind;
+  // Developer-facing description only; never page text (backlog §8).
+  string reason;
+};
+
+// Completeness claim for a snapshot. The status is the field the UI renders;
+// "complete-enough" is a statement about the question being asked, not about
+// the page, so the caller must supply it from the request rather than the
+// extractor guessing it.
+enum CoverageStatus {
+  kPartial = 0,
+  kUpdating = 1,
+  kBlocked = 2,
+  kCompleteEnough = 3,
+};
+
+struct ContextCoverage {
+  CoverageStatus status;
+  uint32 captured_frames;
+  array<CoverageGap> inaccessible_frames;
+  array<CoverageGap> unloaded_regions;
+  array<CoverageGap> unsupported_content;
+  boolean has_untranscribed_media;
+  // 0.0..=1.0 estimate. Producers must emit a real estimate or 0.0; the value
+  // is displayed to the user and must not default to a reassuring number.
+  float32 estimated_completeness;
+};
+
+// One captured generation of one document. `key` is resolved by the browser
+// process, so the snapshot tells the receiver which document this actually is
+// rather than letting the receiver restate it.
+struct ContextSnapshot {
+  SchemaVersion schema_version;
+  DocumentRef document;
+  SnapshotVersion snapshot_version;
+  // Milliseconds since the Unix epoch, from the browser process clock.
+  int64 captured_at;
+  // Metadata only. URL is explicitly metadata, never identity (backlog §2.3).
+  string url;
+  string origin;
+  string title;
+  ContextCoverage coverage;
+  array<uint8> payload;
+  OutputLimit? limit;
+};
+
+// Reference to a specific slice of a specific capture, stored with a
+// conversation turn so an old answer can be re-evaluated against current state.
+struct ContextRef {
+  DocumentRef document;
+  SnapshotVersion snapshot_version;
+  // Empty means "the whole snapshot".
+  array<string> block_ids;
+};
+
+// The immutable context binding of one user turn (backlog §5).
+struct ConversationBinding {
+  SchemaVersion schema_version;
+  string conversation_id;
+  WorkspaceId workspace;
+  array<ContextRef> context_refs;
+};
+
+// Why a stored answer no longer matches what is on screen. This is displayed,
+// not swallowed: a stale answer may stay visible but must be labelled, and an
+// action planned from it cannot run without replanning (backlog §5).
+enum StaleStatus {
+  kCurrent = 0,
+  kContentChanged = 1,
+  kDocumentReplaced = 2,
+  kTabClosed = 3,
+};
+
+// Result of re-evaluating a ConversationBinding against live state.
+struct StaleAssessment {
+  SchemaVersion schema_version;
+  StaleStatus status;
+  // True when an action planned from this binding must be re-planned. The
+  // browser process, not the model, is the authority on this bit.
+  boolean replan_required;
+};
+
+// Browser-process service. The AI utility process and renderer probes cannot
+// reach this; they receive narrow interfaces below.
+// @implemented_by: browser_process
+// @called_by: ai_utility_process
+interface ContextService {
+  // Returns the current snapshot for `document`, or at least the metadata for
+  // the committed document so the context header can update immediately
+  // (backlog §2.3). A token that no longer resolves fails kStale; a token owned
+  // by another workspace or tab fails kBlocked.
+  GetSnapshot(DocumentRef document, WorkspaceId workspace)
+      => (ContextSnapshot? snapshot, Failure? failure);
+
+  // Classifies a stored binding against live state so the UI can label an
+  // answer and so the action runtime can refuse to act on it.
+  AssessStaleness(ConversationBinding binding)
+      => (StaleAssessment? assessment, Failure? failure);
+};
+
+// Narrow renderer-side probe (backlog §3, "Renderer process"). Implemented in
+// the renderer, used only by the browser process. It answers questions about
+// its own document and returns nothing about any other tab.
+// @implemented_by: renderer_process
+// @called_by: browser_process
+interface PageProbe {
+  // `base_version` selects the delta window; the renderer sends what changed
+  // since it rather than recapturing (backlog §4.3).
+  ExtractRegion(array<string> block_ids, SnapshotVersion base_version)
+      => (ContextSnapshot? snapshot, Failure? failure);
+};
