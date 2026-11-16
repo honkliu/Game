@@ -47,7 +47,7 @@ Measured facts behind the reuse claim, re-checked today so nobody re-litigates i
 
 | Check | Result |
 |---|---|
-| `#[test]`/`#[tokio::test]` in `native-browser/crates/browser/src` | **118** (grep, 2026-11-13) |
+| `#[test]`/`#[tokio::test]` in `crates/shell/src` | **118** (grep, 2026-11-13) |
 | Model-provider code in `native-browser/**.rs` | **none** — grep for `struct .*Provider\|trait .*Provider\|fn chat\|completion\|llm\|api_key\|Authorization` → 1 hit, a COM comment in `webview2.rs` |
 | Reusable as code | `store.rs` (one `rusqlite::Connection`, `busy_timeout(2 s)`, row cap, in-memory ctor for tests), `ipc.rs` (typed envelope), `settings.rs`, `downloads.rs` (Windows filename sanitiser), `omnibox.rs` (search URL template). Design + test vectors, **not** provider plumbing |
 
@@ -112,7 +112,7 @@ Therefore we do **not** inherit:
    there; it needs a proxied network (L6).
 2. **The network kill switch is process-level.** Terminate the AI executable: it holds the only model
    socket in the program (`supervise::abort()` → EOF → 500 ms grace → `kill()` → reap, already
-   implemented and tested in `foundation/src/supervise.rs`). Backlog §7/§8 wording about blocking AI
+   implemented and tested in `crates/contract/src/supervise.rs`). Backlog §7/§8 wording about blocking AI
    egress at the navigation layer **does not hold here**. Navigation-layer interception is best-effort
    by Microsoft's own documentation — *"For performance reasons, `GET` HTTP requests may happen,
    while the host is responding."* — so `AddWebResourceRequestedFilter` (1969) is defence-in-depth
@@ -126,7 +126,7 @@ Therefore we do **not** inherit:
 
 ## 3. Transport — decided by Bob; these are the conformance requirements
 
-**Decided** (see `../foundation/README.md`, "Contract format and transport decision"): hand-written
+**Decided** (see `../crates/contract/README.md`, "Contract format and transport decision"): hand-written
 Rust types in `ai-platform-contract` are the source of truth; the wire is **one JSON object per line
 (NDJSON) over the utility's stdin/stdout**, spawned with `Stdio::piped()`. Loopback TCP and localhost
 WebSockets are ruled out **by policy** — pages we render can reach local ports — which is the same
@@ -182,7 +182,7 @@ FND-04 taxonomy and nothing else: `unavailable | blocked | stale | cancelled | t
 unsupported | output_limited`.
 
 **Alignment with the shipped crate.** The method names below were drafted before
-`ai-platform-contract` existed. **`foundation/src/frame.rs::Method` is the authoritative closed
+`ai-platform-contract` existed. **`crates/contract/src/frame.rs::Method` is the authoritative closed
 list** — seven methods, each with one legal issuer: utility → `context.get_snapshot`,
 `action.dispatch`, `task.progress`, `task.finish`; shell → `model.complete`, `task.cancel`,
 `utility.ping`. `task.progress` **and** `task.finish` are the notifications (`is_notification`), not
@@ -202,7 +202,7 @@ just progress. Mapping onto that list, plus one gap:
 | shell → utility | `model.complete` (issuer `Peer::Shell`) | the user's question, the target `DocumentToken`s, and the optional selection |
 | utility → shell | `task.finish` (notification) | the answer and its citations; streamed tokens go on `task.progress` |
 
-The open work is therefore **two payload *types* in `foundation/src/contract.rs`, not a method**:
+The open work is therefore **two payload *types* in `crates/contract/src/contract.rs`, not a method**:
 (1) a **task request** — question + target tokens + optional selection + `snapshot_version`; (2) an
 **answer with citations**. `contract.rs` today ships `ContextSnapshot`, `ContextRef`,
 `ConversationBinding`, `TaskProgress`/`TaskStage` and `ActionRequest`, and **nothing that names a model

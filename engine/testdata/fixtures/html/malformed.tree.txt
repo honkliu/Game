@@ -1,0 +1,72 @@
+#document
+  <!DOCTYPE html>
+  <html>
+    <head>
+    </head>
+    <body>
+      <p>
+        #text "Unclosed "
+        <b>
+          #text "bold and "
+          <i>
+            #text "italic"
+          </i>
+        </b>
+      </p>
+      #text "\n"
+      <div>
+        #text "mismatched "
+        <span>
+          #text "span"
+          <div>
+            #text "div closes span"
+          </div>
+        </span>
+      </div>
+      #text "\n"
+      <p>
+        #text "stray close  and "
+      </p>
+      #text "\n"
+      <ul>
+        <li>
+          #text "a"
+          <div>
+            #text "b"
+          </div>
+        </li>
+      </ul>
+      #text "\n"
+      <p>
+        #text "void: "
+        <br>
+        #text " "
+        <img src="x.png" alt="x">
+        #text " "
+      </p>
+      <hr>
+      #text "\n"
+      <p>
+        #text "unclosed paragraph at end\n"
+      </p>
+      <p>
+        #text "nested "
+        <a href="1">
+          #text "first "
+          <a href="2">
+            #text "second"
+          </a>
+          #text "\n\n"
+        </a>
+      </p>
+      <table>
+        <tbody>
+          <tr>
+            <td>
+              #text "orphan cell"
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </body>
+  </html>

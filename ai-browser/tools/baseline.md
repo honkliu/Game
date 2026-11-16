@@ -5,10 +5,14 @@ measured verdict of the `--proof` harness that produces them. Every number below
 running `browser.exe`; nothing here is estimated. Where a budget could not be measured in a given
 mode, the harness prints `NOT MEASURED` and this file says why instead of quoting a number for it.
 
-The harness now measures all eight checks; **C3 and C5 — the two that were unmeasurable in the first
-cut — are measurable in the modes that turn off the shell behaviour that hid them** (§The four
-modes). Run `--proof=+no_tab_sleep+no_overlay` and all eight go green:
-`RESULT 0 of 8 checks failed`, exit 0.
+The harness now measures **ten** checks, **C0…C9**; **C3 and C5 — the two that were unmeasurable in
+the first cut — are measurable in the modes that turn off the shell behaviour that hid them** (§The
+four modes). Run `--proof=+no_tab_sleep+no_overlay` and it exits green. The transcripts pasted below
+were produced by the eight-check harness and read `RESULT 0 of 8 checks failed`; the same command on
+the ten-check harness reads **`RESULT 0 of 10 checks failed`, exit 0** (`../STATUS.md`). Two things
+the eight-check sentence got wrong and the ten-check one does not: **C8 and C9 print `NOT MEASURED`
+under that command** and need a third flag, `+self_refresh`, to produce a number, and `NOT MEASURED`
+is never green — so a green gate is the plumbing being proven, not ten budgets being met.
 
 ## Read this first: the profile wipe is mandatory for comparability, not cleanup
 
@@ -37,8 +41,8 @@ The harness now enforces this rather than documenting it:
    anyway, and the header prints `PROFILE NOT WIPED — session state was restored, see C7` instead of
    the `profile was wiped` line. A report whose C7 is red must not have its absolute MB quoted.
 3. The header also prints the mode (`tab_sleep=`, `overlay_at_startup=`), because absolute MB are
-   comparable only against a run **in the same mode** — the overlay alone is ~66 MB and each
-   background tab kept alive is ~97 MB (§Pricing).
+   comparable only against a run **in the same mode** — the overlay alone is ~62–69 MB and each
+   background tab kept alive is ~94–98 MB (§Pricing).
 
 ### What is portable and what is not
 
@@ -46,11 +50,15 @@ The harness now enforces this rather than documenting it:
 |---|---|
 | Process *counts*: 1 browser process, +1 renderer per live page, 4 non-renderer children per browser process, 0 unclassified | — |
 | Per-role working set of one sample (browser process ≈ 140–165 MB, one renderer ≈ 54–73 MB, shell 28–39 MB) | absolute tree MB, unless both runs started from a wiped profile *and* the same mode |
-| Intra-run deltas: overlay +66 MB, kept-alive background tab +97 MB, 4 tabs +390 MB | anything compared against a run whose C7 was not green |
+| Intra-run deltas: overlay +62–69 MB, kept-alive background tab +94–98 MB, 4 tabs +390 MB | anything compared against a run whose C7 was not green |
 
-Run-to-run spread on the same mode and a wiped profile, measured 6 times today: whole tree ±7 MB,
-overlay delta ±2.2 MB, per-kept-alive-tab delta ±0.6 MB. Treat differences smaller than that as
-noise, not as a regression.
+Run-to-run spread on the same mode and a wiped profile, measured 6 times in one session: whole tree
+±7 MB, overlay delta ±2.2 MB, per-kept-alive-tab delta ±0.6 MB. **That is a within-session precision
+figure, not a noise floor, and treating it as one would have hidden the result that matters:** the
+later runs recorded in §Pricing landed **6.8 MB** below the six-session overlay band's bottom and
+**3.8 MB** below its per-tab band — both far outside ±2.2/±0.6. So the rule is: inside one session,
+differences under those figures are noise; **across sessions, a delta that leaves the recorded band
+is a finding, not noise** — which is exactly how the 97 MB "floor" turned out not to be one.
 
 ## Machine
 
@@ -298,20 +306,32 @@ Two readings of "one webview" fall out of this, and they are different numbers:
 
 * **a page webview that gets slept**: its renderer is destroyed, so it costs ≈ 0 MB of resident
   working set and the tab's entry/title survive;
-* **a page webview kept alive**: **+97.2–97.9 MB** of process-tree working set, **+1 renderer
-  process**, **+73.1–73.8 MB of renderer working set**, **+0 browser processes**.
+* **a page webview kept alive**: **+94.4–98.2 MB** of process-tree working set across all runs
+  recorded here (**+97.2–97.9 MB** within the session that produced the six-run table above), **+1
+  renderer process**, **+73.1–73.8 MB of renderer working set**, **+0 browser processes**.
 
 ## Pricing the product decision: what keeping background tabs alive costs
 
 This is the number `sleep_background_tabs` was written to avoid paying, and the reason the toggle
 exists — it is a price, not a feature proposal.
 
-* **97.0–98.2 MB per background tab kept alive** (six measurements, σ ≈ 0.4 MB), on light pages
-  (example.com/.org/.net, iana.org). Those are among the cheapest pages on the internet; the shell's
-  own comment in `app.rs` cites **≈120 MB per live page** from an earlier 31-webview/4.5 GB
-  observation, so treat 97 MB as a **floor** for real content, not a ceiling.
-* Arithmetic from that floor, not a measurement: 8 tabs kept alive ≈ **+780 MB**, 20 tabs ≈
-  **+1.95 GB**, on top of a ~590 MB five-tab tree.
+* **≈94–98 MB per background tab kept alive.** Six measurements in one session came to
+  **97.0–98.2 MB** (σ ≈ 0.4) on light pages (example.com/.org/.net, iana.org); **two independent
+  later runs each printed 94.4 MB/tab** (471.9 MB / 5 tabs and 377.4 MB / 4 tabs, wiped profile,
+  same mode — `../STATUS.md`). **The word "floor" is wrong and has been removed from this file's
+  reasoning:** a floor that legitimate re-runs undercut is not a floor. What survives is the band
+  and the direction of every caveat in it — these are still among the cheapest pages on the
+  internet, and the shell's own comment in `app.rs` cites **≈120 MB per live page** from an earlier
+  31-webview/4.5 GB observation, so 94 MB is the *best case* for real content, not a lower bound on
+  what real content will cost.
+* Why the whole run moved, and what is still unexplained: the lighter runs' **step-0 tree was
+  435.9 MB where this file records 456–462 MB for the same mode**, i.e. the *entire* run sat ~20 MB
+  lighter rather than the per-tab delta alone being odd. That favours "machine state shifted" over
+  "the spread is wider than six samples implied", but **it is not settled and no cause is claimed
+  here** — re-running the same mode on a console session is what would settle it.
+* Arithmetic from the band, not a measurement: 8 tabs kept alive ≈ **+750–785 MB**, 20 tabs ≈
+  **+1.9 GB**, on top of a ~590 MB five-tab tree. **Set any ceiling from the top of the band plus
+  margin, never from the mean** (≈98 MB/tab ⇒ 20 tabs ≈ 1.96 GB before margin).
 * The runtime's own ceiling is unchanged by this: 4 extra tabs cost **0** extra browser processes
   either way (C2 green in both modes), so the keep-alive decision is purely a working-set decision,
   not a process-count decision.
@@ -321,12 +341,23 @@ exists — it is a price, not a feature proposal.
 
 ## Pricing the overlay: C5 as a delta
 
-Six measurements across modes C and D: **+64.2, +65.2, +65.7, +66.9, +67.0, +68.5 MB** — i.e.
-**+1 renderer, +0 browser processes, ≈ 66 MB (range 64–69 MB)**.
+Seven measurements recorded in this tree: **+64.2, +65.2, +65.7, +66.9, +67.0, +68.5** (six, across
+modes C and D in one session) and **+61.7** from a later post-commit run (`../STATUS.md`) — i.e.
+**+1 renderer, +0 browser processes, ≈ 66 MB (recorded range 61.7–68.5 MB, quote ≈ 62–69 MB)**.
 
+* **A wider band — 61.7–76.1 MB over nine observations — has been reported from a run whose values
+  are not transcribed anywhere in this repo.** `76.1` appears in no file here, and neither do the
+  two observations beyond the seven above. This file therefore records **seven** and flags the other
+  two as missing rather than silently widening the range: the number that should be quoted today is
+  **61.7–68.5 MB**, while any *ceiling* must be set against **76.1** until those runs are re-produced
+  and pasted in. Both directions of the error are named deliberately — quoting 61.7–68.5 understates
+  the risk, and widening to 76.1 without a transcript would put an unsourced number into the table
+  that every other number is a delta against.
 * Plan said ≈60 MB budget / 80 MB ceiling (`FORK-OR-CDP.md` §3.1): **inside the ceiling, ~11 % over
   the budget estimate**. The plan's process-count prediction (+1 renderer, +0 browser) is exactly
-  right.
+  right; only its MB figure was low. **If the reported 76.1 MB top is real, the 80 MB ceiling has
+  ~5 % headroom left**, which is smaller than the band itself — see the headroom warning in
+  `../docs/RELEASE-0.md` §Budgets before quoting 80 MB as safety margin.
 * An independent cross-check that does not use a before/after pair: mode B at step 0 (overlay
   present, 1 live page) measured 525–528 MB of tree, mode D at step 0 (overlay absent) measured
   456–462 MB — a ~65 MB gap, agreeing with the delta method to within its own spread.
@@ -336,6 +367,28 @@ Six measurements across modes C and D: **+64.2, +65.2, +65.7, +66.9, +67.0, +68.
 * The single-controller-per-window rule in §3.1 is what keeps this a one-time ~66 MB; the check does
   not detect a second controller, only a second *browser process*, so a second overlay controller
   would show up as C5 +66 MB again, not as a C5 failure.
+
+## Pricing the idle background tab: C8 and C9
+
+Source caveat first: the numbers below come from the 11-minute A/B recorded in `../STATUS.md`
+(`--proof=4+no_tab_sleep+self_refresh`, 12 samples, wiped profile, read out of
+`%TEMP%\proof_ab.txt`), **not from a transcript pasted into this file**. It is one hand-run, so quote
+it as a measured magnitude and not as a distribution.
+
+* **C8 — a background tab does not self-refresh.** The same self-refreshing page ran 300 s hidden and
+  300 s visible: **0 committed self-navigations hidden, 2 visible.** `AppState::activate` hides a
+  deactivated tab's webview with `set_visible(false)`, the state Chromium's timer throttling keys on,
+  so the page's own reload timer is never scheduled. The consequence for pricing is that **there is
+  no self-refresh cost to add to a background tab**, and C6's per-tab figure stays the plain-tab
+  price rather than having a fake refresh cost folded into it.
+* **C9 — an idle background tab still grows.** **+2.4 MB/min across 6 live webviews** while
+  backgrounded = **+0.40 MB/min per live page webview**, against **−0.5 MB/min** in the visible arm
+  (combined **+0.16 MB/min per live page webview**). Twenty kept-alive tabs ≈ **8 MB/min** of drift
+  from tabs doing nothing but existing. **`RELEASE-0.md` budgeted nothing for this until now**; the
+  row is in §Budgets as an explicit ask.
+* **Trigger to re-price:** if shipping behaviour ever lets a hidden tab keep refreshing, self-
+  navigations appearing in C8's count are the signal — not a regression to ignore — and both this
+  section and C6's per-tab band need re-measuring.
 
 ## Not measured
 
@@ -350,8 +403,15 @@ Six measurements across modes C and D: **+64.2, +65.2, +65.7, +66.9, +67.0, +68.
   this harness deliberately cannot produce it yet.
 * **The CPU brand string** (no dependency-free Win32 call; the `Get-CimInstance` command in
   §Machine is the source of record).
-* **C3 in mode A, C5 in modes A/B, C6 in modes A/C** — each printed as `NOT MEASURED`, naming the
-  flag that measures it, rather than green or red. Not-measured is not a failure and is never a pass.
+* **C3 in mode A, C5 in modes A/B, C6 in modes A/C, C8 and C9 in every mode that omits
+  `+self_refresh`** — each printed as `NOT MEASURED`, naming the flag that measures it, rather than
+  green or red. Not-measured is not a failure and is never a pass.
+* **The AI ask path.** The four ask-path rows in `../docs/RELEASE-0.md` §Budgets (≈1.5 s navigate +
+  extract, 2052 ms provider round trip, ≈2.2 chars/token, ≈242 tok/s) are **one hand-run against the
+  live endpoint**: no check in this harness emits them, nothing here can re-run them, and every one is
+  `n = 1`. They are recorded as prices, not as measured budgets, and the p95 on each is genuinely
+  unknown. `response_format: {"type": "json_object"}` is excluded by measurement, not preference —
+  it puts this server into a repetition loop to `max_tokens`.
 
 ## Reproducing it (three facts that separate numbers from noise)
 
@@ -462,5 +522,5 @@ Nothing here is a second implementation of an existing capability:
 | Driving real navigations | existing `--driver` machinery in `app.rs` (settle window per step); `--proof` is one scenario name in `driver_script`, the logic is in `ai/proof.rs` |
 | Building / destroying the overlay for C5 | existing overlay construction path, extracted verbatim into `AppState::build_overlay_webview` (it is the same code startup runs, so C5 measures the shipping overlay); teardown is the same `drop` that tab sleeping already relies on |
 | The two toggles | new `ai/mode.rs`: `Config::parse` (tabs, `no_tab_sleep`, `no_overlay`, unknown-flag reporting), `install`/`config`/`active` behind a `OnceLock`, and the two guards `app.rs` reads |
-| Action levels, the `blocked`/`unsupported` taxonomy, the audit record type | the path dependency `ai-platform-contract` (`../foundation`) — the gate calls `level_of_action_kind` and `ActionLevel::allowed_in_release_zero()` and never restates the table |
+| Action levels, the `blocked`/`unsupported` taxonomy, the audit record type | the path dependency `ai-platform-contract` (`../crates/contract`) — the gate calls `level_of_action_kind` and `ActionLevel::allowed_in_release_zero()` and never restates the table |
 | The two-host probe behind §Workspace isolation | `tools/udf-share-probe.ps1` — `Get-CimInstance Win32_Process`, throwaway, kills only what it starts |

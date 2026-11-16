@@ -1,0 +1,13 @@
+[package]
+name = "engine-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Box tree and formatting contexts: block, inline, float, flex, positioned."
+
+[dependencies]
+engine-core.workspace = true
+engine-dom.workspace = true
+engine-style.workspace = true
+engine-text.workspace = true
+log.workspace = true

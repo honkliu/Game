@@ -1,0 +1,10 @@
+[package]
+name = "engine-css"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CSS Syntax L3 tokenizer, parser, selector AST, and longhand property model."
+
+[dependencies]
+engine-core.workspace = true
+url.workspace = true

@@ -1,0 +1,414 @@
+// Agent mode: tool loop, approvals, editable prompts/skills/instructions, MCP, stop.
+// Fake OpenAI-compatible model that speaks native tool calls. Run after `cargo build`.
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { launch, startFixtures, listen, run, sleep } from './harness.mjs';
+
+const fx = await startFixtures();
+const base = `http://127.0.0.1:${fx.port}`;
+
+// ── fake model ────────────────────────────────────────────────────────────
+const calls = [];
+let script = () => ({ text: 'ok' });
+const { server: modelServer, port: modelPort } = await listen((req, res) => {
+  let body = '';
+  req.on('data', (c) => (body += c));
+  req.on('end', () => {
+    if (req.url.endsWith('/models')) { res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ data: [{ id: 'fake-model' }] })); }
+    const parsed = JSON.parse(body || '{}');
+    calls.push(parsed);
+    const out = script(parsed.messages || [], parsed, calls.length) || { text: 'ok' };
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const send = (delta, finish) => res.write(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish || null }] })}\n\n`);
+      if (out.tools) {
+        out.tools.forEach((t, i) => send({ tool_calls: [{ index: i, id: `call_${calls.length}_${i}`, type: 'function', function: { name: t.name, arguments: JSON.stringify(t.args || {}) } }] }));
+        send({}, 'tool_calls');
+      } else {
+        for (const c of out.text.match(/[\s\S]{1,12}/g) || ['']) send({ content: c });
+        send({}, 'stop');
+      }
+      res.end('data: [DONE]\n\n');
+    }, out.delay || 0);
+  });
+});
+
+// ── fake MCP server (streamable HTTP, JSON replies) ───────────────────────
+const mcpSeen = [];
+const { port: mcpPort } = await listen((req, res) => {
+  let body = '';
+  req.on('data', (c) => (body += c));
+  req.on('end', () => {
+    const m = JSON.parse(body || '{}');
+    mcpSeen.push(m.method);
+    const reply = (result) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ jsonrpc: '2.0', id: m.id, result })); };
+    if (m.method === 'initialize') return reply({ protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'fake', version: '1' } });
+    if (m.method === 'tools/list') return reply({ tools: [
+      { name: 'echo', description: 'Echo text back', inputSchema: { type: 'object', properties: { text: { type: 'string' } } }, annotations: { readOnlyHint: true } },
+      { name: 'delete_all', description: 'Dangerous', inputSchema: { type: 'object', properties: {} } },
+    ] });
+    if (m.method === 'tools/call') return reply({ content: [{ type: 'text', text: `echo:${m.params.arguments.text || 'none'}` }] });
+    res.statusCode = 202; res.end();
+  });
+});
+
+const app = await launch({ modelPort, debugPort: 9447 });
+let side;
+const ui = (fn, arg) => side.evaluate(fn, arg);
+const waitFor = async (fn, timeout = 25000) => {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) { const v = await fn(); if (v) return v; await sleep(150); }
+  throw new Error('timed out');
+};
+const ask = async (text) => {
+  const n = await ui(() => window.__agentUi.messages.length);
+  await ui((t) => window.__agentUi.send(t), text);
+  await waitFor(() => ui((n0) => window.__agentUi.messages.length >= n0 + 2, n));
+  return ui(() => window.__agentUi.messages.at(-1));
+};
+const toolMsg = (messages) => messages.filter((m) => m.role === 'tool');
+const call = (op, params) => ui(([o, p]) => window.__native.invoke('agent.call', { ...p, op, req: 9000 + Math.floor(Math.random() * 1e6) }).then(() => null), [op, params || {}]);
+const mgmt = (op, params = {}) => ui(([o, p]) => new Promise((resolve, reject) => {
+  const req = 5000000 + Math.floor(Math.random() * 1e6);
+  window.__native.on('agent.reply', function h(r) { if (r.req === req) r.ok ? resolve(r.value) : reject(new Error(r.error)); });
+  window.__native.invoke('agent.call', { ...p, op: o, req }).catch(reject);
+}), [op, params]);
+
+const cases = [
+  ['setup: article tab, agent mode', async () => {
+    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    await (await app.pageWith(/127\.0\.0\.1:\d+\/$/)).waitForSelector('#btn');
+    await app.invoke('shortcut', { name: 'ask_ai' });
+    side = await app.pageWith(/sidebar\.html/);
+        await side.waitForSelector('#ag-input');
+    const st = await mgmt('state');
+    assert.equal(st.prompts.length, 3);
+    assert.ok(st.skills.length >= 4);
+  }],
+
+  ['tool loop: list_tabs then read_page, final answer streamed', async () => {
+    calls.length = 0;
+    script = (messages) => {
+      const tools = toolMsg(messages);
+      if (tools.length === 0) return { tools: [{ name: 'list_tabs' }] };
+      if (tools.length === 1) return { tools: [{ name: 'read_page' }] };
+      return { text: 'The page says: ' + (/Returns policy/.test(tools[1].content) ? 'RETURNS-OK' : 'MISSING') };
+    };
+    const last = await ask('what is on my current tab?');
+    assert.match(last.content, /RETURNS-OK/);
+    assert.equal(last.tools.length, 2);
+    assert.ok(calls[0].tools.some((t) => t.function.name === 'read_page'));
+    assert.match(calls[0].messages[0].content, /browser/i);
+  }],
+
+  ['write tool asks for approval: deny', async () => {
+    calls.length = 0;
+    script = (messages) => toolMsg(messages).length === 0
+      ? { tools: [{ name: 'click', args: { selector: '#btn' } }] }
+      : { text: 'got: ' + toolMsg(messages)[0].content.slice(0, 60) };
+    const n = await ui(() => window.__agentUi.messages.length);
+    await ui((t) => window.__agentUi.send(t), 'click the button');
+    await side.waitForSelector('.ag-approve');
+    assert.match(await side.textContent('.ag-approve'), /click/i);
+    await side.click('.ag-approve .is-danger');
+    await waitFor(() => ui((n0) => window.__agentUi.messages.length >= n0 + 2, n));
+    const last = await ui(() => window.__agentUi.messages.at(-1));
+    assert.match(last.content, /rejected/i);
+  }],
+
+  ['auto mode: "open X" navigates the page with no approval', async () => {
+    calls.length = 0;
+    script = (messages) => toolMsg(messages).length === 0
+      ? { tools: [{ name: 'navigate', args: { url: `${base}/other` } }] }
+      : { text: 'opened it' };
+    const n = await ui(() => window.__agentUi.messages.length);
+    await ui((t) => window.__agentUi.send(t), 'open 新浪新闻');
+    await waitFor(() => ui((n0) => window.__agentUi.messages.length >= n0 + 2, n));
+    assert.match(calls[0].messages[0].content, /Navigation mode: AUTO/);
+    assert.equal(await side.locator('.ag-approve').count(), 0);
+    await app.pageWith(/127\.0\.0\.1:\d+\/other/);
+  }],
+
+  ['chat mode: "打开 X" is handed to the agent and navigates', async () => {
+    await ui(() => document.getElementById('agent-switch').click());
+    assert.equal(await ui(() => window.__agentUi.agentOn), false);
+    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    await app.pageWith(/127\.0\.0\.1:\d+\/$/);
+    script = (messages) => toolMsg(messages).length === 0
+      ? { tools: [{ name: 'navigate', args: { url: `${base}/other` } }] }
+      : { text: 'opened it' };
+    await ui((t) => window.__agentUi.send(t), '打开新浪');
+    await app.pageWith(/127\.0\.0\.1:\d+\/other/);
+    assert.equal(await ui(() => window.__agentUi.agentOn), true);
+  }],
+
+  ['agent tool: canvas opens a grid of pages the user can see', async () => {
+    script = (messages) => toolMsg(messages).length === 0
+      ? { tools: [{ name: 'canvas', args: { action: 'open', cols: 2, rows: 1, urls: [`${base}/?c=1`, `${base}/?c=2`] } }] }
+      : { text: 'canvas ready' };
+    await ui((t) => window.__agentUi.send(t), 'put two pages side by side');
+    await waitFor(async () => (await app.invoke('canvas.state'))?.cells?.filter((c) => c.tab_id != null).length === 2);
+    const cv = await app.invoke('canvas.state');
+    assert.equal(cv.cols, 2);
+    await app.invoke('tab.close', { tab_id: cv.id });
+  }],
+
+  ['agent: "open X at (1,2)" loads that row/column of the canvas', async () => {
+    await app.invoke('canvas.create', { cols: 3, rows: 2, urls: [`${base}/?g=0`] });
+    script = (messages) => toolMsg(messages).length === 0
+      ? { tools: [{ name: 'navigate', args: { url: `${base}/?g=target`, row: 1, col: 2 } }] }
+      : { text: 'done' };
+    await ui((t) => window.__agentUi.send(t), 'open google at (1,2)');
+    await waitFor(async () => (await app.invoke('canvas.state'))?.cells?.[5]?.tab_id != null);
+    await waitFor(async () => app.ctx.pages().some((p) => p.url().includes('g=target')));
+    assert.match(calls.at(-1).messages[0].content, /# Canvas/);
+    await app.invoke('tab.close', { tab_id: (await app.invoke('canvas.state')).id });
+  }],
+
+  ['manual mode: the pane shows a link, the page does not move until it is clicked', async () => {
+    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    await app.pageWith(/127\.0\.0\.1:\d+\/$/);
+    await ui(() => document.getElementById('nav-switch').click());
+    calls.length = 0;
+    script = (messages) => toolMsg(messages).length === 0
+      ? { tools: [{ name: 'open_tab', args: { url: `${base}/live` } }] }
+      : { text: 'link ready' };
+    const n = await ui(() => window.__agentUi.messages.length);
+    await ui((t) => window.__agentUi.send(t), 'open the live page');
+    await waitFor(() => ui((n0) => window.__agentUi.messages.length >= n0 + 2, n));
+    assert.match(calls[0].messages[0].content, /Navigation mode: MANUAL/);
+    await side.waitForSelector('.ag-link');
+    const tabs = await ui(() => window.__native.invoke('agent.context', {}));
+    assert.ok(!tabs.tabs.some((t) => /\/live/.test(t.url)), 'nothing was opened yet');
+    await side.click('.ag-link');
+    await app.pageWith(/127\.0\.0\.1:\d+\/live/);
+    await ui(() => document.getElementById('nav-switch').click());
+  }],
+
+  ['private addresses are refused by fetch_url', async () => {
+    script = (messages) => toolMsg(messages).length === 0
+      ? { tools: [{ name: 'fetch_url', args: { url: `${base}/` } }] }
+      : { text: 'result: ' + toolMsg(messages)[0].content };
+    const last = await ask('fetch the local page');
+    assert.match(last.content, /result: Error/);
+  }],
+
+  ['editable prompts: system prompt edit reaches the model, reset restores', async () => {
+    await mgmt('prompt.save', { name: 'system', text: 'MARKER-SYSTEM-42 today={{date}}' });
+    calls.length = 0;
+    script = () => ({ text: 'ok' });
+    await ask('hello');
+    assert.match(calls[0].messages[0].content, /^MARKER-SYSTEM-42 today=\d{4}-\d\d-\d\d/);
+    const st = await mgmt('prompt.reset', { name: 'system' });
+    assert.equal(st.prompts.find((p) => p.name === 'system').customized, false);
+    calls.length = 0;
+    await ask('hello again');
+    assert.doesNotMatch(calls[0].messages[0].content, /MARKER-SYSTEM-42/);
+  }],
+
+  ['custom instructions reach the system prompt', async () => {
+    await mgmt('config.set', { custom_instructions: 'ALWAYS-SAY-PINEAPPLE' });
+    calls.length = 0;
+    await ask('hi');
+    assert.match(calls[0].messages[0].content, /ALWAYS-SAY-PINEAPPLE/);
+    await mgmt('config.set', { custom_instructions: '' });
+  }],
+
+  ['live context: typing and in-page tabs change the context with no URL change', async () => {
+    await app.invoke('nav.open', { url: `${base}/live`, disposition: 'current' });
+    const page = await app.pageWith(/127\.0\.0\.1:\d+\/live/);
+    await page.waitForSelector('#nm');
+    await sleep(800);
+    await ui(() => { window.__ctxEvents = []; window.__native.on('context.changed', (c) => window.__ctxEvents.push(c)); });
+    await page.fill('#nm', 'Ada Lovelace');
+    await page.fill('#pw', 'hunter2-secret');
+    await waitFor(() => ui(() => window.__ctxEvents.some((c) => c.content && c.content.filled >= 1)));
+    await page.click('#tab-b');
+    await waitFor(() => ui(() => window.__ctxEvents.some((c) => /ZEBRA-PANEL/.test(c.content?.preview || '') || c.content?.chars > 0)));
+    const urls = await ui(() => [...new Set(window.__ctxEvents.map((c) => c.page?.url))]);
+    assert.equal(urls.length, 1);
+    calls.length = 0;
+    script = () => ({ text: 'ok' });
+    await ask('what did I just do?');
+    const system = calls[0].messages[0].content;
+    assert.match(system, /Full name \[text\]: Ada Lovelace/);
+    assert.match(system, /ZEBRA-PANEL/);
+    assert.doesNotMatch(system, /hunter2/);
+    assert.match(system, /Secret \[password\]: \(hidden\)/);
+  }],
+
+  ['edited context: the text the user wrote replaces the generated context', async () => {
+    const preview = await mgmt('context.preview', {});
+    assert.match(preview.context, /Ada Lovelace/);
+    calls.length = 0;
+    script = () => ({ text: 'ok' });
+    const n = await ui(() => window.__agentUi.messages.length);
+    await ui(() => window.__native.invoke('agent.run', { messages: [{ role: 'user', content: 'hi' }], context_override: 'USER-EDITED-CONTEXT-77' }));
+    await waitFor(() => calls.length > 0);
+    const system = calls[0].messages[0].content;
+    assert.match(system, /USER-EDITED-CONTEXT-77/);
+    assert.doesNotMatch(system, /ZEBRA-PANEL/);
+    await waitFor(() => ui(() => true));
+    await sleep(500);
+  }],
+
+  ['selection: selecting page text shows it in the pane, and Explain sends it (agent mode)', async () => {
+    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    const page = await app.pageWith(/127\.0\.0\.1:\d+\/$/);
+    await page.waitForSelector('#p1');
+    await sleep(600);
+    await page.evaluate(() => {
+      const r = document.createRange();
+      r.selectNodeContents(document.getElementById('p1'));
+      const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    });
+    await side.waitForSelector('#sel-card', { timeout: 15000 });
+    assert.match(await side.textContent('#sel-card'), /Returns are accepted within 30 days/);
+    calls.length = 0;
+    script = () => ({ text: 'EXPLAINED' });
+    await side.click('#sel-card button:has-text("Explain")');
+    await waitFor(() => calls.length > 0);
+    const sys = calls[0].messages[0].content;
+    assert.match(sys, /Returns are accepted within 30 days/, 'selection reaches the model');
+    assert.match(JSON.stringify(calls[0].messages.at(-1)), /Explain the selected text/);
+    await waitFor(() => ui(() => window.__agentUi.messages.at(-1)?.content === 'EXPLAINED'));
+  }],
+
+  ['selection: toolbar action with the pane open routes into the pane (ask mode too)', async () => {
+    await ui(() => document.getElementById('agent-switch').click());
+    await side.waitForSelector('#ask-input');
+    const page = await app.pageWith(/127\.0\.0\.1:\d+\/$/);
+    await page.evaluate(() => {
+      const r = document.createRange();
+      r.selectNodeContents(document.getElementById('p2'));
+      const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    });
+    await side.waitForFunction(() => /Shipping is free/.test(document.getElementById('sel-card')?.textContent || ''), null, { timeout: 15000 });
+    calls.length = 0;
+    script = () => ({ text: 'TRANSLATED' });
+    await app.invoke('ai.selection.act', { intent: 'translate' });
+    await waitFor(() => calls.length > 0);
+    assert.match(JSON.stringify(calls[0].messages), /Shipping is free over \$50/, 'selection reaches the ask pipeline');
+    await side.waitForFunction(() => /TRANSLATED/.test(document.getElementById('ask-log').textContent));
+    await ui(() => document.getElementById('agent-switch').click());
+    await side.waitForSelector('#ag-input');
+  }],
+
+  ['context panel: view, edit, and discard when the page changes', async () => {
+    await side.click('#ctx-toggle');
+    await side.waitForSelector('#ctx-edit');
+    await waitFor(() => side.inputValue('#ctx-edit').then((v) => /Returns policy/.test(v)));
+    await side.fill('#ctx-edit', 'MY-EDITED-CONTEXT-55');
+    calls.length = 0;
+    script = () => ({ text: 'ok' });
+    await ask('use my context');
+    assert.match(calls[0].messages[0].content, /MY-EDITED-CONTEXT-55/);
+    await app.invoke('nav.open', { url: `${base}/other`, disposition: 'current' });
+    await app.pageWith(/127\.0\.0\.1:\d+\/other/);
+    await waitFor(() => side.inputValue('#ctx-edit').then((v) => !/MY-EDITED-CONTEXT-55/.test(v)));
+    calls.length = 0;
+    await ask('and now?');
+    assert.doesNotMatch(calls[0].messages[0].content, /MY-EDITED-CONTEXT-55/);
+  }],
+
+  ['pane resize: width follows the request and is clamped', async () => {
+    const w0 = await ui(() => window.innerWidth);
+    const r = await ui(() => window.__native.invoke('ai.pane.resize', { width: 600 }));
+    assert.equal(r.width, 600);
+    await waitFor(() => ui(() => Math.abs(window.innerWidth - 600) <= 1));
+    const small = await ui(() => window.__native.invoke('ai.pane.resize', { width: 10 }));
+    assert.equal(small.width, 320);
+    const big = await ui(() => window.__native.invoke('ai.pane.resize', { width: 5000 }));
+    assert.ok(big.width > 900, 'no fixed maximum');
+    await ui(() => window.__native.invoke('ai.pane.resize', { width: 420 }));
+    await waitFor(() => ui(() => Math.abs(window.innerWidth - 420) <= 1));
+    assert.ok(w0 > 0);
+    assert.ok(await side.locator('#resize-grip').count());
+  }],
+
+  ['skills: create in UI store, always-on injected, auto loaded via fetch_skill', async () => {
+    await mgmt('skill.save', { name: 'Always Polite', description: 'tone', mode: 'always-on', instructions: 'ALWAYS-POLITE-BODY', triggers: [] });
+    await mgmt('skill.save', { name: 'Tax Helper', description: 'help with tax forms', mode: 'auto', instructions: 'TAX-STEPS-BODY', triggers: ['tax'] });
+    calls.length = 0;
+    script = (messages) => toolMsg(messages).length === 0
+      ? { tools: [{ name: 'fetch_skill', args: { skill_id: 'tax-helper' } }] }
+      : { text: 'loaded: ' + (/TAX-STEPS-BODY/.test(toolMsg(messages)[0].content) ? 'yes' : 'no') };
+    const last = await ask('help me with my tax form');
+    assert.match(calls[0].messages[0].content, /ALWAYS-POLITE-BODY/);
+    assert.ok(calls[0].tools.some((t) => t.function.name === 'fetch_skill'));
+    assert.match(last.content, /loaded: yes/);
+    // Off removes it from the catalog entirely.
+    await mgmt('skill.mode', { id: 'tax-helper', mode: 'off' });
+    calls.length = 0;
+    script = () => ({ text: 'ok' });
+    await ask('tax again');
+    assert.doesNotMatch(calls[0].messages[0].content, /Tax Helper/);
+    await mgmt('skill.delete', { id: 'tax-helper' });
+    await mgmt('skill.delete', { id: 'always-polite' });
+  }],
+
+  ['MCP: add server, tools listed, read-only runs, other asks approval', async () => {
+    const st = await mgmt('mcp.save', { name: 'Fake', url: `http://127.0.0.1:${mcpPort}/mcp`, trust: false, enabled: true });
+    assert.equal(st.mcp.length, 1);
+    await waitFor(async () => (await mgmt('state')).mcp[0].status === 'connected');
+    const tools = (await mgmt('state')).mcp[0].tools.map((t) => t.name);
+    assert.deepEqual(tools.sort(), ['delete_all', 'echo']);
+    calls.length = 0;
+    script = (messages) => toolMsg(messages).length === 0
+      ? { tools: [{ name: 'mcp_fake__echo', args: { text: 'hi' } }] }
+      : { text: 'mcp said ' + toolMsg(messages)[0].content };
+    const last = await ask('use the echo tool');
+    assert.match(last.content, /echo:hi/);
+    assert.ok(calls[0].tools.some((t) => t.function.name === 'mcp_fake__delete_all'));
+    // The dangerous one waits for the user.
+    script = (messages) => toolMsg(messages).length === 0
+      ? { tools: [{ name: 'mcp_fake__delete_all' }] }
+      : { text: 'finished ' + toolMsg(messages)[0].content.slice(0, 40) };
+    const n = await ui(() => window.__agentUi.messages.length);
+    await ui((t) => window.__agentUi.send(t), 'delete everything');
+    await side.waitForSelector('.ag-approve');
+    await side.click('.ag-approve .is-danger');
+    await waitFor(() => ui((n0) => window.__agentUi.messages.length >= n0 + 2, n));
+    await mgmt('mcp.delete', { id: 'fake' });
+  }],
+
+  ['conversation history: saved, listed, loaded', async () => {
+    const list = await mgmt('conv.list', { query: '' });
+    assert.ok(list.conversations.length >= 1);
+    const doc = await mgmt('conv.load', { id: list.conversations[0].id });
+    assert.ok(Array.isArray(doc.messages) && doc.messages.length >= 2);
+  }],
+
+  ['stop cancels a slow run', async () => {
+    script = () => ({ text: 'x'.repeat(40), delay: 15000 });
+    const n = await ui(() => window.__agentUi.messages.length);
+    await ui((t) => window.__agentUi.send(t), 'take forever');
+    await side.waitForSelector('#ag-stop:not([hidden])');
+    await side.click('#ag-stop');
+    await side.waitForSelector('#ag-send:not([hidden])', { timeout: 10000 });
+  }],
+
+  ['settings UI: every editor renders and prompt edit saves from the textarea', async () => {
+    await side.click('#mode-bar button:has-text("⚙")');
+    await side.waitForSelector('.ag-tab');
+    for (const label of ['Skills', 'MCP', 'Prompts', 'Instructions', 'Model', 'General']) {
+      await side.click(`.ag-tab:has-text("${label}")`);
+      assert.ok(await side.$('.ag-body > *'), label);
+    }
+    await side.click('.ag-tab:has-text("Prompts")');
+    const ta = side.locator('.ag-edit').first();
+    await ta.fill('UI-EDITED {{date}}');
+    await side.click('.ag-card button:has-text("Save")');
+    await waitFor(async () => (await mgmt('state')).prompts.some((p) => p.customized && /UI-EDITED/.test(p.text)));
+    await mgmt('prompt.reset', { name: (await mgmt('state')).prompts.find((p) => p.customized).name });
+  }],
+];
+
+const failed = await run(cases);
+model_close: {
+  modelServer.close();
+}
+await app.close();
+fx.close();
+process.exit(failed ? 1 : 0);
+

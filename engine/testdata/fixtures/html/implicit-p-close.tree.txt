@@ -1,0 +1,45 @@
+#document
+  <!DOCTYPE html>
+  <html>
+    <head>
+      <title>
+        #text "implicit p close"
+      </title>
+    </head>
+    <body>
+      #text "\n"
+      <p>
+        #text "first paragraph\n"
+      </p>
+      <p>
+        #text "second paragraph\n"
+      </p>
+      <div>
+        #text "a div closes the open p"
+      </div>
+      #text "\n"
+      <p>
+        #text "third\n"
+      </p>
+      <address>
+        #text "address closes p too"
+      </address>
+      #text "\n"
+      <p>
+        #text "fourth\n"
+      </p>
+      <ul>
+        <li>
+          #text "list item"
+        </li>
+      </ul>
+      #text "\n"
+      <p>
+        #text "fifth\n"
+      </p>
+      <h1>
+        #text "heading closes p"
+      </h1>
+      #text "\n"
+    </body>
+  </html>

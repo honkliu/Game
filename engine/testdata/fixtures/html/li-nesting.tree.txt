@@ -1,0 +1,39 @@
+#document
+  <!DOCTYPE html>
+  <html>
+    <head>
+    </head>
+    <body>
+      <ul>
+        #text "\n  "
+        <li>
+          #text "one\n  "
+        </li>
+        <li>
+          #text "two\n    "
+          <ul>
+            <li>
+              #text "two-a"
+            </li>
+            <li>
+              #text "two-b"
+            </li>
+          </ul>
+          #text "\n  "
+        </li>
+        <li>
+          #text "three\n"
+        </li>
+      </ul>
+      #text "\n"
+      <ol>
+        #text "\n  "
+        <li>
+          #text "ordered\n  "
+        </li>
+        <li>
+          #text "still ordered\n"
+        </li>
+      </ol>
+    </body>
+  </html>

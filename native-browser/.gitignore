@@ -1,6 +1,0 @@
-target/
-node_modules/
-build/*.png
-build/*.log
-build/evidence/
-*.pdb

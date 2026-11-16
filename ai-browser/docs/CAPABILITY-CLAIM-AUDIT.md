@@ -18,7 +18,7 @@ accessibility scope decision landed the same day, it moved claims by id, and two
 with the literal marker `verbatim text not captured` rather than reconstructed into plausible sentences, and
 `FORK-OR-CDP.md` §1b.2 and `BACKLOG-DELTAS.md` §1b carry the same caveat. Nothing else here is a guess:
 every other row's claim is re-derived from a backlog line, a `bindings.rs` slot, a grep absence, or a type
-that already compiles in `../foundation/src/contract.rs`.
+that already compiles in `../crates/contract/src/contract.rs`.
 
 **Row count and id policy.** 79 rows, the count the 2026-11-13 instruction names. Twelve labels
 (**C-05, C-42, C-45, C-49, C-58, C-58a, C-62, C-74, C-80, C-90, C-91, C-92**) already appear in committed
@@ -105,13 +105,13 @@ quality, not assistive technology, and stay in scope in every release (C-42).
 |---|---|---|:-:|---|---|---|
 | C-30 | Candidate pages can be opened in **background** managed tabs and extracted without the user visiting them | L228-236 | **b** *(measured, unbudgeted)* | A kept-alive background tab costs **+1 renderer, +97.0–98.2 MB** (σ ≈ 0.4) **as a floor** — measured on `example.*` and `iana.org`; `app.rs`'s own note says ≈ 120 MB on real content, so 8 tabs ≈ **+780 MB** and 20 ≈ **+1.95 GB** on top of a ~590 MB five-tab tree. No budget line existed for this; `RELEASE-0.md` now carries the ask | — | RELEASE-0 Budgets (C6) |
 | C-31 | Split view: two live documents side by side plus the assistant | SHL-04 L746 | **b** | One controller per pane, each measured ≈ **+66 MB, +1 renderer**. `SetBounds` **9321**; `IsVisible`/`SetIsVisible` **9309/9313** for hide-without-destroy | — | RELEASE-0 C2 |
-| C-32 | Automatic opening is confined to safe navigation and previews; consequential acts need stronger involvement | L252 | **b** | Approval policy is ours end to end — no runtime assist and no runtime obstacle. Already enforced in code: `ActionLevel::allowed_in_release_zero()` with guard test `foundation/tests/action_levels.rs:43` | — | D-12 |
+| C-32 | Automatic opening is confined to safe navigation and previews; consequential acts need stronger involvement | L252 | **b** | Approval policy is ours end to end — no runtime assist and no runtime obstacle. Already enforced in code: `ActionLevel::allowed_in_release_zero()` with guard test `crates/contract/tests/action_levels.rs:43` | — | D-12 |
 
 ## F. §2.5 — the omnibox
 
 | id | Claim, as the design inherited it | Src | Class | Evidence on the chosen kernel | Out of scope? | Δ |
 |---|---|---|:-:|---|---|---|
-| C-33 | "Do not build a parallel JavaScript omnibox" — satisfiable by reusing Chromium's classification | L269 | **d → b** | The classifier we would reuse is not reachable; ours is `native-browser/crates/browser/src/omnibox.rs` with the UI in app-owned JS (`ui/app.js`). The sentence's **prohibition** is the part we unavoidably violate | — | D-05 |
+| C-33 | "Do not build a parallel JavaScript omnibox" — satisfiable by reusing Chromium's classification | L269 | **d → b** | The classifier we would reuse is not reachable; ours is `crates/shell/src/omnibox.rs` with the UI in app-owned JS (`ui/app.js`). The sentence's **prohibition** is the part we unavoidably violate | — | D-05 |
 | C-34 | Reuse Chromium **autocomplete, ranking and providers** | L269, SHL-02 L744 | **d** | 0 slots for autocomplete / omnibox. What *does* exist is a **toggle on the runtime's own autofill** — `ICoreWebView2Settings4::{IsGeneralAutofillEnabled, SetIsGeneralAutofillEnabled}` **36260/36264**, `ICoreWebView2Profile6` **32366/32370**. Precise shape of the loss: **we can switch Chromium's behaviour off, we cannot borrow its suggestions** | — | D-04, D-05 |
 | C-35 | Reuse Chromium **policy and search-provider behaviour** | L269 | **d** | No policy source reaches an embedder (see C-63); the search provider is our own config | — | D-05, D-10 |
 | C-36 | "a native Chromium control owns editing, suggestions, acceptance, and navigation" while WebUI owns geometry | L271 | **d** | There is no native control to host. Our omnibox is one document inside a controller we created, so the split the sentence recommends is not available | — | D-05 |

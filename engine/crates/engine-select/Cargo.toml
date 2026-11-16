@@ -1,0 +1,15 @@
+[package]
+name = "engine-select"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Right-to-left selector matching with a per-element index (no Bloom filter)."
+
+[dependencies]
+engine-core.workspace = true
+engine-dom.workspace = true
+engine-css.workspace = true
+ahash.workspace = true
+
+[dev-dependencies]
+engine-html.workspace = true

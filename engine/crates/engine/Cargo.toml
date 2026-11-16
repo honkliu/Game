@@ -1,0 +1,29 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The engine binary: wires every stage and owns the main loop."
+
+[[bin]]
+name = "engine"
+path = "src/main.rs"
+
+[dependencies]
+engine-core.workspace = true
+engine-raster.workspace = true
+engine-dom.workspace = true
+engine-html.workspace = true
+engine-css.workspace = true
+engine-select.workspace = true
+engine-style.workspace = true
+engine-layout.workspace = true
+engine-text.workspace = true
+engine-paint.workspace = true
+engine-net.workspace = true
+engine-script.workspace = true
+engine-platform.workspace = true
+url.workspace = true
+serde_json.workspace = true
+png.workspace = true
+log.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "engine-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "URL policy, HTTP/1.1 fetch, redirect + cookie policy, decompression."
+
+[dependencies]
+engine-core.workspace = true
+url.workspace = true
+percent-encoding.workspace = true
+# HTTP/1.1 + TLS transport only. Redirect, cookie, and same-origin policy are ours.
+ureq.workspace = true
+# gzip/deflate inflate for Content-Encoding.
+zune-inflate.workspace = true
+log.workspace = true

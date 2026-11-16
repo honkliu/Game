@@ -1,0 +1,15 @@
+[package]
+name = "engine-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "System font loading, advance-based measurement, glyph rasterization, line breaking."
+
+[dependencies]
+engine-core.workspace = true
+engine-raster.workspace = true
+# Font file parsing (TTF/OTF tables) + glyph outline -> coverage mask. Not a
+# rendering-engine component: text *layout* (advances, kerning, line breaks) is ours.
+fontdue.workspace = true
+log.workspace = true
+ahash.workspace = true

@@ -1,0 +1,1 @@
+{"kind":"notification","schema_version":{"major":1,"minor":0},"method":"task.finish","params":{"completion_token_budget":8,"failure":{"code":"model.reasoning_consumed_budget","kind":"no_answer","replan_required":false,"retryable":false},"outcome":"no_answer","reasoning_tokens":9,"task":1}}

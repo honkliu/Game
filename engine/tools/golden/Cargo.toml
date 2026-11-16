@@ -1,0 +1,20 @@
+[package]
+name = "engine-golden"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Golden-image tool: renders fixtures to PNG and stamps their stats."
+
+[dependencies]
+engine-core.workspace = true
+engine-raster.workspace = true
+engine-dom.workspace = true
+engine-html.workspace = true
+engine-css.workspace = true
+engine-select.workspace = true
+engine-style.workspace = true
+engine-layout.workspace = true
+engine-text.workspace = true
+engine-paint.workspace = true
+url.workspace = true
+png.workspace = true

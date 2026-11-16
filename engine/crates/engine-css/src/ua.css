@@ -1,0 +1,97 @@
+/* The user-agent stylesheet, authored for this engine (§4.2).
+   It is deliberately close to what browsers use, because a page's appearance
+   is defined jointly by author CSS and these defaults. Where the real UA sheet
+   differs by a pixel or two of margin, we matched the common Chrome/Firefox
+   values so that unstyled pages look right. */
+
+html, body, div, p, blockquote, figure, figcaption, article, aside, header,
+footer, main, nav, section, address, dl, dt, dd, fieldset, form, h1, h2, h3,
+h4, h5, h6, hr, ol, ul, pre, table, details, summary, template, search,
+hgroup, menu, dir, dialog {
+  display: block;
+}
+
+head, script, style, title, meta, link, base, template, noscript, param,
+source, track, col, colgroup, area, datalist, rp, optgroup {
+  display: none;
+}
+
+li { display: list-item; }
+ul, ol { display: block; }
+
+[hidden] { display: none; }
+
+/* Page defaults. */
+html { color: #000000; background-color: #ffffff; font-size: 16px; line-height: normal; }
+body { margin-top: 8px; margin-right: 8px; margin-bottom: 8px; margin-left: 8px; }
+
+/* Headings. */
+h1 { font-size: 2em; font-weight: bold; margin-top: 0.67em; margin-bottom: 0.67em; }
+h2 { font-size: 1.5em; font-weight: bold; margin-top: 0.83em; margin-bottom: 0.83em; }
+h3 { font-size: 1.17em; font-weight: bold; margin-top: 1em; margin-bottom: 1em; }
+h4 { font-size: 1em; font-weight: bold; margin-top: 1.33em; margin-bottom: 1.33em; }
+h5 { font-size: 0.83em; font-weight: bold; margin-top: 1.67em; margin-bottom: 1.67em; }
+h6 { font-size: 0.67em; font-weight: bold; margin-top: 2.33em; margin-bottom: 2.33em; }
+
+/* Paragraphs and lists. */
+p { margin-top: 1em; margin-bottom: 1em; }
+blockquote { margin-top: 1em; margin-bottom: 1em; margin-left: 40px; margin-right: 40px; }
+pre, code, kbd, samp { font-family: monospace; white-space: pre; }
+pre { margin-top: 1em; margin-bottom: 1em; }
+
+ul, ol, menu, dir { margin-top: 1em; margin-bottom: 1em; padding-left: 40px; }
+ol { list-style-type: decimal; }
+ul { list-style-type: disc; }
+li { display: list-item; }
+dl { margin-top: 1em; margin-bottom: 1em; }
+dd { margin-left: 40px; }
+
+/* Inline semantics. */
+a { color: #0000ee; text-decoration: underline; }
+a:visited { color: #551a8b; }
+b, strong { font-weight: bold; }
+i, em, cite, dfn, var { font-style: italic; }
+u, ins { text-decoration: underline; }
+s, strike, del { text-decoration: line-through; }
+small { font-size: smaller; }
+big { font-size: larger; }
+sub { vertical-align: sub; font-size: smaller; }
+sup { vertical-align: super; font-size: smaller; }
+mark { background-color: #ffff00; color: #000000; }
+abbr[title], acronym[title] { text-decoration: underline; }
+
+/* Rules and media. */
+hr { height: 1px; border-top-width: 1px; border-top-style: solid; border-top-color: #c0c0c0; margin-top: 0.5em; margin-bottom: 0.5em; overflow: hidden; }
+img { display: inline; }
+
+/* Tables: laid out as block (§15 stub) but keep the visual structure. */
+table { display: table; border-collapse: separate; border-spacing: 2px; }
+thead, tbody, tfoot { display: block; }
+tr { display: block; }
+td, th { display: table-cell; padding-top: 1px; padding-right: 1px; padding-bottom: 1px; padding-left: 1px; }
+th { font-weight: bold; text-align: center; }
+
+/* Forms. */
+button, input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; }
+button, input[type="submit"], input[type="button"], input[type="reset"] {
+  display: inline-block; padding-top: 1px; padding-right: 6px; padding-bottom: 1px;
+  padding-left: 6px; border-top-width: 1px; border-right-width: 1px;
+  border-bottom-width: 1px; border-left-width: 1px; border-top-style: solid;
+  border-right-style: solid; border-bottom-style: solid; border-left-style: solid;
+  border-top-color: #767676; border-right-color: #767676;
+  border-bottom-color: #767676; border-left-color: #767676;
+  background-color: #efefef; text-align: center;
+}
+input, textarea, select {
+  display: inline-block; border-top-width: 1px; border-right-width: 1px;
+  border-bottom-width: 1px; border-left-width: 1px; border-top-style: solid;
+  border-right-style: solid; border-bottom-style: solid; border-left-style: solid;
+  border-top-color: #767676; border-right-color: #767676;
+  border-bottom-color: #767676; border-left-color: #767676;
+  background-color: #ffffff; padding-top: 1px; padding-right: 2px;
+  padding-bottom: 1px; padding-left: 2px;
+}
+input[type="checkbox"], input[type="radio"] { border-width: 0; padding: 0; }
+textarea { display: inline-block; white-space: pre-wrap; }
+
+/* Flex is opt-in; nothing in the UA sheet sets it. */

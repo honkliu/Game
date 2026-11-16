@@ -1,0 +1,10 @@
+[package]
+name = "engine-html"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HTML5 tokenizer state machine and tree construction, written from scratch."
+
+[dependencies]
+engine-core.workspace = true
+engine-dom.workspace = true

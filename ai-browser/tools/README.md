@@ -1,6 +1,6 @@
 # `tools/`
 
-Tooling for the contract crate in `../foundation/`, plus the measurement spike that was
+Tooling for the contract crate in `../crates/contract/`, plus the measurement spike that was
 required before `NavigationId` could be trusted.
 
 ## `wv2-probe/` — built, run, answered
@@ -120,7 +120,7 @@ it), so the completion result is the only thing worth branching on.
 ## Not built (do not treat as available)
 
 - `emit_schema.py` / schema publication for the WebView2 UI — see "Known gaps" in
-  `../foundation/README.md`. Deriving `schema/v1/*.json` from the Rust types is the
+  `../crates/contract/README.md`. Deriving `schema/v1/*.json` from the Rust types is the
   intended route, so the schema cannot disagree with the compiled contract.
 - `check_conformance.py` over wire fixtures — blocked on the above.
 - Nothing in Epic A needs `gn`, `ninja`, `gclient`, or `depot_tools`; the earlier

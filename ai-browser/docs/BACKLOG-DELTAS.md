@@ -7,8 +7,8 @@ applied.
 Kernel these deltas are written against (user decision, 2026-11-13): the **existing WebView2 Evergreen
 runtime** driven by our Rust shell as the embedder host — no fork, no Chromium checkout, no Mojo, no
 in-Blink enforcement point. Evidence is grep-derived from
-`webview2-com-sys-0.39.1/src/bindings.rs` (44,394 lines) and from `native-browser/crates/browser/src/`,
-`ai-browser/foundation/src/`, `native-browser/crates/browser/ui/`. bindings.rs line numbers refer to
+`webview2-com-sys-0.39.1/src/bindings.rs` (44,394 lines) and from `crates/shell/src/`,
+`ai-browser/crates/contract/src/`, `crates/shell/ui/`. bindings.rs line numbers refer to
 webview2-com-sys-0.39.1 and were grep-derived on 2026-11-13 (the **vtable-slot** line inside
 `I…_Vtbl`, not the safe-wrapper line). Absence claims list the exact grep pattern.
 
@@ -67,7 +67,7 @@ better outcome: a thing we do not want has no cost.
 | **C-05** | accessibility feature claim — **id referenced by the 2026-11-13 instruction; verbatim wording not recoverable from disk** (`CAPABILITY-CLAIM-AUDIT.md` carries the same caveat in its row) | **d** | **OUT OF SCOPE** | nothing to build; no delta needed beyond D-20's non-goal line |
 | **C-45** | accessibility feature claim (same caveat, same reason) | **d** | **OUT OF SCOPE** | as above |
 | **C-58** | accessibility-tree extraction (backlog §4.2 tier 2 L432) | **d** | **OUT OF SCOPE** | **D-01 / D-22**: delete L432, delete `accessibilityPath` L104/L116, delete the word from CTX-01 L753; §4.2's ladder is re-cut to **6** rungs by **D-22**, not renumbered to 8 as D-01 originally said |
-| **C-74** | element-by-locator resolution for actions | **d** (half-impossible) | **OUT OF SCOPE** for the AX half | **D-13**: `TargetResolution::DomLocator` (`foundation/src/contract.rs:211`) is **the design, not a fallback** — the enum already ships without an AX variant and `foundation/tests/action_levels.rs:43` fails if anyone adds one. **ACT-02's half-impossible flag is gone** |
+| **C-74** | element-by-locator resolution for actions | **d** (half-impossible) | **OUT OF SCOPE** for the AX half | **D-13**: `TargetResolution::DomLocator` (`crates/contract/src/contract.rs:211`) is **the design, not a fallback** — the enum already ships without an AX variant and `crates/contract/tests/action_levels.rs:43` fails if anyone adds one. **ACT-02's half-impossible flag is gone** |
 | C-90 / C-91 | synthetic semantic input | **d** | **d, unchanged** | still wanted, still forbidden (CDP ruling, act path). D-15 stands |
 | C-49 | probe output is page-authored | improved by CDP | unchanged by this decision | D-11 stands (**`DOMSnapshot.captureSnapshot` is unaffected by the accessibility drop** — it returns text *and* layout bounds in one call; `FORK-OR-CDP.md` §1b.1's **Still buys** rows make that case on its own terms, and it is now measured callable) |
 
@@ -149,10 +149,10 @@ browser is not for everyone, but focus on 60 to 70% people."* Accessibility feat
    renderer-computed visibility — and **borrow nothing from the accessibility argument.**
 
 **Already true in shipped code, so this delta aligns the spec with reality:** `AnnotationAnchor`
-(`foundation/src/contract.rs:242`) carries `document`, `snapshot_version`, `block_id`, `quote`,
+(`crates/contract/src/contract.rs:242`) carries `document`, `snapshot_version`, `block_id`, `quote`,
 `prefix`, `suffix`, `text_position` — **no AX field**; `AnchorReattachmentTier`
 (`contract.rs:226`) is exactly the five tiers below; `TargetResolution` has no accessibility variant
-(`contract.rs:207-214`) and `foundation/tests/action_levels.rs:43` fails the build if anyone adds one.
+(`contract.rs:207-214`) and `crates/contract/tests/action_levels.rs:43` fails the build if anyone adds one.
 
 **Replacement text (L104):** delete the line, and add above the interface:
 > Anchor tiers are limited to what our own extraction pass can re-resolve: semantic block id, quote with
@@ -648,7 +648,7 @@ will re-cut this delta.
 | 9 OCR / vision | **CUT** | It existed to rescue canvas-rendered text. With the accessibility tier already gone we have decided not to chase that class of page, so a heavy OCR fallback buys a case we do not target | Coverage gap naming the unreadable region |
 
 **The mechanism is already in the contract — do not invent one.** Cite these in the spec text:
-`CoverageGapKind::UnsupportedContent` (`foundation/src/contract.rs:47`), carried as
+`CoverageGapKind::UnsupportedContent` (`crates/contract/src/contract.rs:47`), carried as
 `ContextCoverage::unsupported_content: Vec<CoverageGap>` (`contract.rs:82`) with
 `status: CoverageStatus::Partial` (`contract.rs:63`, field at `:78`), and
 `has_untranscribed_media: bool` (`contract.rs:83`) for the media case. The requirement sentence already

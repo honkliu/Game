@@ -1,0 +1,34 @@
+[package]
+name = "ai-utility"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+publish = false
+description = "AI-native browser: the AI utility process (providers, routing, prompts, task and action loops) speaking NDJSON frames to the shell"
+
+[lib]
+name = "ai_utility"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ai-utility"
+path = "src/main.rs"
+
+[dependencies]
+ai-platform-contract = { path = "../contract" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+# Streaming SSE over rustls. Redirects are disabled in code so the API key can
+# never follow a redirect to another host.
+ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+# stdout carries protocol frames only; anything else on it corrupts the pipe.
+print_stdout = "deny"
+dbg_macro = "deny"

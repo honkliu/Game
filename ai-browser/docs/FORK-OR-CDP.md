@@ -35,7 +35,7 @@ authorities over a document; our overlay lives in another window, created by our
 A page cannot out-z-index a window, cannot place a `pointer-events` capture layer over one, and cannot delete a
 window it cannot name — exactly §2.1's invariant, obtained structurally rather than by policy.
 
-**This is not hypothetical in our codebase — it already ships.** `native-browser/crates/browser/src/app.rs`
+**This is not hypothetical in our codebase — it already ships.** `crates/shell/src/app.rs`
 keeps one `overlay: Option<WebView>` (app.rs:97) built from the shared environment (app.rs:103), positioned by
 `layout::Overlay` = `Closed | Palette | Dropdown{x,y,w}` (layout.rs:29-38, `Closed` → 0×0), moved with
 `set_bounds` (app.rs:627/649), focus-restored on close (app.rs:659), served from the path-traversal-hardened

@@ -1,0 +1,18 @@
+[package]
+name = "engine-paint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Display-list construction: backgrounds, borders, text, images, form controls."
+
+[dependencies]
+engine-core.workspace = true
+engine-dom.workspace = true
+engine-css.workspace = true
+engine-style.workspace = true
+engine-layout.workspace = true
+engine-text.workspace = true
+# PNG/JPEG file decode only; scaling, object-fit and repeat are ours.
+png.workspace = true
+jpeg-decoder.workspace = true
+log.workspace = true

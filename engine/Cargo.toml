@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/engine-core",
+    "crates/engine-raster",
+    "crates/engine-dom",
+    "crates/engine-html",
+    "crates/engine-css",
+    "crates/engine-select",
+    "crates/engine-style",
+    "crates/engine-layout",
+    "crates/engine-text",
+    "crates/engine-paint",
+    "crates/engine-net",
+    "crates/engine-script",
+    "crates/engine-platform",
+    "crates/engine",
+    "tools/golden",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+engine-core = { path = "crates/engine-core" }
+engine-raster = { path = "crates/engine-raster" }
+engine-dom = { path = "crates/engine-dom" }
+engine-html = { path = "crates/engine-html" }
+engine-css = { path = "crates/engine-css" }
+engine-select = { path = "crates/engine-select" }
+engine-style = { path = "crates/engine-style" }
+engine-layout = { path = "crates/engine-layout" }
+engine-text = { path = "crates/engine-text" }
+engine-paint = { path = "crates/engine-paint" }
+engine-net = { path = "crates/engine-net" }
+engine-script = { path = "crates/engine-script" }
+engine-platform = { path = "crates/engine-platform" }
+
+# --- External crates. Every entry carries the justification required by the
+# --- architecture (§1.1): each one sits outside the rendering engine proper.
+
+# Window + event loop only; supplies HWND/DPI/input events and zero pixels.
+tao = "0.37"
+# Generated Win32 bindings (GDI/DXGI/D3D11) used to blit our own CPU bitmap.
+windows = "0.62"
+windows-sys = "0.61"
+# Font file parsing (TTF/OTF tables) and glyph outline -> coverage mask.
+fontdue = "0.9"
+# PNG container + DEFLATE decode/encode; we write all image display logic.
+png = "0.17"
+# Baseline JPEG decode to RGB.
+jpeg-decoder = "0.3"
+# zlib/gzip inflate for Content-Encoding.
+zune-inflate = "0.2"
+# HTTP/1.1 + TLS transport; redirect and cookie policy are ours.
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+# RFC 3986 parse/serialize/resolve; same-origin and redirect policy are ours.
+url = "2"
+percent-encoding = "2"
+# ECMAScript execution; not a rendering component.
+boa_engine = "0.20"
+# Test fixtures, render-report JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Fast hashing for cascade/selector caches.
+ahash = "0.8"
+log = "0.4"
+
+[profile.release]
+opt-level = 3
+debug = false

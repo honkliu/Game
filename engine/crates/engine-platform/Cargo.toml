@@ -1,0 +1,17 @@
+[package]
+name = "engine-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "tao window + GDI blit of our CPU bitmap; PNG writer for headless capture."
+
+[dependencies]
+engine-core.workspace = true
+engine-raster.workspace = true
+# Window creation + event loop only. Supplies HWND, DPI and input events; zero pixels.
+tao.workspace = true
+# Generated Win32 bindings (GDI StretchDIBits) for presenting our own bitmap.
+windows.workspace = true
+# PNG container encode for --screenshot output.
+png.workspace = true
+log.workspace = true

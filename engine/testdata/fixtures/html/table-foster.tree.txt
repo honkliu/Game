@@ -1,0 +1,68 @@
+#document
+  <!DOCTYPE html>
+  <html>
+    <head>
+    </head>
+    <body>
+      #text "\n  stray text before a row\n  "
+      <table>
+        <tbody>
+          <tr>
+            <td>
+              #text "cell one"
+            </td>
+            <td>
+              #text "cell two"
+            </td>
+          </tr>
+          <tr>
+            <td>
+              #text "cell three"
+            </td>
+            <td>
+              #text "cell four"
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      #text "\n  "
+      #text "\n  "
+      <div>
+        #text "a div inside a table\n"
+      </div>
+      #text "\n"
+      <table>
+        <thead>
+          <tr>
+            <th>
+              #text "head"
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              #text "body"
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      #text "\n"
+      <table>
+        <caption>
+          #text "cap"
+        </caption>
+        <colgroup>
+          <col>
+          <col>
+        </colgroup>
+        <tbody>
+          <tr>
+            <td>
+              #text "x"
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </body>
+  </html>

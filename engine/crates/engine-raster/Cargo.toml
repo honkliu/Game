@@ -1,0 +1,9 @@
+[package]
+name = "engine-raster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic CPU rasterizer: BGRA8 surface, anti-aliased fills, alpha blending."
+
+[dependencies]
+engine-core.workspace = true

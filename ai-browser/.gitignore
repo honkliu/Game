@@ -1,0 +1,20 @@
+# Cargo build output for the workspace; never committed.
+/target/
+node_modules/
+*.pdb
+crates/shell/ui/sidebar/
+
+# Scratch measurement outputs and compiled probes (sources stay tracked)
+tools/measurements/**/*.exe
+tools/measurements/**/*.obj
+tools/measurements/**/*.png
+tools/measurements/**/*.err
+tools/measurements/**/out.txt
+tools/measurements/*.json
+
+# e2e scratch
+e2e/tmp_*
+e2e/node_modules/
+
+# Local test outputs
+*.log

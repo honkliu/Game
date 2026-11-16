@@ -1,0 +1,30 @@
+#document
+  <!DOCTYPE html>
+  <html>
+    <head>
+    </head>
+    <body>
+      <p>
+        #text "Named: & < > \"   © — … €"
+      </p>
+      #text "\n"
+      <p>
+        #text "Numeric: A B ☃ 😀"
+      </p>
+      #text "\n"
+      <p>
+        #text "Longest match: ∉ &notit; &ampx"
+      </p>
+      #text "\n"
+      <p>
+        #text "In attribute: "
+        <a href="?a=1&b=2&copy=3" title="\"quoted\"">
+          #text "link"
+        </a>
+      </p>
+      #text "\n"
+      <p>
+        #text "Literal ampersands: a & b, AT&T, &#;"
+      </p>
+    </body>
+  </html>

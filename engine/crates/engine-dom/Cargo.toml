@@ -1,0 +1,10 @@
+[package]
+name = "engine-dom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DOM arena: nodes, elements, and the only tree-link mutator in the engine."
+
+[dependencies]
+engine-core.workspace = true
+ahash.workspace = true
