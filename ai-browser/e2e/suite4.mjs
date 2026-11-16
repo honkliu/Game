@@ -68,9 +68,9 @@ await run([
     const c = (await canvas()).cells[0];
     assert.deepEqual(
       { x: c.body.x - c.frame.x, w: c.frame.w - c.body.w },
-      { x: 1, w: 2 }, 'a cell is its page plus a 1px focus ring');
+      { x: 2, w: 4 }, 'a cell is its page plus a 2px focus ring');
     const [c1, c2] = (await canvas()).cells;
-    assert.equal(c2.body.x - (c1.body.x + c1.body.w), 2, 'neighbouring pages are 2px apart');
+    assert.equal(c2.body.x - (c1.body.x + c1.body.w), 4, 'neighbouring pages are 4px apart');
     await app.invoke('canvas.focus', { cell: 3 });
     await app.shell.evaluate(() => document.getElementById('cv-zoom').click());
     await waitFor(async () => (await canvas()).zoomed === true);

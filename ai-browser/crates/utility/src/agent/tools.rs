@@ -165,6 +165,20 @@ pub fn registry(env: &Env, stash: &Mutex<Stash>) -> Vec<ToolDef> {
             true,
         ),
         def(
+            "dismiss_popups",
+            "Close the popups, ads, cookie banners, modal dialogs and floating overlays covering a page (clicks their own close button, then hides what is left, and restores page scrolling). scope 'cell' (default) is the focused cell of the canvas, or the cell given by `cell` / `row`+`col`; scope 'tab' is every page in the current tab (all cells of a canvas); scope 'all' is every open page. Use it when the user asks to close popups or ads.",
+            json!({
+                "scope": { "type": "string", "enum": ["cell", "tab", "all"] },
+                "cell": { "type": "integer", "description": "0-based cell index, row by row." },
+                "row": { "type": "integer" },
+                "col": { "type": "integer" },
+                "tab_id": tab
+            }),
+            &[],
+            b.clone(),
+            false,
+        ),
+        def(
             "fill",
             "Type a value into an input, textarea or select identified by CSS selector. Does not submit.",
             json!({ "selector": { "type": "string" }, "value": { "type": "string" }, "tab_id": tab }),

@@ -370,6 +370,57 @@ pub fn window_process_id(hwnd: isize) -> u32 {
     pid
 }
 
+/// Round the corners of the page window sitting at `rect` (physical pixels, parent client
+/// coordinates) inside `parent`, or restore a square one when `radius` is 0. WebView2
+/// hosts its page in a child window, so a window region clips the page to the shape.
+pub fn round_child_at(parent: isize, rect: (i32, i32, i32, i32), radius: i32) {
+    use windows::Win32::Foundation::{LPARAM, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::{ClientToScreen, CreateRoundRectRgn, SetWindowRgn};
+    use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetWindowRect};
+
+    struct Probe {
+        origin: POINT,
+        rect: (i32, i32, i32, i32),
+        hits: Vec<HWND>,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        // SAFETY: lparam is the address of the `Probe` that outlives EnumChildWindows.
+        let probe = unsafe { &mut *(lparam.0 as *mut Probe) };
+        let mut r = RECT::default();
+        // SAFETY: r is a valid out-pointer; a stale HWND makes the call fail harmlessly.
+        if unsafe { GetWindowRect(hwnd, &mut r) }.is_ok() {
+            let (x, y) = (r.left - probe.origin.x, r.top - probe.origin.y);
+            let (w, h) = (r.right - r.left, r.bottom - r.top);
+            let (rx, ry, rw, rh) = probe.rect;
+            if (x - rx).abs() <= 1 && (y - ry).abs() <= 1 && (w - rw).abs() <= 1 && (h - rh).abs() <= 1 {
+                probe.hits.push(hwnd);
+            }
+        }
+        true.into()
+    }
+
+    let parent = HWND(parent as *mut core::ffi::c_void);
+    let mut probe = Probe { origin: POINT { x: 0, y: 0 }, rect, hits: Vec::new() };
+    // SAFETY: parent is the app's own window; the probe pointer is valid for the call.
+    unsafe {
+        if !ClientToScreen(parent, &mut probe.origin).as_bool() {
+            return;
+        }
+        let _ = EnumChildWindows(Some(parent), Some(visit), LPARAM(&mut probe as *mut Probe as isize));
+    }
+    for hwnd in probe.hits {
+        // SAFETY: the region is handed to the window, which owns it afterwards.
+        unsafe {
+            if radius > 0 && rect.2 > 2 * radius && rect.3 > 2 * radius {
+                let rgn = CreateRoundRectRgn(0, 0, rect.2 + 1, rect.3 + 1, 2 * radius, 2 * radius);
+                SetWindowRgn(hwnd, Some(rgn), true);
+            } else {
+                SetWindowRgn(hwnd, None, true);
+            }
+        }
+    }
+}
+
 /// Open a file with its default handler. Returns false when the shell refused.
 pub fn shell_open(path: &str) -> bool {
     let path_w = wide(path);

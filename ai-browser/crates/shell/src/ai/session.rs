@@ -215,6 +215,16 @@ pub struct AgentEval {
     pub attempts: u8,
     /// A page read is retried while the page is still empty (a freshly woken tab).
     pub is_read: bool,
+    /// A popup sweep over several pages: the pages still to do and what each answered.
+    pub chain: Option<Chain>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Chain {
+    pub rest: Vec<u64>,
+    pub results: Vec<serde_json::Value>,
+    /// Answer the agent's request at the end (otherwise announce it to the shell UI).
+    pub reply: bool,
 }
 
 impl Default for AiSession {

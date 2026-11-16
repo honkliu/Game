@@ -28,6 +28,10 @@ impl AppState {
         (self.canvas_shown == Some(parent)).then_some(parent)
     }
 
+    pub(super) fn canvas_area_rect(&self) -> Rc {
+        self.canvas_area()
+    }
+
     fn canvas_area(&self) -> Rc {
         let l = self.layout();
         Rc { x: l.page_x, y: l.page_y, w: l.page_w, h: l.page_h }
@@ -35,7 +39,7 @@ impl AppState {
 
     fn canvas_geoms(&self) -> Option<(Canvas, Vec<CellGeom>)> {
         let cv = self.canvas_of(self.canvas_shown?)?.clone();
-        let geoms = layout::canvas_cells(self.canvas_area(), cv.cols, cv.rows, cv.zoomed.then_some(cv.focus));
+        let geoms = layout::canvas_cells(self.canvas_area(), cv.cols, cv.rows, cv.zoomed.then_some(cv.focus), &cv.col_ws, &cv.row_h);
         Some((cv, geoms))
     }
 
@@ -76,6 +80,14 @@ impl AppState {
                 })
             })
             .collect();
+        let dividers: Vec<Value> = if cv.zoomed {
+            Vec::new()
+        } else {
+            layout::canvas_dividers(self.canvas_area(), cv.cols, cv.rows, &cv.col_ws, &cv.row_h)
+                .iter()
+                .map(|d| json!({ "vertical": d.vertical, "index": d.index, "row": d.row, "rect": rc(d.rect) }))
+                .collect()
+        };
         json!({
             "id": id.0,
             "cols": cv.cols,
@@ -84,7 +96,39 @@ impl AppState {
             "zoomed": cv.zoomed,
             "focus": cv.focus,
             "cells": cells,
+            "dividers": dividers,
         })
+    }
+
+    /// `canvas.resize {vertical, index, pos}` drags a boundary (`pos` in window units);
+    /// `canvas.resize {reset: true}` restores equal shares.
+    pub(super) fn canvas_resize(&mut self, p: &Value) -> Result<Option<Value>, String> {
+        let canvas = self.canvas_arg(p)?;
+        let area = self.canvas_area();
+        let cv = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()).ok_or("no canvas")?;
+        if p.get("reset").and_then(Value::as_bool) == Some(true) {
+            cv.col_ws.clear();
+            cv.row_h.clear();
+        } else {
+            let vertical = p.get("vertical").and_then(Value::as_bool).unwrap_or(true);
+            let index = p.get("index").and_then(Value::as_u64).ok_or("canvas.resize: index")? as usize;
+            let pos = p.get("pos").and_then(Value::as_f64).ok_or("canvas.resize: pos")?;
+            if vertical {
+                let row = (p.get("row").and_then(Value::as_u64).unwrap_or(0) as usize).min(cv.rows.saturating_sub(1));
+                if cv.col_ws.len() != cv.rows {
+                    cv.col_ws.resize(cv.rows, Vec::new());
+                }
+                cv.col_ws[row] = layout::drag_divider(&cv.col_ws[row], cv.cols, index, pos, area.x, area.w);
+            } else {
+                cv.row_h = layout::drag_divider(&cv.row_h, cv.rows, index, pos, area.y, area.h);
+            }
+        }
+        // Only the geometry changed: re-tile without the focus, AI and tab-list work a
+        // full `canvas_refresh` does, so dragging a divider stays cheap.
+        if self.canvas_shown == Some(canvas) {
+            self.apply_layout();
+        }
+        Ok(None)
     }
 
     /// What an agent needs to see after a canvas action: which pages sit in which cell.
@@ -227,7 +271,7 @@ impl AppState {
             .ok_or_else(|| "no canvas: open one with canvas.create".to_string())
     }
 
-    fn cell_arg(&self, canvas: TabId, p: &Value) -> Option<usize> {
+    pub(super) fn cell_arg(&self, canvas: TabId, p: &Value) -> Option<usize> {
         let cv = self.canvas_of(canvas)?;
         // `row`/`col` are 0-based like `cell`, which counts row by row.
         if let (Some(r), Some(c)) = (p.get("row").and_then(Value::as_u64), p.get("col").and_then(Value::as_u64)) {

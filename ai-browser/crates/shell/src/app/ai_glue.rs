@@ -1096,7 +1096,12 @@ impl AppState {
             .map(|v| v.get("dir").and_then(Value::as_i64).unwrap_or(0))
         {
             self.canvas_focus_tab(tab);
-            self.zoom_tab(tab, if dir > 0 { "zoom_in" } else { "zoom_out" });
+            let action = match dir {
+                d if d > 0 => "zoom_in",
+                0 => "zoom_reset",
+                _ => "zoom_out",
+            };
+            self.zoom_tab(tab, action);
             return;
         }
         if self.canvas_probe(tab, raw) {

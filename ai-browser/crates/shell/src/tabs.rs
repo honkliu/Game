@@ -75,13 +75,19 @@ pub struct Canvas {
     pub focus: usize,
     /// The focused cell fills the whole canvas; the others stay alive behind it.
     pub zoomed: bool,
+    /// Relative widths of the columns of each row (`col_ws[row]`; every row splits on its
+    /// own) and relative row heights; empty means equal shares.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub col_ws: Vec<Vec<f64>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_h: Vec<f64>,
 }
 
 impl Canvas {
     pub fn new(cols: usize, rows: usize) -> Self {
         let cols = cols.clamp(1, CANVAS_MAX_COLS);
         let rows = rows.clamp(1, CANVAS_MAX_ROWS);
-        Self { cols, rows, cells: vec![None; cols * rows], focus: 0, zoomed: false }
+        Self { cols, rows, cells: vec![None; cols * rows], focus: 0, zoomed: false, col_ws: Vec::new(), row_h: Vec::new() }
     }
 
     pub fn capacity(&self) -> usize {
@@ -115,6 +121,8 @@ impl Canvas {
         let (keep, dropped) = pages.split_at(pages.len().min(cap));
         self.cols = cols;
         self.rows = rows;
+        self.col_ws.clear();
+        self.row_h.clear();
         self.cells = vec![None; cap];
         for (i, id) in keep.iter().enumerate() {
             self.cells[i] = Some(*id);

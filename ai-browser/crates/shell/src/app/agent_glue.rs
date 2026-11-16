@@ -398,14 +398,14 @@ impl AppState {
         self.emit("agent.event", event);
     }
 
-    fn agent_reply_ok(&mut self, id: u64, value: Value) {
+    pub(super) fn agent_reply_ok(&mut self, id: u64, value: Value) {
         match ResponsePayload::ok(&value) {
             Ok(p) => self.ai_send(Frame::ok(id, p)),
             Err(f) => self.ai_send(Frame::failure(id, f)),
         }
     }
 
-    fn agent_reply_err(&mut self, id: u64, message: impl Into<String>) {
+    pub(super) fn agent_reply_err(&mut self, id: u64, message: impl Into<String>) {
         self.ai_send(Frame::failure(id, Failure::unsupported("agent.tool_failed").with_detail(message.into())));
     }
 
@@ -418,7 +418,7 @@ impl AppState {
     }
 
     /// Give a background tab a hidden webview so it can load and be read.
-    fn agent_wake(&mut self, tab: TabId) {
+    pub(super) fn agent_wake(&mut self, tab: TabId) {
         if self.live.contains_key(&tab) {
             return;
         }
@@ -431,7 +431,7 @@ impl AppState {
         }
     }
 
-    fn agent_schedule(&self, id: u64, ms: u64) {
+    pub(super) fn agent_schedule(&self, id: u64, ms: u64) {
         let proxy = self.proxy();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -446,7 +446,7 @@ impl AppState {
         if !self.live.contains_key(&tab) {
             return self.agent_reply_err(id, "the tab could not be opened for reading");
         }
-        self.ai.agent_evals.insert(id, AgentEval { tab: tab.0, script, attempts: 0, is_read });
+        self.ai.agent_evals.insert(id, AgentEval { tab: tab.0, script, attempts: 0, is_read, chain: None });
         self.agent_schedule(id, if was_live { 0 } else { WAKE_MS });
     }
 
@@ -463,13 +463,21 @@ impl AppState {
             None => Err("the tab was closed or went to sleep".to_string()),
         };
         if let Err(e) = started {
-            self.ai.agent_evals.remove(&id);
+            if let Some(eval) = self.ai.agent_evals.remove(&id) {
+                if eval.chain.is_some() {
+                    let raw = serde_json::to_string(&json!({ "error": e }).to_string()).unwrap_or_default();
+                    return self.dismiss_step(id, eval, &raw);
+                }
+            }
             self.agent_reply_err(id, e);
         }
     }
 
     pub(super) fn agent_eval_done(&mut self, id: u64, raw: String) {
         let Some(mut eval) = self.ai.agent_evals.remove(&id) else { return };
+        if eval.chain.is_some() {
+            return self.dismiss_step(id, eval, &raw);
+        }
         // The callback delivers the script's string result JSON-encoded.
         let inner: Option<Value> = serde_json::from_str::<String>(&raw).ok().and_then(|s| serde_json::from_str(&s).ok());
         let Some(mut value) = inner else {
@@ -583,6 +591,10 @@ impl AppState {
                     self.agent_reply_ok(id, json!({ "closed": tab.0 }));
                 }
                 Ok(_) => self.agent_reply_err(id, "only tabs the agent opened can be closed by it"),
+                Err(e) => self.agent_reply_err(id, e),
+            },
+            "dismiss_popups" => match self.dismiss_targets(&args) {
+                Ok(targets) => self.dismiss_start(id, targets, true),
                 Err(e) => self.agent_reply_err(id, e),
             },
             "read_page" | "click" | "fill" => {

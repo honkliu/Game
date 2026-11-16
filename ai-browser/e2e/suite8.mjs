@@ -98,6 +98,46 @@ await run([
     await app.invoke('shortcut', { name: 'zoom_reset' });
     await sleep(1500); const w1 = await width(); assert.ok(Math.abs(w1 - w0) <= 20, 'reset: ' + w0 + ' -> ' + w1);
   }],
+  ['PDF toolbar: + and Fit buttons zoom the viewer and the page number shows', async () => {
+    await app.invoke('canvas.focus', { cell: 1 });
+    const v = app.ctx.pages().find((p) => /pdf\.localhost/.test(p.url()) && /doc\.pdf/.test(decodeURIComponent(p.url())));
+    const width = () => v.evaluate(() => Math.round(document.querySelector('.page').getBoundingClientRect().width));
+    const w0 = await width();
+    await v.evaluate(() => { document.getElementById('zin').click(); document.getElementById('zin').click(); });
+    await waitFor(async () => (await width()) > w0 * 1.05);
+    await v.evaluate(() => document.getElementById('zfit').click());
+    await waitFor(async () => Math.abs((await width()) - w0) <= 20);
+    assert.equal(await v.evaluate(() => document.getElementById('cur').textContent), '1');
+  }],
+  ['PDF text layer: each line span covers exactly the drawn glyphs, at every zoom', async () => {
+    await app.invoke('canvas.focus', { cell: 1 });
+    const v = app.ctx.pages().find((p) => /pdf\.localhost/.test(p.url()) && /doc\.pdf/.test(decodeURIComponent(p.url())));
+    const measure = () => v.evaluate(async () => {
+      const span = [...document.querySelectorAll('.textLayer span')].find((s) => /Quarterly/.test(s.textContent));
+      const page = document.querySelector('.page');
+      const canvas = page.querySelector('canvas');
+      const pr = page.getBoundingClientRect(), sr = span.getBoundingClientRect();
+      const k = canvas.width / pr.width;
+      const ctx = canvas.getContext('2d');
+      const y0 = Math.max(0, Math.floor((sr.top - pr.top) * k)), h = Math.max(1, Math.floor(sr.height * k));
+      const data = ctx.getImageData(0, y0, canvas.width, h).data;
+      let min = canvas.width, max = 0;
+      for (let y = 0; y < h; y++) for (let x = 0; x < canvas.width; x++) if (data[(y * canvas.width + x) * 4] < 128) { if (x < min) min = x; if (x > max) max = x; }
+      return { span: [(sr.left - pr.left) * k, (sr.right - pr.left) * k], ink: [min, max], font: parseFloat(getComputedStyle(span).fontSize) };
+    });
+    const check = async (label) => {
+      await sleep(1500);
+      const m = await measure();
+      const w = m.ink[1] - m.ink[0];
+      assert.ok(Math.abs(m.span[0] - m.ink[0]) < w * 0.015 && Math.abs(m.span[1] - m.ink[1]) < w * 0.015, `${label}: ${JSON.stringify(m)}`);
+    };
+    await check('fit');
+    await app.invoke('shortcut', { name: 'zoom_in' });
+    await app.invoke('shortcut', { name: 'zoom_in' });
+    await check('zoomed in');
+    await app.invoke('shortcut', { name: 'zoom_reset' });
+    await check('reset');
+  }],
   ['extensionless PDF url (like arxiv.org/pdf/ID) also gets the viewer and a selectable text', async () => {
     await app.invoke('canvas.set', { cell: 2, url: `${base}/pdf/1234` });
     await waitFor(async () => app.ctx.pages().filter((p) => /pdf\.localhost/.test(p.url())).length >= 2);

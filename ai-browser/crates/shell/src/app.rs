@@ -45,6 +45,7 @@ use crate::ui;
 mod agent_glue;
 mod ai_glue;
 mod canvas;
+mod popups;
 const SESSION_DEBOUNCE: Duration = Duration::from_millis(500);
 const TICK: Duration = Duration::from_millis(250);
 const NAV_COALESCE: Duration = Duration::from_millis(100);
@@ -76,6 +77,8 @@ struct LiveTab {
     webview: WebView,
     /// Scroll offset to apply on the next committed navigation (§6.4).
     pending_scroll: Option<f64>,
+    /// Last bounds and corner radius applied to the page window; skips redundant re-shaping.
+    shaped: std::cell::Cell<Option<(i32, i32, i32, i32, i32)>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,6 +118,8 @@ pub struct AppState {
 
     panel: Panel,
     overlay_rect: Overlay,
+    // A shell menu taller than the toolbar needs the page windows out of its way.
+    menu_open: bool,
 
     find: Option<FindResult>,
 
@@ -811,6 +816,28 @@ impl AppState {
         }
     }
 
+    /// Corner radius of a split-view pane, in logical pixels.
+    const PANE_RADIUS: f64 = 6.0;
+
+    /// A page in a canvas cell gets rounded corners (like Edge's split view); any other
+    /// page is square.
+    fn shape_tab(&self, id: TabId) {
+        use tao::platform::windows::WindowExtWindows;
+        let Some(window) = self.window.as_ref() else { return };
+        let Some(live) = self.live.get(&id) else { return };
+        let (r, shown) = self.tab_geom(id);
+        let in_grid = shown == Some(true) && r != self.canvas_area_rect();
+        let scale = window.scale_factor();
+        let phys = |v: i32| (f64::from(v) * scale).round() as i32;
+        let radius = if in_grid { (Self::PANE_RADIUS * scale).round() as i32 } else { 0 };
+        let key = (phys(r.x), phys(r.y), phys(r.w), phys(r.h), radius);
+        if live.shaped.get() == Some(key) {
+            return;
+        }
+        live.shaped.set(Some(key));
+        crate::sys::round_child_at(window.hwnd() as isize, (key.0, key.1, key.2, key.3), radius);
+    }
+
     fn apply_layout(&mut self) {
         let l = self.layout();
         if let Some(wv) = self.shell.as_ref() {
@@ -824,10 +851,15 @@ impl AppState {
             if let Some(live) = self.live.get(&id) {
                 let _ = live.webview.set_bounds(layout::rect(r.x, r.y, r.w, r.h));
                 // Cells of a zoomed canvas keep their page alive but out of sight.
-                if let Some(visible) = shown {
+                if self.menu_open {
+                    let _ = live.webview.set_visible(false);
+                } else if let Some(visible) = shown {
                     let _ = live.webview.set_visible(visible);
+                } else {
+                    let _ = live.webview.set_visible(true);
                 }
             }
+            self.shape_tab(id);
         }
         if let Some(ov) = self.overlay.as_ref() {
             if self.overlay_rect.is_open() {
@@ -975,6 +1007,18 @@ impl AppState {
             "canvas.focus" => self.canvas_focus(p),
             "canvas.zoom" => self.canvas_zoom(p),
             "canvas.layout" => self.canvas_layout(p),
+            "canvas.resize" => self.canvas_resize(p),
+            "page.dismiss_popups" => {
+                let targets = self.dismiss_targets(p)?;
+                self.ai.agent_job_seq += 1;
+                self.dismiss_start((1 << 62) + self.ai.agent_job_seq, targets, false);
+                Ok(None)
+            }
+            "shell.menu" => {
+                self.menu_open = p.get("open").and_then(Value::as_bool).unwrap_or(false);
+                self.apply_layout();
+                Ok(None)
+            }
             "canvas.clear" => self.canvas_clear(p),
             "canvas.state" => Ok(Some(self.canvas_payload())),
             "tab.select" => {
@@ -2088,7 +2132,8 @@ impl AppState {
                 if let Err(e) = wv.set_bounds(layout::rect(geom.x, geom.y, geom.w, geom.h)) {
                     self.note(format!("tab bounds: {e}"));
                 }
-                self.live.insert(id, LiveTab { webview: wv, pending_scroll: None });
+                self.live.insert(id, LiveTab { webview: wv, pending_scroll: None, shaped: Default::default() });
+                self.shape_tab(id);
                 if let Some(t) = self.tabs.get_mut(id) {
                     t.sleeping = false;
                 }
@@ -2255,6 +2300,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
         context: None,
         panel: Panel::None,
         overlay_rect: Overlay::Closed,
+        menu_open: false,
         find: None,
         proxy: None,
         start_tick,

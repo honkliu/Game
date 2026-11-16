@@ -1,9 +1,12 @@
-html, body { margin: 0; background: #525659; }
-body { min-height: 100vh; font: 14px system-ui, sans-serif; color: #e8eaed; }
+/* Light by default like Edge's viewer; the scrollbar track is the page-area colour so they read as one surface. */
+:root { --bg: #e6e6e6; --bar: #f7f7f7; --fg: #1b1b1b; --line: #d0d0d0; --hover: rgba(0,0,0,.08); --chip: #e6e6e6; --thumb: #b4b4b4; --thumb-hover: #8f8f8f; color-scheme: light; }
+@media (prefers-color-scheme: dark) { :root { --bg: #2b2b2b; --bar: #333333; --fg: #ececec; --line: #4a4a4a; --hover: rgba(255,255,255,.12); --chip: #1f1f1f; --thumb: #5c5c5c; --thumb-hover: #7a7a7a; color-scheme: dark; } }
+html, body { margin: 0; background: var(--bg); }
+body { min-height: 100vh; font: 14px system-ui, sans-serif; color: var(--fg); }
 #pages { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 8px 0; }
 #status { text-align: center; margin: 24px; }
 #status:empty { display: none; }
-.page { position: relative; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .5); flex: none; overflow: hidden; }
+.page { position: relative; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.08), 0 2px 8px rgba(0, 0, 0, .18); flex: none; overflow: hidden; }
 .page canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; }
 
 /* The text layer: invisible text over the canvas, so selecting and copying work. */
@@ -12,7 +15,7 @@ body { min-height: 100vh; font: 14px system-ui, sans-serif; color: #e8eaed; }
   text-align: initial; text-size-adjust: none; forced-color-adjust: none; transform-origin: 0 0;
   caret-color: CanvasText; z-index: 0;
 }
-.textLayer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0 0; }
+.textLayer :is(span, br) { text-rendering: geometricPrecision; font-kerning: none; font-variant-ligatures: none; color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0 0; }
 .textLayer span.markedContent { top: 0; height: 0; }
 .textLayer ::selection { background: rgba(0, 100, 255, .3); }
 .textLayer br::selection { background: transparent; }
@@ -20,3 +23,32 @@ body { min-height: 100vh; font: 14px system-ui, sans-serif; color: #e8eaed; }
 .textLayer.selecting .endOfContent { top: 0; }
 .annotationLayer { position: absolute; inset: 0; }
 .annotationLayer a { position: absolute; display: block; }
+
+/* Toolbar, like Edge's PDF viewer. */
+#bar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 12px; background: var(--bar); color: var(--fg); box-shadow: 0 1px 0 var(--line); user-select: none; }
+#bar .grow { flex: 1; }
+#name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
+#bar .sep { width: 1px; height: 18px; background: var(--line); margin: 0 6px; }
+#bar button { background: transparent; color: inherit; border: 0; border-radius: 4px; min-width: 28px; height: 28px; font: inherit; font-size: 16px; cursor: pointer; }
+#bar button:hover { background: var(--hover); }
+#cur { background: var(--chip); padding: 2px 8px; border-radius: 3px; font-weight: 400; }
+#pages { padding-top: 16px; }
+.page { border-radius: 1px; }
+
+/* pdf.js text-layer geometry: each span is sized and stretched to cover its glyphs exactly,
+   otherwise only part of a line is selectable. */
+:root { --scale-round-x: 1px; --scale-round-y: 1px; }
+.textLayer { --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size)); }
+.textLayer > :not(.markedContent), .textLayer .markedContent span:not(.markedContent) {
+  z-index: 1; --font-height: 0; font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate, 0deg)) scaleX(var(--scale-x, 1)) scale(var(--min-font-size-inv));
+}
+.textLayer .markedContent { display: contents; }
+.textLayer span.markedContent { top: 0; height: 0; }
+
+
+html { scrollbar-color: var(--thumb) var(--bg); }
+::-webkit-scrollbar { width: 14px; height: 14px; background: var(--bg); }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--thumb); border: 3px solid var(--bg); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: var(--thumb-hover); }

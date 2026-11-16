@@ -8,7 +8,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL('./pdf.worker.min.mjs', import.met
 const pagesEl = document.getElementById('pages');
 const statusEl = document.getElementById('status');
 const source = new URLSearchParams(location.search).get('src') || '';
-const MARGIN = 16;
+const MARGIN = 0;
 const EAGER_TEXT_PAGES = 400;
 
 let doc = null;
@@ -30,6 +30,7 @@ function titleFromSource() {
 
 async function load() {
   document.title = titleFromSource();
+  document.getElementById('name').textContent = document.title;
   try {
     const response = await fetch('data?u=' + encodeURIComponent(source));
     if (!response.ok) throw new Error(await response.text());
@@ -131,6 +132,7 @@ async function text(slot, gen) {
   layer.style.setProperty('--scale-factor', String(viewport.scale));
   layer.style.setProperty('--total-scale-factor', String(viewport.scale));
   slot.el.append(layer);
+
   try {
     await new pdfjs.TextLayer({ textContentSource: page.streamTextContent(), container: layer, viewport }).render();
   } catch (e) { return; }
@@ -172,3 +174,16 @@ window.addEventListener('resize', () => {
 });
 
 load();
+
+const post = (obj) => { try { window.ipc.postMessage(JSON.stringify(obj)); } catch (e) { /* no host */ } };
+document.getElementById('zin').addEventListener('click', () => post({ ai: 'zoom', dir: 1 }));
+document.getElementById('zout').addEventListener('click', () => post({ ai: 'zoom', dir: -1 }));
+document.getElementById('zfit').addEventListener('click', () => post({ ai: 'zoom', dir: 0 }));
+window.addEventListener('scroll', () => {
+  const mid = window.scrollY + window.innerHeight / 3;
+  const slot = slots.find((s) => s.el.offsetTop + s.el.offsetHeight > mid) || slots[slots.length - 1];
+  if (slot) {
+    document.getElementById('cur').textContent = String(slot.n);
+    document.getElementById('total').textContent = String(slots.length);
+  }
+}, { passive: true });

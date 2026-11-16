@@ -47,3 +47,17 @@ Spec: `../ai-native-browser-design-and-engineering-backlog.md`.
 - Extensionless PDF URLs (e.g. arxiv.org/pdf/ID) are detected via contentType and routed to the bundled viewer.
 - Zoom (address-bar buttons, shortcuts, Ctrl+wheel) in a viewer tab goes through window.__pdfZoom (e2e/suite8.mjs).
 
+
+## Split view, tab colours, PDF toolbar
+- Canvas panes are Edge-style: 4 px apart, small rounded corners (window region clip), blue ring on the active pane, draggable dividers (double-click resets), min 12% share.
+- New-canvas button opens a layout picker (2x1 ... 4x3); canvas tab right-click offers the same layouts.
+- Tab headers: neutral when idle, accent when selected, violet tint for canvases. Page content is never tinted.
+- Local file:// PDFs feed selections to the AI; the PDF viewer has a toolbar (name, page n/N, zoom -/+/Fit) wired to the shared page zoom.
+- Real-OS-input e2e tests need an unlocked, foreground desktop.
+
+## Close popups (page level)
+
+- Shell command `page.dismiss_popups {scope: cell|tab|all, cell?, row?, col?, tab_id?}` and agent tool `dismiss_popups` (no approval needed). `cell` = focused cell (or the one named), `tab` = every cell of the current canvas, `all` = every open page.
+- `app/dismiss.js` finds fixed/high-z elements that are dialogs, backdrops, ads (ad iframes or ad/popup class names), or cookie banners, clicks their own close control, hides what is left and restores page scrolling. Headers, nav bars and the main content are never touched. Heuristic, top frame only: popups inside cross-origin iframes, or that appear later, need another run.
+- Tested in `e2e/suite10.mjs` (2x2 canvas, command and agent tool, header survives).
+

@@ -200,8 +200,9 @@ pub fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
 
 /// Width of the ring the shell draws around each cell (it shows the focused cell). The
 /// page webview sits inside it; a cell has no chrome of its own.
-pub const CELL_RING: i32 = 1;
-/// Frames touch: two neighbouring pages are separated by exactly two rings (2 px).
+pub const CELL_RING: i32 = 2;
+/// Frames touch: two neighbouring pages are separated by exactly two rings (4 px), the
+/// strip that doubles as the drag handle between them.
 pub const CELL_GAP: i32 = 0;
 
 /// A plain rectangle in logical units.
@@ -222,18 +223,98 @@ pub struct CellGeom {
     pub hidden: bool,
 }
 
-fn split(origin: i32, total: i32, n: i32, i: i32) -> (i32, i32) {
-    let avail = (total - CELL_GAP * (n + 1)).max(0);
-    let start = origin + CELL_GAP + i * CELL_GAP + (i * avail) / n;
-    let end = origin + CELL_GAP + i * CELL_GAP + ((i + 1) * avail) / n;
-    (start, (end - start).max(0))
+/// Smallest share a column or row can be dragged down to.
+pub const MIN_SHARE: f64 = 0.12;
+
+/// Normalised shares for `n` tracks: `weights` when it fits, otherwise equal.
+pub fn shares(weights: &[f64], n: usize) -> Vec<f64> {
+    if weights.len() == n && weights.iter().all(|w| w.is_finite() && *w > 0.0) {
+        let sum: f64 = weights.iter().sum();
+        weights.iter().map(|w| w / sum).collect()
+    } else {
+        vec![1.0 / n.max(1) as f64; n]
+    }
+}
+
+/// Where track `i` of `n` starts and how long it is. Edges are cumulative so tracks
+/// tile exactly.
+fn split(origin: i32, total: i32, shares: &[f64], i: usize) -> (i32, i32) {
+    let total = total.max(0);
+    let edge = |k: usize| -> i32 {
+        if k >= shares.len() {
+            total
+        } else {
+            (shares[..k].iter().sum::<f64>() * f64::from(total)).round() as i32
+        }
+    };
+    let (start, end) = (edge(i), edge(i + 1));
+    (origin + start, (end - start).max(0))
+}
+
+/// A draggable boundary between two tracks. `index` is the track before it. A vertical
+/// divider belongs to one `row`; a horizontal one spans the whole width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Divider {
+    pub vertical: bool,
+    pub index: usize,
+    pub row: usize,
+    pub rect: Rc,
+}
+
+fn row_shares(col_ws: &[Vec<f64>], row: usize, cols: usize) -> Vec<f64> {
+    shares(col_ws.get(row).map_or(&[][..], Vec::as_slice), cols)
+}
+
+/// The dividers of a `cols × rows` grid laid over `area` (not for a zoomed canvas).
+/// Every row has its own column dividers, so rows resize independently.
+pub fn canvas_dividers(area: Rc, cols: usize, rows: usize, col_ws: &[Vec<f64>], row_h: &[f64]) -> Vec<Divider> {
+    let (cols, rows) = (cols.max(1), rows.max(1));
+    let rs = shares(row_h, rows);
+    let mut out = Vec::new();
+    for r in 0..rows {
+        let (y, h) = split(area.y, area.h, &rs, r);
+        let cs = row_shares(col_ws, r, cols);
+        for i in 0..cols - 1 {
+            let (x, w) = split(area.x, area.w, &cs, i);
+            out.push(Divider { vertical: true, index: i, row: r, rect: Rc { x: x + w - CELL_RING, y, w: 2 * CELL_RING, h } });
+        }
+    }
+    for i in 0..rows - 1 {
+        let (y, h) = split(area.y, area.h, &rs, i);
+        out.push(Divider { vertical: false, index: i, row: 0, rect: Rc { x: area.x, y: y + h - CELL_RING, w: area.w, h: 2 * CELL_RING } });
+    }
+    out
+}
+
+/// Move the boundary after track `index` to `pos` (a coordinate along the axis, in the
+/// same units as `origin`/`total`), keeping every track above `MIN_SHARE`. Returns the
+/// new weights.
+pub fn drag_divider(weights: &[f64], n: usize, index: usize, pos: f64, origin: i32, total: i32) -> Vec<f64> {
+    let mut s = shares(weights, n);
+    if index + 1 >= n || total <= 0 {
+        return s;
+    }
+    let before: f64 = s[..index].iter().sum();
+    let pair = s[index] + s[index + 1];
+    let want = ((pos - f64::from(origin)) / f64::from(total) - before).clamp(MIN_SHARE, (pair - MIN_SHARE).max(MIN_SHARE));
+    s[index] = want;
+    s[index + 1] = pair - want;
+    s
 }
 
 /// Tile `cols × rows` cells over the page area, row-major. With `zoom = Some(i)` that cell
 /// fills the whole area and the others are hidden. The cells always tile exactly: no
 /// cell overlaps another and none leaves the area.
-pub fn canvas_cells(area: Rc, cols: usize, rows: usize, zoom: Option<usize>) -> Vec<CellGeom> {
-    let (cols, rows) = (cols.max(1) as i32, rows.max(1) as i32);
+pub fn canvas_cells(
+    area: Rc,
+    cols: usize,
+    rows: usize,
+    zoom: Option<usize>,
+    col_ws: &[Vec<f64>],
+    row_h: &[f64],
+) -> Vec<CellGeom> {
+    let (cols, rows) = (cols.max(1), rows.max(1));
+    let rs = shares(row_h, rows);
     let make = |frame: Rc, ring: i32| {
         let ring = ring.min(frame.w / 2).min(frame.h / 2).max(0);
         CellGeom {
@@ -244,12 +325,13 @@ pub fn canvas_cells(area: Rc, cols: usize, rows: usize, zoom: Option<usize>) -> 
     };
     (0..cols * rows)
         .map(|n| match zoom {
-            Some(z) if z as i32 == n => make(area, 0),
+            Some(z) if z == n => make(area, 0),
             Some(_) => CellGeom { hidden: true, ..Default::default() },
             None => {
                 let (c, r) = (n % cols, n / cols);
-                let (x, w) = split(area.x, area.w, cols, c);
-                let (y, h) = split(area.y, area.h, rows, r);
+                let cs = row_shares(col_ws, r, cols);
+                let (x, w) = split(area.x, area.w, &cs, c);
+                let (y, h) = split(area.y, area.h, &rs, r);
                 make(Rc { x, y, w, h }, CELL_RING)
             }
         })
@@ -364,7 +446,7 @@ mod tests {
     #[test]
     fn canvas_cells_tile_without_overlap_inside_the_area() {
         let area = Rc { x: 220, y: 36, w: 1060, h: 784 };
-        let cells = canvas_cells(area, 3, 2, None);
+        let cells = canvas_cells(area, 3, 2, None, &[], &[]);
         assert_eq!(cells.len(), 6);
         for (i, a) in cells.iter().enumerate() {
             let f = a.frame;
@@ -386,7 +468,7 @@ mod tests {
     #[test]
     fn zoomed_canvas_gives_one_cell_everything() {
         let area = Rc { x: 0, y: 0, w: 900, h: 600 };
-        let cells = canvas_cells(area, 3, 2, Some(4));
+        let cells = canvas_cells(area, 3, 2, Some(4), &[], &[]);
         assert_eq!(cells[4].frame, area);
         assert_eq!(cells[4].body, area);
         assert!(!cells[4].hidden);
@@ -395,7 +477,7 @@ mod tests {
 
     #[test]
     fn canvas_in_a_tiny_area_never_goes_negative() {
-        for c in canvas_cells(Rc { x: 0, y: 0, w: 10, h: 10 }, 4, 3, None) {
+        for c in canvas_cells(Rc { x: 0, y: 0, w: 10, h: 10 }, 4, 3, None, &[], &[]) {
             assert!(c.frame.w >= 0 && c.frame.h >= 0 && c.body.w >= 0 && c.body.h >= 0);
         }
     }
@@ -404,5 +486,27 @@ mod tests {
     fn tiny_window_never_yields_negative_sizes() {
         let l = compute(size(200, 100), 1.0, false, Panel::Downloads, Overlay::Palette);
         assert!(l.page_w >= 0 && l.page_h >= 0 && l.overlay_w >= 0 && l.overlay_h >= 0);
+    }
+    #[test]
+    fn dragging_a_divider_resizes_the_two_neighbours_and_keeps_a_minimum() {
+        let area = Rc { x: 100, y: 0, w: 1000, h: 500 };
+        let w = drag_divider(&[], 2, 0, 700.0, area.x, area.w);
+        let cells = canvas_cells(area, 2, 1, None, &[w], &[]);
+        assert_eq!(cells[0].frame.w, 600);
+        assert_eq!(cells[0].frame.w + cells[1].frame.w, 1000);
+        let w = drag_divider(&[], 2, 0, 0.0, area.x, area.w);
+        assert!((w[0] - MIN_SHARE).abs() < 1e-9);
+        let d = canvas_dividers(area, 2, 2, &[], &[]);
+        assert_eq!(d.iter().filter(|d| d.vertical).count(), 2);
+        assert!(d.iter().any(|d| d.vertical && d.rect.x == 100 + 500 - CELL_RING));
+    }
+    #[test]
+    fn each_row_splits_its_columns_independently() {
+        let area = Rc { x: 0, y: 0, w: 1000, h: 400 };
+        let top = drag_divider(&[], 2, 0, 700.0, area.x, area.w);
+        let cells = canvas_cells(area, 2, 2, None, &[top], &[]);
+        assert_eq!(cells[0].frame.w, 700);
+        assert_eq!(cells[2].frame.w, 500, "the second row keeps equal columns");
+        assert_eq!(cells[3].frame.w, 500);
     }
 }

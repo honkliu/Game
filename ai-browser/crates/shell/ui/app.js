@@ -225,11 +225,12 @@
   // The pages are native surfaces on top of this layer; only the gaps and the
   // title strips (geometry from the host) are visible, so everything here is
   // positioned in window coordinates.
+  let dragging = null;
   function renderCanvas() {
     const cv = state.canvas;
     const layer = el.canvasLayer;
     layer.hidden = !cv;
-    layer.innerHTML = '';
+    for (const node of [...layer.children]) if (node !== (dragging && dragging.el)) node.remove();
     // The chrome scales with page zoom (body zoom); canvas geometry is in window pixels.
     const scale = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-scale')) || 1;
     layer.style.zoom = String(1 / scale);
@@ -251,6 +252,43 @@
       }
       layer.appendChild(cell);
     }
+    for (const d of cv.dividers || []) {
+      const geom = `left:${d.rect.x}px;top:${d.rect.y}px;width:${d.rect.w}px;height:${d.rect.h}px`;
+      // The divider being dragged keeps its element (and pointer capture) across redraws.
+      if (dragging && dragging.vertical === d.vertical && dragging.index === d.index && dragging.row === d.row) {
+        dragging.el.style.cssText = geom;
+        continue;
+      }
+      const h = document.createElement('div');
+      h.className = 'cv-divider ' + (d.vertical ? 'is-vertical' : 'is-horizontal');
+      h.style.cssText = geom;
+      h.addEventListener('dblclick', () => invoke('canvas.resize', { reset: true }));
+      h.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        h.setPointerCapture(e.pointerId);
+        h.classList.add('is-dragging');
+        dragging = { el: h, vertical: d.vertical, index: d.index, row: d.row };
+        let pending = null;
+        const send = () => {
+          const pos = d.vertical ? pending.clientX : pending.clientY;
+          pending = null;
+          invoke('canvas.resize', { vertical: d.vertical, index: d.index, row: d.row, pos });
+        };
+        const move = (ev) => { if (!pending) requestAnimationFrame(send); pending = ev; };
+        const up = () => {
+          h.removeEventListener('pointermove', move);
+          h.removeEventListener('pointerup', up);
+          h.removeEventListener('pointercancel', up);
+          h.classList.remove('is-dragging');
+          dragging = null;
+        };
+        h.addEventListener('pointermove', move);
+        h.addEventListener('pointerup', up);
+        h.addEventListener('pointercancel', up);
+      });
+      layer.appendChild(h);
+    }
   }
 
   function iconFor(t) {
@@ -267,6 +305,8 @@
     row.setAttribute('role', 'option');
     row.setAttribute('aria-selected', String(!!(t.active || t.shown)));
     row.dataset.tabId = String(t.id);
+    if (t.canvas) row.classList.add('is-canvas');
+    row.style.setProperty('--tab-hue', String(tabHue(t)));
     row.tabIndex = -1;
     const url = t.url || '';
     row.title = url ? `${t.title}\n${url}` : t.title;
@@ -508,12 +548,19 @@
   }
 
   // ── item menu (§3.5 Space, max 8 items, one level) ───────────────────
-  function openItemMenu(t, x, y) {
-    const isCanvas = !!t.canvas;
-    const items = isCanvas ? [
+  // Each site gets its own tab colour (stable per host); a canvas has its own.
+  function tabHue(t) {
+    // Golden-angle steps keep neighbouring tab ids visibly different; the colour is stable per tab.
+    return (Number(t.id) * 137.508 + 20) % 360 | 0;
+  }
+
+  const GRIDS = [[2, 1], [1, 2], [2, 2], [3, 1], [3, 2], [4, 1], [4, 2], [4, 3]];
+  function openItemMenu(t, x, y, custom) {
+    const isCanvas = !!(t && t.canvas);
+    const items = custom || (isCanvas ? [
       { label: 'Zoom focused page', run: () => invoke('canvas.zoom', { canvas_id: t.id }) },
-      ...[[3, 2], [2, 2], [2, 1], [1, 2], [3, 1]].map(([c, r]) => ({
-        label: `Layout ${c}×${r}`, run: () => invoke('canvas.layout', { canvas_id: t.id, cols: c, rows: r }),
+      ...GRIDS.map(([c, r]) => ({
+        label: `Layout ${c} × ${r}`, run: () => invoke('canvas.layout', { canvas_id: t.id, cols: c, rows: r }),
       })),
       { sep: true },
       { label: 'Close canvas', run: () => invoke('tab.close', { tab_id: t.id }), danger: true },
@@ -525,7 +572,7 @@
       { sep: true },
       { label: 'Close tab', run: () => invoke('tab.close', { tab_id: t.id }), danger: true },
       { label: 'Close others', run: () => state.tabs.filter((o) => o.id !== t.id).forEach((o) => invoke('tab.close', { tab_id: o.id })) },
-    ];
+    ]);
     el.itemMenu.innerHTML = '';
     let focusIdx = 0;
     items.forEach((it, i) => {
@@ -545,6 +592,7 @@
       el.itemMenu.appendChild(b);
     });
     el.itemMenu.hidden = false;
+    invoke('shell.menu', { open: true });
     el.itemMenu.style.left = `${Math.min(x, window.innerWidth - 220)}px`;
     el.itemMenu.style.top = `${Math.min(y, window.innerHeight - 200)}px`;
     const first = el.itemMenu.querySelector('.menu-item');
@@ -552,6 +600,7 @@
   }
 
   function closeItemMenu() {
+    if (!el.itemMenu.hidden) invoke('shell.menu', { open: false });
     el.itemMenu.hidden = true;
     el.itemMenu.innerHTML = '';
   }
@@ -689,6 +738,7 @@
       el.itemMenu.appendChild(b);
     });
     el.itemMenu.hidden = false;
+    invoke('shell.menu', { open: true });
     el.itemMenu.style.left = `${Math.min(x, window.innerWidth - 220)}px`;
     el.itemMenu.style.top = `${Math.min(y, window.innerHeight - 160)}px`;
     const first = el.itemMenu.querySelector('.menu-item');
@@ -725,7 +775,12 @@
   document.getElementById('btn-ai').addEventListener('click', () => invoke('shortcut', { name: 'ask_ai' }));
   el.menu.addEventListener('click', () => invoke('shell.open_palette', {}));
   el.newTab.addEventListener('click', () => invoke('tab.new', {}));
-  el.newCanvas.addEventListener('click', () => invoke('canvas.create', {}));
+  el.newCanvas.addEventListener('click', () => {
+    const r = el.newCanvas.getBoundingClientRect();
+    openItemMenu(null, r.left, r.bottom + 2, GRIDS.map(([c, r2]) => ({
+      label: `${c} × ${r2} canvas  (${c * r2} pages)`, run: () => invoke('canvas.create', { cols: c, rows: r2 }),
+    })));
+  });
   $('#cv-zoom').addEventListener('click', () => invoke('canvas.zoom', {}));
   $('#cv-close').addEventListener('click', () => state.canvas && invoke('canvas.clear', { cell: state.canvas.focus }));
   $('#cv-layout').addEventListener('click', (e) => {
