@@ -303,7 +303,7 @@ impl AppState {
             Ok(())
         } else {
             match self.live.get(&tab) {
-                Some(live) => context::capture(&live.webview, move |result| {
+                Some(live) => live.capture(move |result| {
                     let _ = proxy.send_event(AppMessage::AiCaptured(tab, CaptureFor::Task(task.0), result));
                 }),
                 None => Err(Failure::unavailable("context.no_webview")),
@@ -715,7 +715,7 @@ impl AppState {
         let proxy = self.proxy();
         let what = CaptureFor::Snapshot { request: id, token: token.0, version: version.0 };
         let started = match self.live.get(&tab) {
-            Some(live) => context::capture(&live.webview, move |result| {
+            Some(live) => live.capture(move |result| {
                 let _ = proxy.send_event(AppMessage::AiCaptured(tab, what, result));
             }),
             None => Err(Failure::unavailable("tab.sleeping")
@@ -778,7 +778,7 @@ impl AppState {
         }
         let proxy = self.proxy();
         let started = match self.live.get(&tab) {
-            Some(live) => context::capture(&live.webview, move |result| {
+            Some(live) => live.capture(move |result| {
                 let _ = proxy.send_event(AppMessage::AiCaptured(tab, CaptureFor::Extra(task), result));
             }),
             None => Err(Failure::unavailable("tab.sleeping")),
@@ -967,6 +967,11 @@ impl AppState {
                 let block = ctx.find(block_id).ok_or_else(|| Failure::stale("action.block_missing"))?;
                 let script = scroll_script(block.scroll_y(), Some([block.x, block.y, block.w, block.h]));
                 let live = self.live.get(&task_tab).ok_or_else(|| Failure::stale("action.tab_not_live"))?;
+                #[cfg(windows)]
+                if let Some(pdf) = &live.native_pdf {
+                    pdf.reveal(block.text.clone()).map_err(|error| Failure::unavailable("action.pdf_scroll_failed").with_detail(error))?;
+                    return Ok((false, json!({ "scrolled_to": block_id })));
+                }
                 live.webview
                     .evaluate_script(&script)
                     .map_err(|e| Failure::unavailable("action.script_failed").with_detail(e.to_string()))?;
@@ -1042,6 +1047,16 @@ impl AppState {
     pub(super) fn ai_citation_scroll(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let turn = p.get("turn_id").and_then(Value::as_u64).ok_or("turn_id required")?;
         let citation = p.get("citation_id").and_then(Value::as_u64).ok_or("citation_id required")? as usize;
+        #[cfg(windows)]
+        if let Ok((target, quote)) = self.ai.answers.native_citation_target(&self.ai.identity, turn, citation) {
+            let tab = TabId(target);
+            if self.has_native_pdf(tab) {
+                if self.active != Some(tab) { self.activate(tab); }
+                let pdf = self.live.get(&tab).and_then(|live| live.native_pdf.as_ref()).ok_or("the PDF is no longer loaded")?;
+                pdf.reveal(quote)?;
+                return Ok(Some(json!({ "scrolled": true, "tab_id": target })));
+            }
+        }
         if let Some((other, y, rect)) = self
             .ai
             .answers
@@ -1087,6 +1102,11 @@ impl AppState {
             .filter(|v| v.get("ai").and_then(Value::as_str) == Some("pdf"))
             .and_then(|v| v.get("url").and_then(Value::as_str).map(str::to_string))
         {
+            #[cfg(windows)]
+            {
+                self.start_native_pdf(tab, &url);
+            }
+            #[cfg(target_os = "macos")]
             if !crate::pdf::is_pdf_url(&url) {
                 let viewer = crate::pdf::viewer_url(&url);
                 self.navigate(tab, &viewer, false);
@@ -1122,7 +1142,12 @@ impl AppState {
             }
             return;
         }
+        if self.has_native_pdf(tab) { return; }
         let Some(sel) = Selection::from_probe(raw) else { return };
+        self.ai_on_selection(tab, sel);
+    }
+
+    pub(super) fn ai_on_selection(&mut self, tab: TabId, sel: Selection) {
         if self.active != Some(tab) {
             return;
         }
@@ -1150,7 +1175,7 @@ impl AppState {
     fn ai_show_toolbar(&mut self, tab: TabId, rect: [f64; 4]) {
         let l = self.layout();
         let area = self.tab_geom(tab).0;
-        let zoom = if self.is_viewer_tab(tab) {
+        let zoom = if self.is_viewer_tab(tab) || self.has_native_pdf(tab) {
             1.0
         } else {
             self.tabs.get(tab).map(|t| t.zoom).filter(|z| *z > 0.0).unwrap_or(1.0)

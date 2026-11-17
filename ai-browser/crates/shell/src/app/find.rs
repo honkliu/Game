@@ -24,6 +24,21 @@ impl AppState {
             params["case_sensitive"].as_bool().unwrap_or(false),
             params["regex_or_whole_word"].as_bool().unwrap_or(false),
             params["highlight_all"].as_bool().unwrap_or(false), index, sequence);
+        #[cfg(windows)]
+        if let Some(pdf) = self.live.get(&tab).and_then(|live| live.native_pdf.as_ref()) {
+            let proxy = self.proxy();
+            pdf.find(query.to_string(), index, move |raw| {
+                let _ = proxy.send_event(AppMessage::FindDone(tab, sequence, raw));
+            })?;
+            if command == "find.stop" {
+                self.find = None;
+                self.emit("find.result", json!({ "closed": true }));
+            } else {
+                self.find = Some(FindResult { tab_id: tab.0, query: query.to_string(),
+                    active: 0, total, supported_flags: Vec::new() });
+            }
+            return Ok(None);
+        }
         if command == "find.stop" {
             self.find = None;
             if let Some(live) = self.live.get(&tab) {

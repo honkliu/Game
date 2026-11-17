@@ -119,7 +119,7 @@ impl AppState {
         self.ai.agent_jobs.insert(job, crate::ai::session::AgentJob { tab: tab.map(|tab| tab.0), document, method, params, pending, run });
         let started = tab.and_then(|id| self.live.get(&id)).map(|live| {
             let proxy = self.proxy();
-            live.webview.evaluate_script_with_callback(CONTENT_SCRIPT, move |raw| {
+            live.read_content(CONTENT_SCRIPT, move |raw| {
                 let _ = proxy.send_event(AppMessage::AgentJob(job, Some(raw)));
             })
         });
@@ -227,7 +227,7 @@ impl AppState {
         let document = self.ai.identity.current(tab.0);
         let proxy = self.proxy();
         let started = self.live.get(&tab).map(|live| {
-            live.webview.evaluate_script_with_callback(CONTENT_SCRIPT, move |raw| {
+            live.read_content(CONTENT_SCRIPT, move |raw| {
                 let _ = proxy.send_event(AppMessage::PageRead(tab, document, sequence, Some(raw)));
             })
         });
@@ -248,8 +248,15 @@ impl AppState {
         }
         let content: Option<Value> = raw
             .and_then(|r| serde_json::from_str::<String>(&r).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .filter(|v: &Value| v.get("error").is_none());
+            .and_then(|s| serde_json::from_str(&s).ok());
+        if self.has_native_pdf(tab) {
+            if let Some(error) = content.as_ref().and_then(|value| value["error"].as_str()) {
+                self.note(format!("Native PDF text read for tab {}: {error}", tab.0));
+            }
+        }
+        let content = content.filter(|v| v.get("error").is_none());
+        #[cfg(windows)]
+        if content.is_some() { self.sync_native_pdf_zoom(tab); }
         let Some(snap) = self.ai.page_snaps.get_mut(&tab.0)
             .filter(|snap| snap.reading && snap.read_seq == sequence) else { return };
         snap.reading = false;
@@ -462,12 +469,16 @@ impl AppState {
         }
         let proxy = self.proxy();
         let started = match self.live.get(&TabId(eval.tab)) {
-            Some(live) => live
-                .webview
-                .evaluate_script_with_callback(&eval.script, move |raw| {
+            Some(live) => {
+                let callback = move |raw| {
                     let _ = proxy.send_event(AppMessage::AgentEvalDone(id, raw));
-                })
-                .map_err(|e| e.to_string()),
+                };
+                if eval.is_read {
+                    live.read_content(&eval.script, callback)
+                } else {
+                    live.webview.evaluate_script_with_callback(&eval.script, callback).map_err(|e| e.to_string())
+                }
+            }
             None => Err("the tab was closed or went to sleep".to_string()),
         };
         if let Err(e) = started {

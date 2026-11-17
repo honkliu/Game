@@ -38,8 +38,8 @@
   document.addEventListener('DOMContentLoaded', lifecycle);
   scheduleLifecycle();
 
-  // A PDF served without a .pdf address (arxiv.org/pdf/…, download endpoints) lands in the
-  // browser's built-in viewer, where the text cannot be read; ask the host for ours.
+  // Identify extensionless PDFs too. The host chooses the platform's viewer and
+  // extraction bridge; a PDF's text is not part of this page's ordinary DOM.
   if (document.contentType === 'application/pdf' && /^(https?|file):/.test(location.href)) {
     post({ ai: 'pdf', url: location.href });
     return;

@@ -28,6 +28,8 @@ pub mod keys;
 pub mod layout;
 pub mod omnibox;
 pub mod pdf;
+#[cfg(windows)]
+mod native_pdf;
 pub mod platform;
 pub mod session;
 pub mod settings;

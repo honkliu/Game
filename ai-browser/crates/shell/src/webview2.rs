@@ -73,6 +73,61 @@ pub fn install_pdf_drop(webview: &wry::WebView, on_drop: impl Fn(String) + 'stat
     }
 }
 
+pub fn install_zoom_changed(webview: &wry::WebView, on_zoom: impl Fn(f64) + 'static) -> windows::core::Result<()> {
+    use webview2_com::ZoomFactorChangedEventHandler;
+    use wry::WebViewExtWindows;
+
+    unsafe {
+        let mut token = 0;
+        webview.controller().add_ZoomFactorChanged(
+            &ZoomFactorChangedEventHandler::create(Box::new(move |controller, _| {
+                if let Some(controller) = controller {
+                    let mut factor = 1.0;
+                    controller.ZoomFactor(&mut factor)?;
+                    if factor.is_finite() && factor > 0.0 { on_zoom(factor); }
+                }
+                Ok(())
+            })),
+            &mut token,
+        )
+    }
+}
+
+pub fn zoom_factor(webview: &wry::WebView) -> windows::core::Result<f64> {
+    use wry::WebViewExtWindows;
+    let mut factor = 1.0;
+    unsafe { webview.controller().ZoomFactor(&mut factor)?; }
+    Ok(factor)
+}
+
+pub fn install_pdf_detection(webview: &wry::WebView, on_pdf: impl Fn(String) + 'static) -> windows::core::Result<()> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_2;
+    use webview2_com::WebResourceResponseReceivedEventHandler;
+    use windows::core::{Interface, PWSTR};
+    use wry::WebViewExtWindows;
+
+    unsafe {
+        let core = webview.controller().CoreWebView2()?.cast::<ICoreWebView2_2>()?;
+        let mut token = 0;
+        core.add_WebResourceResponseReceived(
+            &WebResourceResponseReceivedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut content_type = PWSTR::null();
+                if args.Response()?.Headers()?.GetHeader(w!("Content-Type"), &mut content_type).is_err() { return Ok(()) }
+                let content_type = crate::sys::take_pwstr(content_type);
+                if !content_type.split(';').next().is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/pdf")) {
+                    return Ok(());
+                }
+                let mut url = PWSTR::null();
+                args.Request()?.Uri(&mut url)?;
+                on_pdf(crate::sys::take_pwstr(url));
+                Ok(())
+            })),
+            &mut token,
+        )
+    }
+}
+
 /// How many environments [`create_shared_environment`] has handed back. Call
 /// before the first webview is built and again after; the two must both read the
 /// same single increment.

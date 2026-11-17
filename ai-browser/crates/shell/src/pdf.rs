@@ -1,10 +1,8 @@
 //! PDF documents in page webviews.
 //!
-//! WebView2's built-in PDF viewer is a plugin: page scripts cannot see its
-//! selection or its text, so the AI pane could neither ask about selected text nor
-//! read the document. PDF links are therefore opened in our own viewer (pdf.js,
-//! embedded under `ui/pdf/`) served from a `pdf` custom protocol, where the text
-//! is ordinary DOM. The tab keeps showing the document's real URL.
+//! Windows uses WebView2's native viewer and its Windows accessibility provider
+//! (`native_pdf`) for River's text and selection access. The bundled PDF.js viewer
+//! remains the macOS adapter until a native PDFKit bridge is implemented.
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use std::borrow::Cow;

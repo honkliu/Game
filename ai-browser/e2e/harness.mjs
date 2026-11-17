@@ -6,9 +6,87 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Read/select synthetic PDF content through the native provider, scoped to this test process. */
+export async function nativePdfText(pid, marker, select = null, { clearSelection = false } = {}) {
+  const encoded = value => Buffer.from(typeof value === 'string' ? value : '', 'utf8').toString('base64');
+  const ps = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$root = [System.Windows.Automation.AutomationElement]::FromHandle((Get-Process -Id ${pid}).MainWindowHandle)
+$marker = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded(marker)}'))
+$needle = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded(select)}'))
+$scope = [System.Windows.Automation.TreeScope]::Descendants
+$kind = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
+$emptyId = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, '')
+$condition = New-Object System.Windows.Automation.AndCondition($kind, $emptyId)
+$deadline = [DateTime]::UtcNow.AddSeconds(12)
+$native = $null
+do {
+  foreach ($candidate in $root.FindAll($scope, $condition)) {
+    try {
+      $pattern = $candidate.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+      $text = $pattern.DocumentRange.GetText(60000)
+      if ($text.Contains($marker)) { $native = $candidate; break }
+    } catch {}
+  }
+  if (!$native) { Start-Sleep -Milliseconds 100 }
+} while (!$native -and [DateTime]::UtcNow -lt $deadline)
+if (!$native) { throw 'Native PDF text did not become available.' }
+$selected = ''
+$bounds = @()
+if (${select === true ? '$true' : '$false'}) {
+  $native.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern).DocumentRange.Select()
+  Start-Sleep -Milliseconds 200
+} elseif (${select === null ? '$false' : '$true'}) {
+  $textPattern = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty, $true)
+  foreach ($leaf in $native.FindAll($scope, $textPattern)) {
+    $pattern = $leaf.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+    $range = $pattern.DocumentRange.FindText($needle, $false, $false)
+    if (!$range) { continue }
+    $range.Select()
+    for ($attempt=0; $attempt -lt 10 -and !$selected; $attempt++) {
+      Start-Sleep -Milliseconds 100
+      foreach ($selection in $pattern.GetSelection()) {
+        $selected += $selection.GetText(4000)
+        $bounds += @($selection.GetBoundingRectangles() | ForEach-Object { @{ x=$_.X; y=$_.Y; width=$_.Width; height=$_.Height } })
+      }
+    }
+    if ($selected) { break }
+  }
+}
+if (${typeof select === 'string' ? '$false' : '$true'}) {
+  $textPattern = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty, $true)
+  foreach ($element in $native.FindAll([System.Windows.Automation.TreeScope]::Subtree, $textPattern)) {
+    $pattern = $element.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+    foreach ($selection in $pattern.GetSelection()) {
+      $part = $selection.GetText(4000)
+      if (!$part.Trim()) { continue }
+      $selected += $part
+      $bounds += @($selection.GetBoundingRectangles() | ForEach-Object { @{ x=$_.X; y=$_.Y; width=$_.Width; height=$_.Height } })
+    }
+    if ($selected -and $element.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document) { break }
+  }
+}
+if (${clearSelection ? '$true' : '$false'}) {
+  $caret = $native.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern).DocumentRange
+  $caret.MoveEndpointByRange([System.Windows.Automation.Text.TextPatternRangeEndpoint]::End, $caret, [System.Windows.Automation.Text.TextPatternRangeEndpoint]::Start)
+  $caret.Select()
+  Start-Sleep -Milliseconds 200
+}
+@{ text=$text; selected=$selected; bounds=$bounds } | ConvertTo-Json -Depth 6 -Compress
+`;
+  const { stdout } = await promisify(execFile)('powershell',
+    ['-NoProfile', '-NonInteractive', '-Command', ps],
+    { timeout: 20000, encoding: 'utf8', maxBuffer: 1024 * 1024 })
+    .catch(error => { throw new Error(error.stderr || error.message); });
+  return JSON.parse(stdout);
+}
 
 export function listen(handler) {
   return new Promise((resolve) => {

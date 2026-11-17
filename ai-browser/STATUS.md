@@ -33,8 +33,10 @@ Spec: `../ai-native-browser-design-and-engineering-backlog.md`.
 - Each cell is a real page with its own history and is content only: no header, no address box, no border (cells are 2 px apart; only the focused cell shows a ring). Click anywhere in the canvas to focus the nearest cell. The shared address bar, find, zoom (toolbar and Ctrl+wheel) and the AI context follow the focused cell. A shared canvas bar reshapes the grid (extra pages close). Links opening new windows fill the next empty cell. The agent targets cells by 0-based `row`/`col`. The grid is saved with the session.
 
 ## PDF viewer
+- Windows uses WebView2's native PDF viewer at the real document URL. River reads document text and selection through Windows UI Automation on a dedicated COM worker, scoped to each page's native container. Find and citation reveal use native text ranges. Navigation cancels stale sessions; canvas cells keep independent document/selection identities. No special accessibility flags or clipboard access are required. `tools/probe-native-pdf.mjs` reproduces the underlying extraction experiment on WebView2 157.0.4341.60.
 - On Windows, dropping a local PDF onto a page opens it in that same tab or canvas cell and focuses the destination cell. Back/Forward retain the previous page and PDF. Native file inputs and website-handled upload drops remain available; the host obtains the dropped file's actual path through WebView2 additional objects rather than replacing HTML drag/drop handling.
-- PDF links and addresses (`*.pdf`) open in a bundled pdf.js viewer (`pdf://` protocol, `ui/pdf/`) instead of WebView2's plugin viewer, so selected text and page text reach the AI like any page. The tab keeps the real PDF URL. Native fetching uses the page's browser cookies, never forwards them to another origin, and limits loads to 64 MiB with cancellation and deadlines. Loading errors are visible. Windows cookie-authenticated loading, redirect isolation, limits, text selection and PDF find are covered by `e2e/suite5.mjs`. macOS parent-domain cookie handling still needs native validation.
+- The native Windows engine owns PDF fetching, authentication, redirects, rendering and load errors; HTML sign-in responses at PDF URLs remain ordinary pages. Native reads include offscreen pages, omit viewer chrome and bound River text to 60,000 characters with truncation metadata. Local PDFs can expose an empty outer accessibility document; extraction and selection skip it for the inner native text provider. `e2e/suite5.mjs` verifies the visible River selection card and actual Explain model requests for web and local PDFs, plus authenticated loading, cross-host cookie isolation, multi-page content, Find, zoom, drag/drop, history and independent canvas PDFs.
+- macOS still uses the bundled PDF.js viewer (`pdf://` protocol, `ui/pdf/`), including its cookie-aware fetcher and 64 MiB load limit. A native PDFKit adapter is a future direction, not implemented here. Native macOS PDF/cookie behavior remains unverified.
 
 ## Window chrome (Chrome layout)
 - Windows executables embed a blue/teal globe icon at 16–256 px; the native window, taskbar and Alt+Tab use the same artwork in debug and release builds. The source and generated assets are in `crates/shell/assets`; regenerate with `node tools/generate-icon.mjs` using the existing e2e Playwright dependency and Microsoft Edge. Normal builds use the checked-in assets and need no icon-generation tools.
@@ -63,16 +65,17 @@ On macOS, run `bash run-ai-browser.sh` from the repository root. Native app
 packaging: `bash tools/package-macos.sh` from `ai-browser`.
 
 ## PDF cells
-- Extensionless PDF URLs (e.g. arxiv.org/pdf/ID) are detected via contentType and routed to the bundled viewer.
-- Zoom (address-bar buttons, shortcuts, Ctrl+wheel) in a viewer tab goes through window.__pdfZoom (e2e/suite8.mjs).
+- Extensionless PDF URLs are detected via content type: Windows retains native rendering; macOS routes to the bundled viewer.
+- Windows address-bar zoom and shortcuts scale the native WebView; native Ctrl+wheel changes update the shared zoom percentage and focus the affected canvas cell. Plain wheel events scroll without zooming, and Reset restores 100%. The bundled macOS viewer uses `window.__pdfZoom` instead.
 
 
 ## Split view, tab colours, PDF toolbar
 - Canvas panes are Edge-style: 4 px apart, small rounded corners (window region clip), blue ring on the active pane, draggable dividers (double-click resets), min 12% share.
 - New-canvas button opens a layout picker (2x1 ... 4x3); canvas tab right-click offers the same layouts.
 - Tab headers retain their per-tab hues. A thin, continuous 3 px bottom line matches the active header, including in dark mode and when a canvas tab is shown. Empty strip space stays neutral; inactive headers stay distinct. Page content is never tinted.
-- Local file:// PDFs feed selections to the AI; the PDF viewer has a toolbar (name, page n/N, zoom -/+/Fit) wired to the shared page zoom.
+- Local file:// PDFs feed selections to the AI. Windows retains the native viewer's controls; the bundled macOS viewer has its own name, page n/N and zoom toolbar.
 - Real-OS-input e2e tests need an unlocked, foreground desktop.
+- `e2e/suite8.mjs` checks native PDF canvas text, selection and zoom. Its physical PDF drag case is explicitly skipped when the Windows input desktop is unavailable; the other cases use process-scoped accessibility or trusted CDP input.
 
 ## Close popups (page level)
 

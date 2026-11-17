@@ -1,21 +1,26 @@
-// PDF viewer: PDFs open in our pdf.js viewer so selection and page text reach the AI.
+// Windows PDFs use WebView2's native renderer and accessibility text/selection.
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { launch, listen, run, sleep } from './harness.mjs';
+import { launch, listen, run, sleep, nativePdfText, startModel } from './harness.mjs';
 
 function makePdf(text) {
-  const stream = `BT /F1 24 Tf 72 700 Td (${text}) Tj ET`;
+  const pages = Array.isArray(text) ? text : [text];
   const objs = [
     '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
-    `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+    `<< /Type /Pages /Kids [${pages.map((_, i) => `${4 + i * 2} 0 R`).join(' ')}] /Count ${pages.length} >>`,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
   ];
+  pages.forEach((text, i) => {
+    const stream = `BT /F1 24 Tf 72 700 Td (${text}) Tj ET`;
+    objs.push(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${5 + i * 2} 0 R /Resources << /Font << /F1 3 0 R >> >> >>`,
+      `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+    );
+  });
   let out = '%PDF-1.4\n';
   const offsets = [];
   objs.forEach((o, i) => { offsets.push(out.length); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
@@ -40,13 +45,8 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (req.url === '/redirect.pdf') {
-    res.writeHead(302, { location: `http://127.0.0.1:${redirectTarget.port}/doc.pdf` });
+    res.writeHead(302, { location: `http://localhost:${redirectTarget.port}/doc.pdf` });
     res.end();
-    return;
-  }
-  if (req.url === '/oversized.pdf') {
-    res.writeHead(200, { 'content-type': 'application/pdf', 'content-length': 64 * 1024 * 1024 + 1 });
-    res.end(makePdf('Too large'));
     return;
   }
   if (req.url === '/login.pdf') {
@@ -62,9 +62,17 @@ const server = http.createServer((req, res) => {
       return;
     }
   }
-  if (req.url.endsWith('.pdf')) {
+  if (req.url.endsWith('.pdf') || req.url === '/extensionless-document') {
     res.setHeader('content-type', 'application/pdf');
-    res.end(makePdf('Quarterly revenue grew twelve percent'));
+    const text = req.url === '/find.pdf' ? ['Revenue report for the first page', 'revenue report on the second page', 'Final REVENUE report on page three'] :
+      req.url === '/multipage.pdf' ? [
+      'FIRST-PAGE native document introduction',
+      'SECOND-PAGE detailed revenue report',
+      'THIRD-PAGE offscreen conclusion sentinel',
+    ] : req.url === '/left.pdf' ? 'LEFT-NATIVE-PDF independent financial report' :
+      req.url === '/right.pdf' ? 'RIGHT-NATIVE-PDF separate canvas document' :
+      'Quarterly revenue grew twelve percent';
+    res.end(makePdf(text));
   } else {
     res.setHeader('content-type', 'text/html');
     res.end(`<h1>Page before a drop</h1><a id="l" href="http://127.0.0.1:${server.address().port}/doc.pdf">pdf</a>
@@ -88,7 +96,8 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${server.address().port}`;
 const reservation = await listen((_req, res) => res.end());
 await new Promise(resolve => reservation.server.close(resolve));
-const app = await launch({ debugPort: reservation.port, withProvider: false });
+const model = await startModel(() => 'Native PDF content received.');
+const app = await launch({ debugPort: reservation.port, modelPort: model.port });
 const localDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'browser-pdf-drop-'));
 const localPath = path.join(localDirectory, 'Local document 中文 # 100%.PDF');
 fs.writeFileSync(localPath, makePdf('Local dropped PDF document'));
@@ -104,19 +113,51 @@ async function dropFile(page, selector) {
     }
   } finally { await client.detach(); }
 }
-const viewer = () => app.ctx.pages().find((p) => /pdf\.localhost/.test(p.url()));
-const waitViewer = async () => { for (let i = 0; i < 60; i++) { const v = viewer(); if (v) return v; await sleep(250); } return null; };
+async function waitPdf(marker) {
+  return nativePdfText(app.child.pid, marker);
+}
+async function preview() {
+  return app.shell.evaluate(() => new Promise((resolve, reject) => {
+    const req = 980001;
+    const timeout = setTimeout(() => { off(); reject(new Error('context preview timed out')); }, 15000);
+    const off = window.__native.on('agent.reply', result => {
+      if (result.req !== req) return;
+      clearTimeout(timeout); off();
+      result.ok ? resolve(result.value) : reject(new Error(result.error));
+    });
+    window.__native.invoke('agent.call', { op: 'context.preview', req }).catch(reject);
+  }));
+}
+
+async function assertRiverSelection(marker) {
+  await app.invoke('shortcut', { name: 'ask_ai' });
+  const river = await app.pageWith(/sidebar\.html/);
+  await river.locator('#sel-card').waitFor();
+  assert.ok((await river.locator('#sel-card').textContent()).includes(marker), 'River visibly displays the native selection');
+  const before = model.calls.length;
+  await river.locator('#sel-card button').filter({ hasText: 'Explain' }).click();
+  for (let attempt = 0; attempt < 100 && model.calls.length === before; attempt++) await sleep(100);
+  assert.ok(model.calls.length > before, 'Explain sends a real model request');
+  const messages = model.calls[before].body.messages;
+  assert.ok(messages[0].content.includes(marker), 'the model receives the native selected text');
+  assert.match(JSON.stringify(messages.at(-1)), /Explain the selected text/);
+  await river.waitForFunction(() => window.__agentUi.messages.at(-1)?.content === 'Native PDF content received.');
+  await app.invoke('shortcut', { name: 'ask_ai' });
+}
 
 let failed = 0;
 try {
 failed = await run([
-  ['a PDF url opens in the pdf.js viewer with a selectable text layer', async () => {
+  ['a PDF url uses WebView2 native rendering and exposes native document text', async () => {
     await app.invoke('nav.open', { url: `${base}/doc.pdf`, disposition: 'current' });
-    const v = await waitViewer();
-    assert.ok(v, 'viewer page exists');
-    await v.waitForSelector('.textLayer span', { timeout: 20000 });
-    assert.match(await v.locator('.textLayer').first().innerText(), /Quarterly revenue/);
-    assert.ok(await v.locator('.page canvas').count() >= 1, 'canvas drawn');
+    const page = await app.pageWith(/\/doc\.pdf$/);
+    assert.ok(page);
+    assert.match((await waitPdf('Quarterly revenue')).text, /Quarterly revenue/);
+    assert.equal(await page.locator('.textLayer, .page canvas').count(), 0, 'not our PDF.js renderer');
+    const session = await app.ctx.newCDPSession(page);
+    const targets = await session.send('Target.getTargets');
+    await session.detach();
+    assert.ok(targets.targetInfos.some(target => target.type === 'webview' && /edge_pdf/.test(target.url)));
   }],
   ['the tab keeps the real PDF url, not the viewer url', async () => {
     const s = JSON.stringify(await app.invoke('agent.context', {}));
@@ -124,18 +165,24 @@ failed = await run([
     assert.ok(!s.includes('pdf.localhost'), s);
   }],
   ['selecting PDF text reaches the AI selection pipeline', async () => {
-    const v = viewer();
-    await v.evaluate(() => {
-      const el = document.querySelector('.textLayer span');
-      const r = document.createRange(); r.selectNodeContents(el);
-      const s = getSelection(); s.removeAllRanges(); s.addRange(r);
-      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    });
-    await sleep(800);
-    const sel = await v.evaluate(() => String(getSelection()));
-    assert.match(sel, /Quarterly/);
+    const result = await nativePdfText(app.child.pid, 'Quarterly revenue', 'Quarterly revenue');
+    assert.equal(result.selected, 'Quarterly revenue');
+    await app.shell.waitForFunction(async () => (await window.__native.invoke('agent.context')).page.selection === 'Quarterly revenue');
     const ctx = await app.invoke('agent.context', {});
     assert.match(ctx.page.selection || '', /Quarterly/, JSON.stringify(ctx.page));
+  }],
+  ['native PDF selection is visible in River and Explain sends it to the model', async () => {
+    await assertRiverSelection('Quarterly revenue');
+  }],
+  ['River reads native PDF content without viewer chrome', async () => {
+    const content = JSON.stringify(await preview());
+    assert.match(content, /Quarterly revenue grew twelve percent/);
+    assert.ok(!content.includes('Page number') && !content.includes('Rotate, Ctrl'));
+  }],
+  ['native selection clears when clicking away from text', async () => {
+    const page = await app.pageWith(/\/doc\.pdf$/);
+    await page.mouse.click(50, 400);
+    await app.shell.waitForFunction(async () => !(await window.__native.invoke('agent.context')).page.selection);
   }],
   ['PDF find reports and navigates document text', async () => {
     await app.shell.evaluate(() => {
@@ -147,6 +194,8 @@ failed = await run([
     await app.invoke('find.next', { query: 'revenue' });
     await app.shell.waitForFunction(() => window.__pdfFindResults.at(-1)?.active === 1);
     await app.invoke('find.stop');
+    await sleep(600);
+    assert.equal((await nativePdfText(app.child.pid, 'Quarterly revenue')).selected.trim(), '', 'stopping Find removes its native selection');
   }],
   ['PDF loading uses the browser HttpOnly login cookie', async () => {
     await app.invoke('nav.open', { url: base + '/sign-in' });
@@ -155,26 +204,97 @@ failed = await run([
     await signedIn.locator('h1').waitFor();
     assert.equal(await signedIn.evaluate(() => document.cookie), '', 'login cookie is not available to page JavaScript');
     await app.invoke('nav.open', { url: base + '/authenticated.pdf' });
-    const v = await app.pageWith(/authenticated.*pdf/);
-    assert.ok(v);
-    await v.waitForSelector('.textLayer span');
+    assert.ok(await app.pageWith(/\/authenticated\.pdf$/));
+    await waitPdf('Quarterly revenue');
     assert.match(authenticatedCookie, /pdf_session=allowed/);
   }],
   ['PDF redirects do not forward login cookies to a different origin', async () => {
     await app.invoke('nav.open', { url: base + '/redirect.pdf' });
-    const v = await app.pageWith(/redirect.*pdf/);
-    assert.ok(v);
-    await v.waitForSelector('.textLayer span');
+    await waitPdf('Redirected document');
     assert.equal(redirectedCookie, '');
-    assert.match(await v.locator('.textLayer').first().innerText(), /Redirected document/);
   }],
-  ['oversized PDFs and sign-in HTML produce visible errors instead of a blank viewer', async () => {
-    for (const [file, message] of [['oversized.pdf', '64 MiB limit'], ['login.pdf', 'non-PDF response']]) {
-      await app.invoke('nav.open', { url: `${base}/${file}` });
-      const v = await app.pageWith(new RegExp(file.replace('.', '.*')));
-      assert.ok(v);
-      await v.waitForFunction(expected => document.querySelector('#status').textContent.includes(expected), message);
+  ['HTML sign-in responses remain ordinary readable pages', async () => {
+    await app.invoke('nav.open', { url: `${base}/login.pdf` });
+    const page = await app.pageWith(/\/login\.pdf$/);
+    await page.locator('h1').waitFor();
+    assert.match(JSON.stringify(await preview()), /Please sign in/);
+  }],
+  ['extensionless PDFs use native rendering and River text extraction', async () => {
+    await app.invoke('nav.open', { url: `${base}/extensionless-document` });
+    await waitPdf('Quarterly revenue');
+    assert.match(JSON.stringify(await preview()), /Quarterly revenue/);
+    assert.equal((await app.invoke('agent.context')).page.url, `${base}/extensionless-document`);
+  }],
+  ['River reads all native PDF pages including offscreen content', async () => {
+    await app.invoke('nav.open', { url: `${base}/multipage.pdf` });
+    await waitPdf('FIRST-PAGE');
+    const content = JSON.stringify(await preview());
+    for (const marker of ['FIRST-PAGE', 'SECOND-PAGE', 'THIRD-PAGE']) assert.ok(content.includes(marker), marker);
+    await nativePdfText(app.child.pid, 'FIRST-PAGE', true);
+    await app.shell.waitForFunction(async () =>
+      (await window.__native.invoke('agent.context')).page.selection?.includes('THIRD-PAGE'));
+    const selected = (await app.invoke('agent.context')).page.selection;
+    for (const marker of ['FIRST-PAGE', 'SECOND-PAGE', 'THIRD-PAGE']) {
+      assert.equal(selected.split(marker).length - 1, 1, 'multi-page selections are not duplicated');
     }
+  }],
+  ['native PDF find cycles case-insensitive matches across pages and wraps', async () => {
+    await app.invoke('nav.open', { url: `${base}/find.pdf` });
+    await waitPdf('Revenue report');
+    await app.shell.evaluate(() => { window.__pdfFindResults = []; });
+    await app.invoke('find.start', { query: 'revenue' });
+    await app.shell.waitForFunction(() => window.__pdfFindResults.at(-1)?.total === 3);
+    for (const active of [2, 3, 1]) {
+      await app.invoke('find.next', { query: 'revenue' });
+      await app.shell.waitForFunction(expected => window.__pdfFindResults.at(-1)?.active === expected, active);
+    }
+    await app.invoke('find.prev', { query: 'revenue' });
+    await app.shell.waitForFunction(() => window.__pdfFindResults.at(-1)?.active === 3);
+    assert.equal((await app.invoke('agent.context')).page.selection, null, 'find matches do not become River selections');
+    await app.invoke('find.stop');
+  }],
+  ['browser zoom changes native PDF text geometry without raster canvases', async () => {
+    await app.invoke('nav.open', { url: `${base}/doc.pdf` });
+    await waitPdf('Quarterly revenue');
+    const before = await nativePdfText(app.child.pid, 'Quarterly revenue', 'Quarterly revenue');
+    await app.shell.locator('#zoom-in').click();
+    await sleep(400);
+    const after = await nativePdfText(app.child.pid, 'Quarterly revenue', 'Quarterly revenue');
+    assert.ok(after.bounds[0].height > before.bounds[0].height * 1.04,
+      `text scales natively: ${before.bounds[0].height} -> ${after.bounds[0].height}`);
+    await app.shell.locator('#zoom-label').click();
+  }],
+  ['native PDF Ctrl+scroll zooms in and out with the browser toolbar in sync', async () => {
+    const page = await app.pageWith(/\/doc\.pdf$/);
+    const measure = async () => {
+      const pdf = await nativePdfText(app.child.pid, 'Quarterly revenue', 'Quarterly revenue');
+      return { height: pdf.bounds[0]?.height, zoom: parseInt(await app.shell.locator('#zoom-label').textContent(), 10) };
+    };
+    const wheel = async deltaY => {
+      await page.mouse.move(350, 250);
+      await page.keyboard.down('Control');
+      try { await page.mouse.wheel(0, deltaY); } finally { await page.keyboard.up('Control'); }
+      await sleep(600);
+    };
+    const before = await measure();
+    await wheel(-120);
+    const enlarged = await measure();
+    assert.ok(enlarged.height > before.height * 1.04, `Ctrl+scroll up: ${JSON.stringify({ before, enlarged })}`);
+    assert.ok(enlarged.zoom > before.zoom, `toolbar follows Ctrl+scroll: ${JSON.stringify({ before, enlarged })}`);
+    await wheel(120);
+    const reduced = await measure();
+    assert.ok(reduced.height < enlarged.height / 1.04, `Ctrl+scroll down: ${JSON.stringify({ enlarged, reduced })}`);
+    assert.ok(reduced.zoom < enlarged.zoom, `toolbar follows zoom out: ${JSON.stringify({ enlarged, reduced })}`);
+    assert.ok(Math.abs(reduced.height / before.height - reduced.zoom / before.zoom) < 0.04, 'toolbar percentage matches actual PDF text scaling');
+    await page.mouse.wheel(0, 60);
+    await sleep(300);
+    const scrolled = await measure();
+    assert.equal(scrolled.zoom, reduced.zoom, 'ordinary scrolling does not change toolbar zoom');
+    assert.ok(Math.abs(scrolled.height - reduced.height) < 1, 'ordinary scrolling does not zoom PDF text');
+    await app.shell.locator('#zoom-label').click();
+    const reset = await measure();
+    assert.equal(reset.zoom, 100, 'Reset restores 100% in the toolbar');
+    assert.ok(Math.abs(reset.height - before.height) < 1, 'Reset restores the original native PDF text size');
   }],
   ['dropping a local PDF replaces the page and preserves toolbar Back and Forward', async () => {
     const previousUrl = base + '/before-drop';
@@ -183,9 +303,13 @@ failed = await run([
     await page.locator('h1').waitFor();
     const before = await app.invoke('agent.context');
     await dropFile(page, 'h1');
-    await page.waitForURL(/pdf\.localhost/);
-    await page.waitForSelector('.textLayer span');
-    assert.match(await page.locator('.textLayer').first().innerText(), /Local dropped PDF/);
+    await page.waitForURL(localUrl);
+    await waitPdf('Local dropped PDF');
+    assert.match(JSON.stringify(await preview()), /Local dropped PDF document/);
+    await nativePdfText(app.child.pid, 'Local dropped PDF', 'Local dropped PDF');
+    await app.shell.waitForFunction(async () =>
+      (await window.__native.invoke('agent.context')).page.selection === 'Local dropped PDF');
+    await assertRiverSelection('Local dropped PDF');
     const after = await app.invoke('agent.context');
     assert.equal(after.page.tab_id, before.page.tab_id, 'opens in the same page, not another tab');
     assert.equal(after.tabs.length, before.tabs.length);
@@ -194,8 +318,8 @@ failed = await run([
     await page.waitForURL(previousUrl);
     await page.locator('h1').waitFor();
     await app.shell.locator('#btn-forward').click();
-    await page.waitForURL(/pdf\.localhost/);
-    await page.waitForSelector('.textLayer span');
+    await page.waitForURL(localUrl);
+    await waitPdf('Local dropped PDF');
     assert.equal((await app.invoke('agent.context')).page.url, localUrl);
   }],
   ['native file inputs and website upload drop zones retain PDF drops', async () => {
@@ -225,8 +349,8 @@ failed = await run([
     const before = await app.invoke('agent.context');
     const target = before.tabs.find(tab => tab.url === urls[1]);
     await dropFile(right, 'h1');
-    await right.waitForURL(/pdf\.localhost/);
-    await right.waitForSelector('.textLayer span');
+    await right.waitForURL(localUrl);
+    await waitPdf('Local dropped PDF');
     const after = await app.invoke('agent.context');
     assert.equal(after.page.tab_id, target.tab_id, 'the drop focuses its destination cell');
     assert.equal(after.page.url, localUrl);
@@ -238,15 +362,64 @@ failed = await run([
     await right.waitForURL(urls[1]);
     await right.locator('h1').waitFor();
     await app.shell.locator('#btn-forward').click();
-    await right.waitForURL(/pdf\.localhost/);
-    await right.waitForSelector('.textLayer span');
+    await right.waitForURL(localUrl);
+    await waitPdf('Local dropped PDF');
     assert.equal(left.url(), urls[0]);
+  }],
+  ['River reads and selects only the focused native PDF canvas cell', async () => {
+    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [base + '/left.pdf', base + '/right.pdf'] });
+    await waitPdf('LEFT-NATIVE-PDF');
+    await waitPdf('RIGHT-NATIVE-PDF');
+    for (const [cell, marker, other] of [[0, 'LEFT-NATIVE-PDF', 'RIGHT-NATIVE-PDF'], [1, 'RIGHT-NATIVE-PDF', 'LEFT-NATIVE-PDF']]) {
+      await app.invoke('canvas.focus', { cell });
+      const content = JSON.stringify(await preview());
+      assert.ok(content.includes(marker), content);
+      assert.ok(!content.includes(other), content);
+      await nativePdfText(app.child.pid, marker, marker);
+      await app.shell.waitForFunction(async expected =>
+        (await window.__native.invoke('agent.context')).page.selection === expected, marker);
+    }
+  }],
+  ['Ctrl+scroll in another PDF canvas cell focuses and zooms only that cell', async () => {
+    const height = async marker => (await nativePdfText(app.child.pid, marker, marker)).bounds[0].height;
+    const beforeLeft = await height('LEFT-NATIVE-PDF');
+    const beforeRight = await height('RIGHT-NATIVE-PDF');
+    await app.invoke('canvas.focus', { cell: 0 });
+    const beforeZoom = parseInt(await app.shell.locator('#zoom-label').textContent(), 10);
+    await app.invoke('canvas.focus', { cell: 1 });
+    await app.shell.evaluate(() => {
+      window.__canvasZoomEvents = [];
+      window.__native.on('tab.zoom_changed', value => window.__canvasZoomEvents.push(value));
+    });
+    const left = await app.pageWith(/\/left\.pdf$/);
+    await left.mouse.move(160, 240);
+    await left.keyboard.down('Control');
+    try { await left.mouse.wheel(0, -120); } finally { await left.keyboard.up('Control'); }
+    await app.shell.waitForFunction(async () =>
+      (await window.__native.invoke('agent.context')).page.url.endsWith('/left.pdf'));
+    const afterLeft = await height('LEFT-NATIVE-PDF');
+    const afterRight = await height('RIGHT-NATIVE-PDF');
+    const label = await app.shell.locator('#zoom-label').textContent();
+    const events = await app.shell.evaluate(() => window.__canvasZoomEvents);
+    assert.ok(parseInt(label, 10) > beforeZoom, JSON.stringify({ beforeZoom, label, events, beforeLeft, afterLeft, beforeRight, afterRight }));
+    assert.ok(afterLeft > beforeLeft * 1.04);
+    assert.ok(Math.abs(afterRight - beforeRight) < 1, 'neighbor PDF retains its own zoom');
+    await app.shell.locator('#zoom-label').click();
+    assert.equal(parseInt(await app.shell.locator('#zoom-label').textContent(), 10), 100);
+    assert.ok(Math.abs(await height('LEFT-NATIVE-PDF') / beforeLeft - 100 / beforeZoom) < 0.05, 'Reset sets the targeted PDF to actual 100%');
+    assert.ok(Math.abs(await height('RIGHT-NATIVE-PDF') - beforeRight) < 1, 'Reset does not change the neighboring PDF');
+    await app.invoke('nav.open', { url: base + '/after-native-pdf' });
+    const page = await app.pageWith(/\/after-native-pdf$/);
+    await page.locator('h1').waitFor();
+    assert.equal((await app.invoke('agent.context')).page.selection, null, 'navigation clears the old native selection');
+    assert.match(JSON.stringify(await preview()), /Page before a drop/);
   }],
 ]);
 } finally {
   await app.close();
   server.close();
   redirectTarget.server.close();
+  model.close();
   fs.unlinkSync(localPath);
   fs.rmdirSync(localDirectory);
 }

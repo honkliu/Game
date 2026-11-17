@@ -86,6 +86,8 @@ fn trim_downloads(list: &mut Vec<Download>) {
 struct LiveTab {
     webview: WebView,
     pdf: crate::pdf::PdfSession,
+    #[cfg(windows)]
+    native_pdf: Option<crate::native_pdf::Session>,
     last_used: Instant,
     lifecycle_known: bool,
     editing: bool,
@@ -98,6 +100,25 @@ struct LiveTab {
 
 impl Drop for LiveTab {
     fn drop(&mut self) { self.pdf.cancel(); }
+}
+
+impl LiveTab {
+    fn read_content(&self, script: &str, reply: impl Fn(String) + Send + 'static) -> Result<(), String> {
+        #[cfg(windows)]
+        if let Some(pdf) = &self.native_pdf {
+            return pdf.read(reply);
+        }
+        self.webview.evaluate_script_with_callback(script, reply).map_err(|error| error.to_string())
+    }
+
+    fn capture(&self, reply: impl FnOnce(Result<String, String>) + Send + 'static) -> Result<(), ai_platform_contract::failure::Failure> {
+        #[cfg(windows)]
+        if let Some(pdf) = &self.native_pdf {
+            return pdf.read(move |raw| reply(crate::native_pdf::snapshot(&raw)))
+                .map_err(|error| ai_platform_contract::failure::Failure::unavailable("context.native_pdf_unavailable").with_detail(error));
+        }
+        crate::ai::context::capture(&self.webview, reply)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -208,6 +229,12 @@ pub enum AppMessage {
     OpenPdf(TabId, String),
     #[cfg(windows)]
     DroppedPdf(TabId, String),
+    #[cfg(windows)]
+    NativePdfSelection(TabId, u64, String, Option<[f64; 4]>),
+    #[cfg(windows)]
+    RuntimeZoom(TabId, f64),
+    #[cfg(windows)]
+    PdfDetected(TabId, String),
     PdfRequest(TabId, HttpRequest<Vec<u8>>, wry::RequestAsyncResponder),
     PageLoaded(TabId),
     /// A page asked for a new window (`target=_blank`, `window.open`): it becomes a tab.
@@ -518,6 +545,7 @@ impl AppState {
 
     /// The URL to load for a tab: internal aliases expand to asset URLs.
     fn resolve_url(&self, url: &str) -> String {
+        #[cfg(target_os = "macos")]
         if crate::pdf::is_pdf_url(url) {
             return crate::pdf::viewer_url(url);
         }
@@ -562,6 +590,42 @@ impl AppState {
                 .get(&id)
                 .and_then(|l| l.webview.url().ok())
                 .is_some_and(|u| crate::pdf::is_viewer_url(&u))
+        }
+
+        pub(super) fn has_native_pdf(&self, id: TabId) -> bool {
+            #[cfg(windows)]
+            { self.live.get(&id).is_some_and(|live| live.native_pdf.is_some()) }
+            #[cfg(not(windows))]
+            { let _ = id; false }
+        }
+
+        #[cfg(windows)]
+        pub(super) fn start_native_pdf(&mut self, id: TabId, source: &str) {
+            let Some(tab) = self.tabs.get(id).filter(|tab| tab.url == source) else { return };
+            let Some(live) = self.live.get(&id).filter(|live| live.native_pdf.is_none()
+                && live.webview.url().is_ok_and(|url| url == source)) else { return };
+            let proxy = self.proxy();
+            match crate::native_pdf::Session::new(&live.webview, source.to_string(), tab.display_title(),
+                move |generation, text, rect| {
+                    let _ = proxy.send_event(AppMessage::NativePdfSelection(id, generation, text, rect));
+                }) {
+                Ok(pdf) => {
+                    if let Some(live) = self.live.get_mut(&id) { live.native_pdf = Some(pdf); }
+                    self.note(format!("Native PDF text bridge ready for tab {}", id.0));
+                    self.sync_native_pdf_zoom(id);
+                    self.page_read_start(id);
+                }
+                Err(error) => self.note(format!("Native PDF extraction: {error}")),
+            }
+        }
+
+        #[cfg(windows)]
+        pub(super) fn sync_native_pdf_zoom(&mut self, id: TabId) {
+            if !self.has_native_pdf(id) { return; }
+            let Some(factor) = self.live.get(&id).and_then(|live| crate::webview2::zoom_factor(&live.webview).ok())
+                .filter(|factor| factor.is_finite() && *factor > 0.0) else { return };
+            if let Some(tab) = self.tabs.get_mut(id) { tab.zoom = factor; }
+            self.emit("tab.zoom_changed", json!({ "tab_id": id.0, "factor": factor }));
         }
 
         fn apply_zoom(&self, id: TabId, factor: f64) {
@@ -2145,8 +2209,7 @@ impl AppState {
             .with_navigation_handler({
                 let proxy_pdf = self.proxy();
                 move |url| {
-                    // A PDF link opens in our viewer, not the plugin: cancel and reload.
-                    if crate::pdf::is_pdf_url(&url) {
+                    if cfg!(target_os = "macos") && crate::pdf::is_pdf_url(&url) {
                         let _ = proxy_pdf.send_event(AppMessage::OpenPdf(id, url));
                         return false;
                     }
@@ -2205,12 +2268,26 @@ impl AppState {
                     }) {
                         self.note(format!("PDF drop handler: {e}"));
                     }
+                    let proxy = self.proxy();
+                    if let Err(e) = crate::webview2::install_zoom_changed(&wv, move |factor| {
+                        let _ = proxy.send_event(AppMessage::RuntimeZoom(id, factor));
+                    }) {
+                        self.note(format!("Native zoom handler: {e}"));
+                    }
+                    let proxy = self.proxy();
+                    if let Err(e) = crate::webview2::install_pdf_detection(&wv, move |url| {
+                        let _ = proxy.send_event(AppMessage::PdfDetected(id, url));
+                    }) {
+                        self.note(format!("Native PDF detection: {e}"));
+                    }
                 }
                 if let Err(e) = wv.set_bounds(layout::rect(geom.x, geom.y, geom.w, geom.h)) {
                     self.note(format!("tab bounds: {e}"));
                 }
                 self.live.insert(id, LiveTab {
                     webview: wv, pdf, pending_scroll: (tab.scroll_y > 0.0).then_some(tab.scroll_y),
+                    #[cfg(windows)]
+                    native_pdf: None,
                     last_used: Instant::now(), lifecycle_known: false, editing: false, playing: false,
                     shaped: Default::default(),
                 });
@@ -2678,6 +2755,29 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
                     s.navigate(id, &url, false);
                 }
             }
+            #[cfg(windows)]
+            Event::UserEvent(AppMessage::NativePdfSelection(tab, generation, text, rect)) => {
+                let mut s = shared.borrow_mut();
+                if s.live.get(&tab).and_then(|live| live.native_pdf.as_ref()).is_some_and(|pdf| pdf.id == generation) {
+                    s.ai_on_selection(tab, crate::ai::session::Selection { text, rect });
+                }
+            }
+            #[cfg(windows)]
+            Event::UserEvent(AppMessage::RuntimeZoom(id, factor)) => {
+                let mut s = shared.borrow_mut();
+                if s.has_native_pdf(id) {
+                    let clamped = factor.clamp(0.25, 5.0);
+                    if clamped != factor { s.apply_zoom(id, clamped); }
+                    let factor = clamped;
+                    s.canvas_focus_tab(id);
+                    if let Some(tab) = s.tabs.get_mut(id) { tab.zoom = factor; }
+                    s.emit("tab.zoom_changed", json!({ "tab_id": id.0, "factor": factor }));
+                }
+            }
+            #[cfg(windows)]
+            Event::UserEvent(AppMessage::PdfDetected(id, url)) => {
+                shared.borrow_mut().start_native_pdf(id, &url);
+            }
             Event::UserEvent(AppMessage::TabNavigated(id, url)) => {
                 let mut s = shared.borrow_mut();
                 s.on_navigation(id, &url);
@@ -2734,6 +2834,17 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             }
             Event::UserEvent(AppMessage::PageLoaded(tab)) => {
                 let mut s = shared.borrow_mut();
+                #[cfg(windows)]
+                if let Some(live) = s.live.get(&tab) {
+                    let proxy = s.proxy();
+                    let _ = live.webview.evaluate_script_with_callback(
+                        "document.contentType==='application/pdf'?location.href:null",
+                        move |raw| {
+                            if let Ok(url) = serde_json::from_str::<String>(&raw) {
+                                let _ = proxy.send_event(AppMessage::PdfDetected(tab, url));
+                            }
+                        });
+                }
                 s.refresh_history_state(tab);
                 if let Some(page) = s.tabs.get_mut(tab) { page.loading = false; }
                 s.emit_tabs();
@@ -3069,6 +3180,8 @@ impl AppState {
     fn on_navigation(&mut self, id: TabId, url: &str) {
         if let Some(live) = self.live.get_mut(&id) {
             live.pdf.cancel();
+            #[cfg(windows)]
+            { live.native_pdf = None; }
             live.lifecycle_known = false;
             live.editing = false;
             live.playing = false;

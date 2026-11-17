@@ -3,6 +3,32 @@
 Tooling for the contract crate in `../crates/contract/`, plus the measurement spike that was
 required before `NavigationId` could be trusted.
 
+## Native PDF extraction probe
+
+```powershell
+$env:BROWSER_EXE='Q:\gitroot\Game\ai-browser\target\debug\browser.exe'
+node ai-browser\tools\probe-native-pdf.mjs
+```
+
+Run from the repository root with the existing `e2e` dependencies installed. This
+Windows-only probe launches an isolated browser profile and serves synthetic PDFs
+locally. Embedded documents exercise WebView2's native PDF viewer without changing
+the application's PDF routing. It neither uses the clipboard nor moves the desktop
+pointer.
+
+On November 17, 2026, WebView2 157.0.4341.60 exposed all three pages of a PDF,
+including offscreen pages, through Windows UI Automation `TextPattern.DocumentRange`.
+Separate canvas cells returned separate documents, without PDF toolbar text.
+`TextPattern.GetSelection` returned the selected text and its screen rectangles.
+Accessibility initialized lazily; no special runtime flags were needed. Selection
+updates were asynchronous and had to be awaited.
+
+This is the native viewer's accessibility provider, not a WebView2 SDK
+`ExtractPdfText` method or ordinary page DOM access. The Windows browser now uses
+the native viewer and connects its accessibility provider to River, selection,
+Find and citation reveal. `e2e/suite5.mjs` covers the integrated behavior.
+macOS retains PDF.js pending a separate native PDFKit adapter.
+
 ## `wv2-probe/` — built, run, answered
 
 A standalone crate (its own `Cargo.toml`/`Cargo.lock`, nothing in `native-browser/`

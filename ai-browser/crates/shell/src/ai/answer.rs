@@ -220,6 +220,19 @@ impl AnswerStore {
         Ok(Some((tab, y, [placement.x, placement.y, placement.w, placement.h])))
     }
 
+    #[cfg(windows)]
+    pub fn native_citation_target(&self, identity: &Identity, turn_id: u64, citation_id: usize) -> Result<(u64, String), Failure> {
+        let turn = self.get(turn_id).ok_or_else(|| Failure::stale("citation.turn_gone"))?;
+        let answer = turn.answer.as_ref().ok_or_else(|| Failure::stale("citation.turn_gone"))?;
+        let scope = identity.scope().ok_or_else(|| Failure::unavailable("identity.workspace_unavailable"))?;
+        let trusted = answer.verify(identity.registry(), &scope)?;
+        let citation = trusted.citations().get(citation_id).ok_or_else(|| Failure::stale("citation.block_missing"))?;
+        let document = citation.document().document_token();
+        let tab = identity.tab_of_document(document).ok_or_else(|| Failure::stale("citation.document_missing"))?;
+        identity.resolve_in_tab(document, tab)?;
+        Ok((tab, answer.citations[citation_id].anchor.quote.clone()))
+    }
+
     pub fn scroll_y(&self, identity: &Identity, turn_id: u64, citation_id: usize) -> Result<f64, Failure> {
         let turn = self
             .get(turn_id)
@@ -419,6 +432,26 @@ mod tests {
         // The block's y minus the composer margin, exactly as `Block::scroll_y`
         // promises — the click lands on the passage, not 24 px under it.
         assert_eq!(y, 253.0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_pdf_citations_use_verified_text_without_requiring_dom_geometry() {
+        let mut identity = Identity::new();
+        let key = identity.on_document_committed(1, "file:///C:/document.pdf").unwrap();
+        let version = identity.snapshot_captured(key.document_token()).unwrap();
+        let mut context = context_with(key.document_token(), version.0);
+        context.blocks[0].y = 0.0;
+        context.blocks[0].h = 0.0;
+        let task = identity.create_task().unwrap();
+        let mut store = AnswerStore::default();
+        let turn = store.begin(task, 1, "question", version,
+            ProviderInfo { kind: "offline", model: "offline-extract".into(), egress: false });
+        store.finish(turn, TaskOutcome::Answered(answer_for(&context, key.navigation_sequence())), 12, &context);
+        assert_eq!(store.native_citation_target(&identity, turn, 0).unwrap(), (1, context.blocks[0].text.clone()));
+        assert!(store.native_citation_target(&identity, turn, 1).is_err());
+        identity.on_document_committed(1, "https://example.com/next").unwrap();
+        assert!(store.native_citation_target(&identity, turn, 0).is_err(), "native citations must reject a replaced document");
     }
 
     /// The non-negotiable one: after the tab navigates, the citation refuses. The
