@@ -33,6 +33,46 @@ const DOWNLOAD_HINT: &str =
 static ENVIRONMENTS_CONSTRUCTED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Keep WebView2's HTML drag/drop handling; only the fallback PDF drop sends a disk-backed File.
+pub fn install_pdf_drop(webview: &wry::WebView, on_drop: impl Fn(String) + 'static) -> windows::core::Result<()> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2File, ICoreWebView2WebMessageReceivedEventArgs2,
+    };
+    use webview2_com::WebMessageReceivedEventHandler;
+    use windows::core::{Interface, PWSTR};
+    use wry::WebViewExtWindows;
+
+    unsafe {
+        let core = webview.controller().CoreWebView2()?;
+        let mut token = 0;
+        core.add_WebMessageReceived(
+            &WebMessageReceivedEventHandler::create(Box::new(move |sender, args| {
+                let (Some(sender), Some(args)) = (sender, args) else { return Ok(()) };
+                let mut message = PWSTR::null();
+                if args.TryGetWebMessageAsString(&mut message).is_err() { return Ok(()) }
+                if crate::sys::take_pwstr(message) != "native-browser:pdf-drop" { return Ok(()) }
+                let mut source = PWSTR::null();
+                args.Source(&mut source)?;
+                let source = crate::sys::take_pwstr(source);
+                let mut current = PWSTR::null();
+                sender.Source(&mut current)?;
+                if source != crate::sys::take_pwstr(current) { return Ok(()) }
+                let objects = args.cast::<ICoreWebView2WebMessageReceivedEventArgs2>()?.AdditionalObjects()?;
+                let mut count = 0;
+                objects.Count(&mut count)?;
+                if count != 1 { return Ok(()) }
+                let file = objects.GetValueAtIndex(0)?.cast::<ICoreWebView2File>()?;
+                let mut path = PWSTR::null();
+                file.Path(&mut path)?;
+                let path = std::path::PathBuf::from(crate::sys::take_pwstr(path));
+                if let Some(url) = crate::pdf::dropped_file_url(&path) { on_drop(url); }
+                Ok(())
+            })),
+            &mut token,
+        )
+    }
+}
+
 /// How many environments [`create_shared_environment`] has handed back. Call
 /// before the first webview is built and again after; the two must both read the
 /// same single increment.

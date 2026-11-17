@@ -60,6 +60,15 @@ pub fn is_pdf_url(url: &str) -> bool {
     path.ends_with(".pdf")
 }
 
+#[cfg(any(windows, test))]
+pub fn dropped_file_url(path: &std::path::Path) -> Option<String> {
+    if !path.extension()?.to_str()?.eq_ignore_ascii_case("pdf") || !path.is_file() {
+        return None;
+    }
+    let url = url::Url::from_file_path(path).ok()?.to_string();
+    is_pdf_url(&url).then_some(url)
+}
+
 /// Whether a page URL is the bundled viewer itself.
 pub fn is_viewer_url(url: &str) -> bool {
     url.starts_with(VIEWER_BASE)
@@ -229,6 +238,30 @@ mod tests {
         assert!(!is_pdf_url("https://x.org/pdf"));
         assert!(!is_pdf_url("https://x.org/a.pdf.html"));
         assert!(!is_pdf_url("http://pdf.localhost/viewer.html?src=x"));
+    }
+
+    #[test]
+    fn dropped_pdfs_keep_their_real_escaped_file_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("document # 100%.PDF");
+        std::fs::write(&path, b"%PDF-1.4").unwrap();
+        let url = dropped_file_url(&path).unwrap();
+        assert!(is_pdf_url(&url));
+        assert_eq!(url::Url::parse(&url).unwrap().to_file_path().unwrap(), path);
+        assert!(url.contains("%23"));
+        assert!(url.contains("%25"));
+    }
+
+    #[test]
+    fn drops_ignore_missing_files_directories_and_other_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("notes.txt");
+        std::fs::write(&text, b"notes").unwrap();
+        let folder = dir.path().join("folder.pdf");
+        std::fs::create_dir(&folder).unwrap();
+        for path in [text, folder, dir.path().join("missing.pdf")] {
+            assert!(dropped_file_url(&path).is_none());
+        }
     }
 
     #[test]

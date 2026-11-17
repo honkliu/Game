@@ -206,6 +206,8 @@ pub enum AppMessage {
     /// A page webview started a navigation to `url`.
     TabNavigated(TabId, String),
     OpenPdf(TabId, String),
+    #[cfg(windows)]
+    DroppedPdf(TabId, String),
     PdfRequest(TabId, HttpRequest<Vec<u8>>, wry::RequestAsyncResponder),
     PageLoaded(TabId),
     /// A page asked for a new window (`target=_blank`, `window.open`): it becomes a tab.
@@ -730,6 +732,17 @@ impl AppState {
             if let Some(next) = self.tabs.step(cur, delta) {
                 self.activate(next);
             }
+        }
+    }
+
+    fn refresh_history_state(&mut self, id: TabId) {
+        let (back, forward) = self.live.get(&id).map(|live| (
+            live.webview.can_go_back().unwrap_or(false),
+            live.webview.can_go_forward().unwrap_or(false),
+        )).unwrap_or_default();
+        if let Some(tab) = self.tabs.get_mut(id) {
+            tab.can_go_back = back;
+            tab.can_go_forward = forward;
         }
     }
 
@@ -2106,6 +2119,7 @@ impl AppState {
             // Page reports are untrusted and cannot reach the command dispatcher.
             // Only the bundled Settings document may send settings changes.
             .with_initialization_script(include_str!("../ui/probe.js"))
+            .with_initialization_script(include_str!("../ui/pdf-drop.js"))
             .with_custom_protocol("asset".into(), asset_handler())
             .with_ipc_handler(move |req: HttpRequest<String>| {
                 let _ = proxy_probe.send_event(AppMessage::PageProbe(id, req.body().clone()));
@@ -2183,6 +2197,15 @@ impl AppState {
 
         match built {
             Ok(wv) => {
+                #[cfg(windows)]
+                {
+                    let proxy = self.proxy();
+                    if let Err(e) = crate::webview2::install_pdf_drop(&wv, move |url| {
+                        let _ = proxy.send_event(AppMessage::DroppedPdf(id, url));
+                    }) {
+                        self.note(format!("PDF drop handler: {e}"));
+                    }
+                }
                 if let Err(e) = wv.set_bounds(layout::rect(geom.x, geom.y, geom.w, geom.h)) {
                     self.note(format!("tab bounds: {e}"));
                 }
@@ -2647,6 +2670,14 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             Event::UserEvent(AppMessage::OpenPdf(id, url)) => {
                 shared.borrow_mut().navigate(id, &url, false);
             }
+            #[cfg(windows)]
+            Event::UserEvent(AppMessage::DroppedPdf(id, url)) => {
+                let mut s = shared.borrow_mut();
+                if s.live.contains_key(&id) {
+                    s.activate(id);
+                    s.navigate(id, &url, false);
+                }
+            }
             Event::UserEvent(AppMessage::TabNavigated(id, url)) => {
                 let mut s = shared.borrow_mut();
                 s.on_navigation(id, &url);
@@ -2703,6 +2734,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             }
             Event::UserEvent(AppMessage::PageLoaded(tab)) => {
                 let mut s = shared.borrow_mut();
+                s.refresh_history_state(tab);
                 if let Some(page) = s.tabs.get_mut(tab) { page.loading = false; }
                 s.emit_tabs();
             }
@@ -3063,17 +3095,7 @@ impl AppState {
             t.url = display;
             t.loading = true;
         }
-        let (back, fwd) = match self.live.get(&id) {
-            Some(live) => (
-                live.webview.can_go_back().unwrap_or(false),
-                live.webview.can_go_forward().unwrap_or(false),
-            ),
-            None => (false, false),
-        };
-        if let Some(t) = self.tabs.get_mut(id) {
-            t.can_go_back = back;
-            t.can_go_forward = fwd;
-        }
+        self.refresh_history_state(id);
 
         self.emit_tabs();
 
