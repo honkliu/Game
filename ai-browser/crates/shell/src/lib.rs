@@ -1,4 +1,4 @@
-//! native-browser — a Rust shell over WebView2.
+//! native-browser — a Rust shell over WebView2 and WKWebView.
 //!
 //! Module map:
 //! - `ai`       the AI platform surface: action gate, process-role split, `--proof`
@@ -28,10 +28,13 @@ pub mod keys;
 pub mod layout;
 pub mod omnibox;
 pub mod pdf;
+pub mod platform;
 pub mod session;
 pub mod settings;
 pub mod store;
 pub mod sys;
 pub mod tabs;
+pub mod tab_lifecycle;
 pub mod ui;
+#[cfg(windows)]
 pub mod webview2;

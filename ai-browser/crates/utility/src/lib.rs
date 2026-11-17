@@ -11,6 +11,7 @@ pub mod reduce;
 pub mod reply;
 pub mod router;
 pub mod server;
+pub mod secrets;
 pub mod shell;
 pub mod tabs;
 pub mod task;

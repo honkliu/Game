@@ -153,6 +153,8 @@ pub struct Tab {
     pub sleeping: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
+    #[serde(default)]
+    pub scroll_y: f64,
     /// Set on a canvas tab (a grid of pages).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas: Option<Canvas>,
@@ -175,6 +177,7 @@ impl Tab {
             sleeping: false,
             can_go_back: false,
             can_go_forward: false,
+            scroll_y: 0.0,
             canvas: None,
             member_of: None,
         }

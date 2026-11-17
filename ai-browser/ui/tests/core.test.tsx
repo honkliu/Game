@@ -96,6 +96,22 @@ describe('agent reducer and history', () => {
 });
 
 describe('bridge', () => {
+  it('rejects timed-out requests and releases completed timers', async () => {
+    vi.useFakeTimers();
+    try {
+      const b = createBridge(() => {}, 1, 25);
+      const request = b.invoke('ai.status');
+      const rejected = expect(request).rejects.toThrow('ai.status timed out');
+      await vi.advanceTimersByTimeAsync(25);
+      await rejected;
+      const next = b.invoke('ai.status');
+      b._reply({ id: 2, ok: true, data: 'done' });
+      await expect(next).resolves.toBe('done');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it('resolves replies by id, and unsubscribes listeners', async () => {
     const post = vi.fn();
     const b = createBridge(post, 10);

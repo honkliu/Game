@@ -35,7 +35,8 @@ use serde_json::{json, Value};
 use crate::ai::mode;
 use crate::ai::processes;
 use crate::sys;
-use crate::webview2;
+use crate::platform as webview2;
+#[cfg(windows)]
 use windows::Win32::System::SystemInformation::{
     GetSystemInfo, GlobalMemoryStatusEx, MEMORYSTATUSEX, SYSTEM_INFO,
 };
@@ -1382,6 +1383,7 @@ fn mode_suffix(cfg: &mode::Config) -> String {
 /// OS-reported machine capacity. The CPU brand string has no dependency-free Win32
 /// call, so `tools/baseline.md` records it from the shell command noted there rather
 /// than having the harness guess at it.
+#[cfg(windows)]
 fn machine_line() -> String {
     // SAFETY: both calls write through an out-parameter the caller owns;
     // `MEMORYSTATUSEX` requires `dwLength` set first, done below.
@@ -1399,6 +1401,12 @@ fn machine_line() -> String {
         };
         format!("{} logical CPUs, {}", info.dwNumberOfProcessors, ram)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn machine_line() -> String {
+    format!("{} logical CPUs (WebView2 budgets are Windows-only)",
+        std::thread::available_parallelism().map_or(0, |n| n.get()))
 }
 
 #[cfg(test)]

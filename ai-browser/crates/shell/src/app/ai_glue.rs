@@ -15,7 +15,6 @@
 //! text that was actually captured before it is shown with citations.
 
 use serde_json::{json, Value};
-use wry::{WebViewBuilderExtWindows, WebViewExtWindows};
 
 use ai_platform_contract::config::AiConfig;
 use ai_platform_contract::contract::{
@@ -126,14 +125,19 @@ impl AppState {
         }
         let proxy_frame = self.proxy();
         let proxy_closed = self.proxy();
+        let credentials = self.ai_key_env().map_err(|error|
+            Failure::unavailable("credentials.unavailable").with_detail(error))?;
+        self.ai.provider_key_saved = !credentials.is_empty();
+        self.ai.link_generation += 1;
+        let generation = self.ai.link_generation;
         let link = Link::spawn(
             &self.ai_config_path(),
-            &self.ai_key_env(),
+            &credentials,
             move |frame| {
-                let _ = proxy_frame.send_event(AppMessage::AiFrame(frame));
+                let _ = proxy_frame.send_event(AppMessage::AiFrame(generation, frame));
             },
             move |reason| {
-                let _ = proxy_closed.send_event(AppMessage::AiLinkClosed(reason));
+                let _ = proxy_closed.send_event(AppMessage::AiLinkClosed(generation, reason));
             },
         )?;
         self.note("ai engine started (in-process)".to_string());
@@ -301,7 +305,7 @@ impl AppState {
             Ok(())
         } else {
             match self.live.get(&tab) {
-                Some(live) => context::capture(&live.webview.webview(), move |result| {
+                Some(live) => context::capture(&live.webview, move |result| {
                     let _ = proxy.send_event(AppMessage::AiCaptured(tab, CaptureFor::Task(task.0), result));
                 }),
                 None => Err(Failure::unavailable("context.no_webview")),
@@ -481,7 +485,7 @@ impl AppState {
             }
             (Pending::AgentRun(run), ResponsePayload::Failure(f)) => self.agent_run_failed(run, &f),
             (Pending::AgentRun(_), ResponsePayload::Ok(_)) => {}
-            (Pending::Control(req), payload) => self.agent_control_reply(req, payload),
+            (Pending::Control(source, req), payload) => self.agent_control_reply(source, req, payload),
         }
     }
 
@@ -610,7 +614,8 @@ impl AppState {
     pub(super) fn ai_history_clear(&mut self) -> Result<Option<Value>, String> {
         self.ai.history.clear();
         self.ai.answers.clear_turns();
-        self.emit("ai.history.cleared", json!({}));
+        self.ai.ui.clear_finished();
+        self.emit("ai.history.cleared", json!({ "state_seq": self.ai.ui.snapshot()["sequence"] }));
         Ok(Some(json!({ "cleared": true })))
     }
 
@@ -712,7 +717,7 @@ impl AppState {
         let proxy = self.proxy();
         let what = CaptureFor::Snapshot { request: id, token: token.0, version: version.0 };
         let started = match self.live.get(&tab) {
-            Some(live) => context::capture(&live.webview.webview(), move |result| {
+            Some(live) => context::capture(&live.webview, move |result| {
                 let _ = proxy.send_event(AppMessage::AiCaptured(tab, what, result));
             }),
             None => Err(Failure::unavailable("tab.sleeping")
@@ -775,7 +780,7 @@ impl AppState {
         }
         let proxy = self.proxy();
         let started = match self.live.get(&tab) {
-            Some(live) => context::capture(&live.webview.webview(), move |result| {
+            Some(live) => context::capture(&live.webview, move |result| {
                 let _ = proxy.send_event(AppMessage::AiCaptured(tab, CaptureFor::Extra(task), result));
             }),
             None => Err(Failure::unavailable("tab.sleeping")),
@@ -1229,20 +1234,17 @@ impl AppState {
 
     fn ai_build_sidebar(&mut self) {
         let proxy = self.proxy();
-        let mut builder = wry::WebViewBuilder::new()
+        let builder = wry::WebViewBuilder::new()
             .with_id("sidebar")
             .with_bounds(layout::rect(0, 0, 0, 0))
             .with_visible(false)
-            .with_https_scheme(true)
             .with_custom_protocol("asset".into(), super::asset_handler())
             .with_ipc_handler(move |req: wry::http::Request<String>| {
-                let _ = proxy.send_event(AppMessage::Ipc(req.body().clone()));
+                let _ = proxy.send_event(AppMessage::Ipc(crate::ipc::Surface::Sidebar, req.body().clone()));
             })
             .with_navigation_handler(|url| super::is_asset_origin(&url))
             .with_url("asset://shell/sidebar/sidebar.html");
-        if let Some(env) = self.environment.clone() {
-            builder = builder.with_environment(env);
-        }
+        let builder = crate::platform::configure(builder, self.environment.as_ref(), true);
         let Some(window) = self.window.as_ref() else { return };
         match builder.build_as_child(window) {
             Ok(wv) => {
@@ -1254,10 +1256,12 @@ impl AppState {
     }
 
     /// `ai.provider.set`: the in-browser endpoint form. The endpoint and model go to
-    /// `ai.json`; the key goes to its own file in the profile and reaches only the
-    /// utility's environment, never the config, the UI or the page.
+    /// `ai.json`; the key stays in the OS vault and this engine's private memory.
     pub(super) fn ai_provider_set(&mut self, p: &Value) -> Result<Option<Value>, String> {
         use ai_platform_contract::model::Execution;
+        if !self.ai.tasks.is_empty() || self.ai.agent_run != 0 || !self.ai.agent_jobs.is_empty() {
+            return Err("stop AI work before changing the provider".into());
+        }
         let text = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
         let base_url = text("base_url");
         let model_id = text("model_id");
@@ -1271,10 +1275,23 @@ impl AppState {
         if key.len() > 400 {
             return Err("key too long".into());
         }
-        if !key.is_empty() {
-            std::fs::write(self.data_dir.join("ai.key"), &key).map_err(|e| format!("cannot save key: {e}"))?;
-        }
+        let clear = p["clear_key"].as_bool().unwrap_or(false);
+        ai_utility::secrets::migrate_provider(&self.data_dir)?;
         self.ai_reload_config();
+        let previous = self.ai.config.providers.iter().find(|provider| provider.id == "custom")
+            .and_then(|provider| provider.base_url.as_deref()).and_then(|url| url::Url::parse(url).ok());
+        let endpoint = url::Url::parse(&base_url).map_err(|_| "invalid endpoint")?;
+        if !endpoint.username().is_empty() || endpoint.password().is_some() || endpoint.host_str().is_none() {
+            return Err("endpoint must not include credentials and must have a host".into());
+        }
+        let saved = ai_utility::secrets::get(&self.data_dir, "provider.custom")?;
+        if key.is_empty() && !clear && saved.is_some() && previous.is_some_and(|url| url.origin() != endpoint.origin()) {
+            return Err("the endpoint host changed; enter its API key or remove the saved key first".into());
+        }
+        if !key.is_empty() || clear {
+            ai_utility::secrets::set(&self.data_dir, "provider.custom", (!clear).then_some(key.as_str()))?;
+        }
+        self.ai.provider_key_saved = if clear { false } else { !key.is_empty() || saved.is_some() };
         let host = host_of(&base_url).unwrap_or_default();
         let local = host == "localhost" || host.starts_with("127.") || host == "::1" || host == "[::1]";
         let entry = ai_platform_contract::config::ProviderEntry {
@@ -1283,7 +1300,9 @@ impl AppState {
             enabled: true,
             execution: if local { Execution::Local } else { Execution::Cloud },
             base_url: Some(base_url),
-            api_key_env: Some(KEY_ENV.into()),
+            api_key_env: if local && !self.ai.provider_key_saved && std::env::var(KEY_ENV).is_err() {
+                None
+            } else { Some(KEY_ENV.into()) },
             models: vec![ai_platform_contract::config::ModelEntry {
                 model_id: model_id.clone(),
                 display_name: Some(model_id),
@@ -1320,17 +1339,16 @@ impl AppState {
         json!({
             "base_url": custom.and_then(|q| q.base_url.clone()),
             "model_id": custom.and_then(|q| q.models.first().map(|m| m.model_id.clone())),
-            "key_saved": self.data_dir.join("ai.key").is_file(),
+            "key_saved": self.ai.provider_key_saved,
             "configured": self.ai.config.providers.iter().any(|q| q.enabled
                 && q.kind == ai_platform_contract::config::ProviderKind::OpenAiCompatible),
         })
     }
 
-    fn ai_key_env(&self) -> Vec<(String, String)> {
-        match std::fs::read_to_string(self.data_dir.join("ai.key")) {
-            Ok(k) if !k.trim().is_empty() => vec![(KEY_ENV.to_string(), k.trim().to_string())],
-            _ => Vec::new(),
-        }
+    fn ai_key_env(&self) -> Result<Vec<(String, String)>, String> {
+        ai_utility::secrets::migrate_provider(&self.data_dir)?;
+        Ok(ai_utility::secrets::get(&self.data_dir, "provider.custom")?
+            .map(|key| vec![(KEY_ENV.to_string(), key)]).unwrap_or_default())
     }
 
     /// A toolbar button. With the side pane open the pane owns the conversation, so it
@@ -1430,6 +1448,7 @@ impl AppState {
     // ---- lifecycle hooks -------------------------------------------------
 
     pub(super) fn ai_on_navigation(&mut self, id: TabId, url: &str) {
+        self.ai.page_snaps.remove(&id.0);
         let replaced = self.ai.identity.current(id.0).map(|k| k.document_token());
         self.ai.selections.remove(&id.0);
         if self.active == Some(id) {

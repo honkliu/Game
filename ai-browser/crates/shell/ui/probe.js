@@ -13,6 +13,31 @@
     try { window.ipc.postMessage(JSON.stringify(obj)); } catch (e) {}
   }
 
+  var editing = false;
+  var lifecycleTimer = 0;
+  function lifecycle() {
+    var media = document.querySelectorAll('audio,video');
+    var playing = false;
+    for (var i = 0; i < media.length; i++) {
+      if (!media[i].paused && !media[i].ended) { playing = true; break; }
+    }
+    post({ ai: 'lifecycle', url: location.href, scroll_y: window.scrollY,
+      editing: editing, playing: playing, ready: document.readyState === 'complete' });
+  }
+  function scheduleLifecycle() {
+    clearTimeout(lifecycleTimer);
+    lifecycleTimer = setTimeout(lifecycle, 200);
+  }
+  document.addEventListener('input', function () { editing = true; lifecycle(); }, true);
+  document.addEventListener('play', lifecycle, true);
+  document.addEventListener('pause', lifecycle, true);
+  document.addEventListener('ended', lifecycle, true);
+  window.addEventListener('scroll', scheduleLifecycle, { passive: true });
+  window.addEventListener('load', lifecycle);
+  window.addEventListener('pagehide', lifecycle);
+  document.addEventListener('DOMContentLoaded', lifecycle);
+  scheduleLifecycle();
+
   // A PDF served without a .pdf address (arxiv.org/pdf/…, download endpoints) lands in the
   // browser's built-in viewer, where the text cannot be read; ask the host for ours.
   if (document.contentType === 'application/pdf' && /^(https?|file):/.test(location.href)) {

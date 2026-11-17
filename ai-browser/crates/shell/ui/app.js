@@ -19,11 +19,18 @@
     const id = nextId++;
     const body = JSON.stringify({ id, cmd, payload: payload || {} });
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (pending.delete(id)) reject(new Error(cmd + ' timed out'));
+      }, 150000);
+      pending.set(id, { resolve, reject, timer });
       if (window.ipc && typeof window.ipc.postMessage === 'function') {
-        window.ipc.postMessage(body);
+        try { window.ipc.postMessage(body); }
+        catch (error) {
+          pending.delete(id); clearTimeout(timer); reject(error);
+        }
       } else {
         pending.delete(id);
+        clearTimeout(timer);
         reject(new Error('ipc bridge unavailable'));
       }
     });
@@ -55,6 +62,7 @@
       const entry = pending.get(reply.id);
       if (!entry) return;
       pending.delete(reply.id);
+      clearTimeout(entry.timer);
       if (reply.ok) entry.resolve(reply.data);
       else entry.reject(new Error(reply.error || 'command failed'));
     },
@@ -406,12 +414,23 @@
   // ── omnibox ──────────────────────────────────────────────────────────
   let omniSeq = 0;
   let omniTimer = 0;
+  let omniComposing = false;
+  let omniInline = '';
+  let omniTyped = '';
 
-  function omniboxChanged() {
+  function omniboxChanged(event) {
     const text = el.omnibox.value;
+    const seq = ++omniSeq;
+    omniTyped = text;
+    omniInline = '';
+    state.omnibox.explicitSelection = false;
+    state.omnibox.rows = [];
     updateChip(text);
     clearTimeout(omniTimer);
-    omniTimer = setTimeout(() => queryOmnibox(text), 40);
+    if (omniComposing || (event && event.isComposing)) { closeDropdown(false); return; }
+    const complete = event && event.inputType === 'insertText' &&
+      el.omnibox.selectionStart === text.length && el.omnibox.selectionEnd === text.length;
+    omniTimer = setTimeout(() => queryOmnibox(text, seq, complete), 60);
   }
 
   function updateChip(text) {
@@ -434,13 +453,21 @@
     return 'Search';
   }
 
-  async function queryOmnibox(text) {
-    const seq = ++omniSeq;
+  async function queryOmnibox(text, seq = ++omniSeq, complete = false) {
     try {
       const res = await invoke('omnibox.query', { text, limit: 10 });
-      if (seq !== omniSeq) return;
+      if (seq !== omniSeq || omniComposing || document.activeElement !== el.omnibox) return;
+      if (res && res.superseded) return;
+      omniTyped = text;
+      state.omnibox.explicitSelection = false;
       state.omnibox.rows = (res && res.rows) || [];
       state.omnibox.selected = 0;
+      if (complete && el.omnibox.value === text && typeof res.completion === 'string' &&
+          res.completion.length > text.length && res.completion.toLowerCase().startsWith(text.toLowerCase())) {
+        omniInline = res.completion;
+        el.omnibox.value = omniInline;
+        el.omnibox.setSelectionRange(text.length, omniInline.length);
+      }
       renderDropdown();
     } catch (e) {
       console.error('omnibox.query', e);
@@ -482,6 +509,7 @@
     const n = state.omnibox.rows.length;
     if (!n) return;
     state.omnibox.selected = (state.omnibox.selected + delta + n) % n;
+    state.omnibox.explicitSelection = true;
     renderDropdown();
     const sel = el.dropdown.querySelector('[aria-selected="true"]');
     if (sel) sel.scrollIntoView({ block: 'nearest' });
@@ -490,7 +518,7 @@
   function completeSelection() {
     const r = state.omnibox.rows[state.omnibox.selected];
     if (!r) return;
-    el.omnibox.value = r.url || r.title || el.omnibox.value;
+    el.omnibox.value = r.completion || r.url || r.title || el.omnibox.value;
     omniboxChanged();
   }
 
@@ -515,7 +543,14 @@
   }
 
   function submitOmnibox() {
-    if (state.omnibox.rows.length) {
+    if (omniInline && el.omnibox.value === omniInline && !state.omnibox.explicitSelection) {
+      invoke('omnibox.activate', { text: el.omnibox.value });
+      closeDropdown();
+      el.omnibox.blur();
+      return;
+    }
+    if (state.omnibox.rows.length &&
+        (state.omnibox.explicitSelection || el.omnibox.value === omniTyped)) {
       activateRow();
       return;
     }
@@ -526,7 +561,8 @@
     el.omnibox.blur();
   }
 
-  function closeDropdown() {
+  function closeDropdown(invalidate = true) {
+    if (invalidate) { ++omniSeq; clearTimeout(omniTimer); }
     state.omnibox.open = false;
     el.dropdown.hidden = true;
     el.omnibox.setAttribute('aria-expanded', 'false');
@@ -625,6 +661,7 @@
       query: q,
       case_sensitive: el.findCase.getAttribute('aria-pressed') === 'true',
       regex_or_whole_word: el.findWord.getAttribute('aria-pressed') === 'true',
+      highlight_all: el.findAll.getAttribute('aria-pressed') === 'true',
     })
       .then((r) => { if (seq === findSeq && r) renderFind(r); })
       .catch((e) => console.error('find', e));
@@ -635,8 +672,11 @@
       ? `${r.active}/${r.total}`
       : 'n/a';
     if (r.supported_flags && r.supported_flags.length === 0) {
-      el.findInput.setAttribute('title', 'Find in page is unavailable on this WebView2 build (wry 0.57 exposes no find API)');
+      el.findInput.setAttribute('title', r.error || 'Find is unavailable on this page');
+    } else {
+      el.findInput.setAttribute('title', r.limited ? 'Search limit reached; counts cover the scanned content' : 'Find in page');
     }
+    el.findAll.disabled = !(r.supported_flags || []).includes('highlight_all');
   }
 
   function openFind(query) {
@@ -662,9 +702,10 @@
   el.findNext.addEventListener('click', () => findQuery('find.next'));
   el.findPrev.addEventListener('click', () => findQuery('find.prev'));
   el.findCase.addEventListener('click', () => togglePressed(el.findCase, () => findQuery('find.query')));
-  el.findAll.addEventListener('click', () => togglePressed(el.findAll));
-  el.findWord.setAttribute('aria-disabled', 'true');
-  el.findWord.addEventListener('click', () => toast('Regex / whole-word find is not available on this WebView2 build'));
+  el.findAll.addEventListener('click', () => togglePressed(el.findAll, () => findQuery('find.query')));
+  el.findWord.setAttribute('aria-disabled', 'false');
+  el.findWord.title = 'Whole word';
+  el.findWord.addEventListener('click', () => togglePressed(el.findWord, () => findQuery('find.query')));
 
   function togglePressed(btn, after) {
     const on = btn.getAttribute('aria-pressed') === 'true';
@@ -773,7 +814,18 @@
   el.star.addEventListener('click', () => invoke('tab.bookmark', {}));
   el.downloadsBtn.addEventListener('click', () => invoke('shortcut', { name: 'open_downloads' }));
   document.getElementById('btn-ai').addEventListener('click', () => invoke('shortcut', { name: 'ask_ai' }));
-  el.menu.addEventListener('click', () => invoke('shell.open_palette', {}));
+  el.menu.addEventListener('click', () => {
+    const r = el.menu.getBoundingClientRect();
+    openItemMenu(null, r.right - 220, r.bottom + 2, [
+      { label: 'Settings', run: () => invoke('settings.open', {}) },
+      { label: 'History', run: () => invoke('shortcut', { name: 'open_history' }) },
+      { label: 'Downloads', run: () => invoke('shortcut', { name: 'open_downloads' }) },
+      { label: 'Find in page', run: () => openFind() },
+      { sep: true },
+      { label: 'Command palette (Ctrl+K)', run: () => invoke('shell.open_palette', {}) },
+      { label: 'Open data folder', run: () => invoke('settings.open_folder', {}) },
+    ]);
+  });
   el.newTab.addEventListener('click', () => invoke('tab.new', {}));
   el.newCanvas.addEventListener('click', () => {
     const r = el.newCanvas.getBoundingClientRect();
@@ -803,16 +855,23 @@
 
   el.omniboxForm.addEventListener('submit', (e) => { e.preventDefault(); submitOmnibox(); });
   el.omnibox.addEventListener('input', omniboxChanged);
+  el.omnibox.addEventListener('compositionstart', () => {
+    omniComposing = true; ++omniSeq; clearTimeout(omniTimer);
+  });
+  el.omnibox.addEventListener('compositionend', () => {
+    omniComposing = false; omniboxChanged({ inputType: 'insertText' });
+  });
   el.omnibox.addEventListener('focus', () => {
     state.focusedInput = true;
     queryOmnibox(el.omnibox.value);
   });
   el.omnibox.addEventListener('blur', () => {
     state.focusedInput = false;
-    setTimeout(closeDropdown, 100);
+    setTimeout(() => { if (document.activeElement !== el.omnibox) closeDropdown(); }, 100);
     updateChrome();
   });
   el.omnibox.addEventListener('keydown', (e) => {
+    if (e.isComposing || omniComposing) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); moveSelection(1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); moveSelection(-1); }
     else if (e.key === 'Tab') {
@@ -900,8 +959,10 @@
     if (!p) return;
     if (p.action === 'find_next') findQuery('find.next');
     else if (p.action === 'find_prev') findQuery('find.prev');
-    else if (p.action === 'toggle_highlight_all') togglePressed(el.findAll);
-    else if (p.action === 'toggle_regex') toast('Regex find is not available on this WebView2 build');
+    else if (p.action === 'toggle_highlight_all' && !el.findAll.disabled) {
+      togglePressed(el.findAll, () => findQuery('find.query'));
+    }
+    else if (p.action === 'toggle_regex') toast('Regular-expression search is not supported; use Whole word.');
   });
   on('shell.shortcut', (p) => {
     if (!p) return;

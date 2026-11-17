@@ -1,9 +1,5 @@
-//! The single SQLite store: history and bookmarks in one file, one connection.
-//!
-//! One connection is correct here — every call site is on the UI thread and
-//! each interactive query is sub-millisecond. A pool would add concurrency the
-//! app does not have, and a second connection would add lock contention on the
-//! same file for no gain.
+//! History and bookmarks share one SQLite database. Omnibox searches use a
+//! read-only worker connection so history size cannot block native input.
 
 use rusqlite::{params, Connection};
 use std::path::Path;
@@ -17,6 +13,15 @@ pub struct Store {
 }
 
 impl Store {
+    pub fn open_read_only(path: &Path) -> Result<Self, StoreError> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(std::time::Duration::from_millis(100))?;
+        Ok(Self { conn, cap: 0 })
+    }
+
+    pub fn autocomplete(&self, text: &str, limit: usize) -> Result<Vec<HistoryEntry>, StoreError> {
+        crate::history::autocomplete(&self.conn, text, limit)
+    }
     /// Open (creating if needed) the database at `path`. `cap` bounds the
     /// history row count (§4.5).
     pub fn open(path: &Path, cap: u32) -> Result<Self, StoreError> {

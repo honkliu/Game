@@ -49,11 +49,11 @@
 //!                                       Flags combine:
 //!                                       `--proof=4+no_tab_sleep+no_overlay`.
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
 
-use browser::{ai, app, sys, webview2};
+use browser::{ai, app, platform, sys};
 
 fn main() {
     let start_tick = sys::process_uptime_ms();
@@ -74,6 +74,10 @@ fn main() {
             })
         });
     let proof = driver.as_deref().is_some_and(|d| d.starts_with("proof"));
+    if proof && !cfg!(windows) {
+        eprintln!("--proof measures Windows WebView2 budgets; use --self-test on macOS.");
+        std::process::exit(2);
+    }
     if proof {
         // Redirect the whole data directory before anything resolves a path. See
         // `private_proof_profile`.
@@ -84,8 +88,8 @@ fn main() {
 
     // A5: hard gate on the WebView2 Evergreen runtime, with a dialog and a
     // download hint rather than a panic deep inside tao.
-    if let Err(e) = webview2::ensure_runtime() {
-        eprintln!("native-browser: WebView2 unavailable: {e}");
+    if let Err(e) = platform::ensure_runtime() {
+        eprintln!("native-browser: {} unavailable: {e}", platform::ENGINE_NAME);
         std::process::exit(1);
     }
 
@@ -126,6 +130,7 @@ fn private_proof_profile() {
         .unwrap_or_else(|_| std::env::temp_dir());
     let private = base.join("native-browser-proof");
     std::env::set_var("LOCALAPPDATA", &private);
+    std::env::set_var("AI_BROWSER_DATA_DIR", private.join("native-browser"));
     println!("proof: data directory redirected to {}", private.display());
 }
 

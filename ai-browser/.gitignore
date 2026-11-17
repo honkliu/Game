@@ -1,5 +1,6 @@
 # Cargo build output for the workspace; never committed.
 /target/
+/dist/
 node_modules/
 *.pdb
 crates/shell/ui/sidebar/

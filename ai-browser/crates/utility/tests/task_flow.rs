@@ -106,7 +106,7 @@ fn run(shell: &FakeShell, tabs: &Tabs, view: &TaskRequestView, config: &AiConfig
 }
 
 fn run_with(shell: &FakeShell, tabs: &Tabs, view: &TaskRequestView, config: &AiConfig, control: &TaskControl) -> TaskOutcome {
-    task::run(&TaskEnv { shell, tabs }, view, control, config, None);
+    task::run(&TaskEnv { shell, tabs, credentials: &Default::default() }, view, control, config, None);
     let finishes = shell.finishes();
     assert_eq!(finishes.len(), 1, "exactly one task.finish");
     serde_json::from_value(finishes[0].clone()).unwrap()
@@ -223,7 +223,7 @@ fn kill_switches_and_bad_config_fail_closed() {
 
     let shell = plain_shell();
     let v = view("ask", QUESTION, json!({}));
-    task::run(&TaskEnv { shell: &shell, tabs: &Tabs::default() }, &v, &TaskControl::new(0), &AiConfig::disabled(), Some(Failure::unsupported("config.invalid")));
+    task::run(&TaskEnv { shell: &shell, tabs: &Tabs::default(), credentials: &Default::default() }, &v, &TaskControl::new(0), &AiConfig::disabled(), Some(Failure::unsupported("config.invalid")));
     let outcome: TaskOutcome = serde_json::from_value(shell.finishes()[0].clone()).unwrap();
     assert_eq!(failed(&outcome).code, "config.invalid");
 }

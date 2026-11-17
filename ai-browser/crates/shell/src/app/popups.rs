@@ -53,6 +53,8 @@ impl AppState {
         self.agent_wake(tab);
         let eval = AgentEval {
             tab: first,
+            document: self.ai.identity.current(first),
+            run: reply.then_some(self.ai.agent_run),
             script: DISMISS_SCRIPT.to_string(),
             attempts: 0,
             is_read: false,
@@ -76,6 +78,7 @@ impl AppState {
         while let Some(next) = chain.rest.pop() {
             if self.live.contains_key(&TabId(next)) {
                 eval.tab = next;
+                eval.document = self.ai.identity.current(next);
                 eval.chain = Some(chain);
                 self.ai.agent_evals.insert(id, eval);
                 return self.agent_schedule(id, 0);

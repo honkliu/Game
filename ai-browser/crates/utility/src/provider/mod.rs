@@ -209,6 +209,10 @@ impl Catalog {
     /// provider is always appended last, so a fresh install answers offline and
     /// it is the last resort in a fallback chain.
     pub fn from_config(config: &AiConfig) -> Catalog {
+        Self::from_config_with_credentials(config, &HashMap::new())
+    }
+
+    pub fn from_config_with_credentials(config: &AiConfig, credentials: &HashMap<String, String>) -> Catalog {
         let mut models = Vec::new();
         let mut providers: HashMap<String, Arc<dyn ModelProvider>> = HashMap::new();
         let mut entries: Vec<ProviderEntry> = config.providers.clone();
@@ -218,7 +222,7 @@ impl Catalog {
         for entry in &entries {
             let mut unavailable = if entry.enabled { None } else { Some("provider_disabled".to_string()) };
             if unavailable.is_none() {
-                match build_provider(entry) {
+                match build_provider(entry, credentials) {
                     Ok(provider) => {
                         providers.insert(entry.id.clone(), provider);
                     }
@@ -253,15 +257,15 @@ impl Catalog {
     }
 }
 
-fn build_provider(entry: &ProviderEntry) -> Result<Arc<dyn ModelProvider>, String> {
+fn build_provider(entry: &ProviderEntry, credentials: &HashMap<String, String>) -> Result<Arc<dyn ModelProvider>, String> {
     match entry.kind {
         ProviderKind::Extractive => Ok(Arc::new(extractive::ExtractiveProvider::new(&entry.id))),
         ProviderKind::OpenAiCompatible => {
             let base_url = entry.base_url.as_deref().ok_or_else(|| "no_base_url".to_string())?;
             let key = match entry.api_key_env.as_deref() {
                 None => None,
-                Some(name) => match std::env::var(name) {
-                    Ok(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
+                Some(name) => match credentials.get(name).cloned().or_else(|| std::env::var(name).ok()) {
+                    Some(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
                     _ => return Err("api_key_missing".to_string()),
                 },
             };

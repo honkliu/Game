@@ -47,8 +47,11 @@
 //! capture that minted it.
 
 use serde_json::Value;
+#[cfg(windows)]
 use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
+#[cfg(windows)]
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2;
+#[cfg(windows)]
 use windows::core::PCWSTR;
 
 use ai_platform_contract::failure::Failure;
@@ -231,6 +234,23 @@ impl ContextStore {
 /// returned `S_OK` synchronously and `0x80070057` in the callback. Nothing may
 /// treat `Ok(())` here as "the snapshot arrived".
 pub fn capture(
+    webview: &wry::WebView,
+    on_done: impl FnOnce(Result<String, String>) + Send + 'static,
+) -> Result<(), Failure> {
+    #[cfg(windows)]
+    {
+        use wry::WebViewExtWindows;
+        capture_webview2(&webview.webview(), on_done)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::platform::macos::capture(webview, include_str!("snapshot.js"), on_done);
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn capture_webview2(
     webview: &ICoreWebView2,
     on_done: impl FnOnce(Result<String, String>) + Send + 'static,
 ) -> Result<(), Failure> {
@@ -323,7 +343,7 @@ pub fn parse(
         .and_then(Value::as_array);
 
     let mut blocks: Vec<Block> = Vec::new();
-    let mut dropped = 0usize;
+    let mut dropped = payload.get("droppedBlocks").and_then(Value::as_u64).unwrap_or(0) as usize;
     for i in 0..node_index.len() {
         // The columns are parallel, so a short column means the payload is not the
         // shape claimed. That is a parse failure, not a page with less text.

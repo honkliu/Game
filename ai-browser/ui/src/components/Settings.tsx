@@ -86,7 +86,11 @@ function ModelTab() {
       <Field label="Endpoint"><input type="text" spellcheck={false} placeholder="http://host:8001/v1" value={url} onInput={(e) => setUrl(e.currentTarget.value)} /></Field>
       <Field label="Model name"><input type="text" spellcheck={false} placeholder="e.g. QWen" value={model} onInput={(e) => setModel(e.currentTarget.value)} /></Field>
       <Field label="API key"><input type="password" placeholder={p.key_saved ? 'saved — leave empty to keep it' : 'API key'} value={key} onInput={(e) => setKey(e.currentTarget.value)} /></Field>
-      <div><button type="button" class="chip-btn is-accent" onClick={() => void save()}>Save</button> {a.view}</div>
+      <div><button type="button" class="chip-btn is-accent" onClick={() => void save()}>Save</button>{' '}
+        {p.key_saved ? <button type="button" class="chip-btn" onClick={() => void a.run('Removing…', async () => {
+          await native.invoke('ai.provider.set', { base_url: p.base_url, model_id: p.model_id, clear_key: true });
+          await refreshStatus();
+        })}>Remove saved key</button> : null} {a.view}</div>
     </>
   );
 }

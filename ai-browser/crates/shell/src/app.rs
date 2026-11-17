@@ -26,15 +26,20 @@ use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tao::window::{Window, WindowBuilder, WindowId};
 use wry::http::Request as HttpRequest;
-use wry::{WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindows};
+use wry::{WebContext, WebView, WebViewBuilder};
+#[cfg(windows)]
+use wry::WebViewExtWindows;
 
 use crate::downloads::{self, Download, DownloadState};
 use crate::history::{self, HistoryQuery};
 use crate::host;
-use crate::ipc::{self, Reply, Request};
-use crate::keys::{self, Mods, Outcome, Shortcut};
+use crate::ipc::{self, Reply, Request, Surface};
+use crate::keys::Shortcut;
+#[cfg(windows)]
+use crate::keys::{self, Mods, Outcome};
 use crate::layout::{self, Overlay, Panel};
 use crate::omnibox::{self, Intent, Mode};
+use crate::platform;
 use crate::session::{self, ClosedRecord, GroupRecord, Session, TabRecord, WindowRect};
 use crate::settings::{self, Settings};
 use crate::store::Store;
@@ -45,6 +50,10 @@ use crate::ui;
 mod agent_glue;
 mod ai_glue;
 mod canvas;
+mod lifecycle;
+mod find;
+mod omnibox_worker;
+mod settings_page;
 mod popups;
 const SESSION_DEBOUNCE: Duration = Duration::from_millis(500);
 const TICK: Duration = Duration::from_millis(250);
@@ -75,10 +84,19 @@ fn trim_downloads(list: &mut Vec<Download>) {
 
 struct LiveTab {
     webview: WebView,
+    pdf: crate::pdf::PdfSession,
+    last_used: Instant,
+    lifecycle_known: bool,
+    editing: bool,
+    playing: bool,
     /// Scroll offset to apply on the next committed navigation (§6.4).
     pending_scroll: Option<f64>,
     /// Last bounds and corner radius applied to the page window; skips redundant re-shaping.
     shaped: std::cell::Cell<Option<(i32, i32, i32, i32, i32)>>,
+}
+
+impl Drop for LiveTab {
+    fn drop(&mut self) { self.pdf.cancel(); }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,6 +119,11 @@ pub struct AppState {
     canvas_shown: Option<TabId>,
     downloads: Vec<Download>,
     next_download_id: u64,
+    download_owners: HashMap<u64, TabId>,
+    last_tab_prune: Instant,
+    #[cfg(target_os = "macos")]
+    download_destination: Rc<RefCell<PathBuf>>,
+    shutting_down: bool,
 
     shell: Option<WebView>,
     overlay: Option<WebView>,
@@ -114,7 +137,7 @@ pub struct AppState {
     context: Option<WebContext>,
     /// One WebView2 environment shared by shell, overlay and every page
     /// webview. Without it each webview creates its own browser process.
-    environment: Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment>,
+    environment: Option<platform::Environment>,
 
     panel: Panel,
     overlay_rect: Overlay,
@@ -122,6 +145,8 @@ pub struct AppState {
     menu_open: bool,
 
     find: Option<FindResult>,
+    find_seq: u64,
+    omnibox_worker: Option<std::sync::mpsc::Sender<omnibox_worker::Query>>,
 
     proxy: Option<EventLoopProxy<AppMessage>>,
     start_tick: u64,
@@ -130,9 +155,11 @@ pub struct AppState {
     system_dark: bool,
     /// True while the shell reports a text field focused (Alt-nav suppression,
     /// `Ctrl+W` → word delete).
+    #[cfg(windows)]
     shell_focus_in_input: bool,
     /// HWND of the shell webview's child window; keystrokes for it are the
     /// shell's own and must not be intercepted twice.
+    #[cfg(windows)]
     shell_hwnd: isize,
 
     session_dirty_at: Option<Instant>,
@@ -171,16 +198,18 @@ struct FindResult {
 
 pub enum AppMessage {
     /// A raw IPC envelope from the shell or overlay.
-    Ipc(String),
+    Ipc(Surface, String),
     /// A page webview changed its document title.
     TabTitle(TabId, String),
     /// A page webview started a navigation to `url`.
     TabNavigated(TabId, String),
     OpenPdf(TabId, String),
+    PdfRequest(TabId, HttpRequest<Vec<u8>>, wry::RequestAsyncResponder),
+    PageLoaded(TabId),
     /// A page asked for a new window (`target=_blank`, `window.open`): it becomes a tab.
     NewWindow(TabId, String),
     /// A download started; `path` is the OS-suggested destination.
-    DownloadStarted(String, PathBuf),
+    DownloadStarted(TabId, String, PathBuf),
     /// A download finished (or failed).
     DownloadFinished(String, Option<PathBuf>, bool),
     Flush,
@@ -194,9 +223,9 @@ pub enum AppMessage {
     /// Driver: finish, write the report, exit.
     DriverDone,
     /// A frame from the AI utility.
-    AiFrame(ai_platform_contract::frame::Frame),
+    AiFrame(u64, ai_platform_contract::frame::Frame),
     /// The utility's pipe closed or it exited.
-    AiLinkClosed(String),
+    AiLinkClosed(u64, String),
     /// A DOM snapshot finished for `tab`; `what` says who asked.
     AiCaptured(TabId, ai_glue::CaptureFor, Result<String, String>),
     /// A page script reported its selection. Untrusted: validated on receipt.
@@ -205,6 +234,9 @@ pub enum AppMessage {
     /// Page webviews swallow mouse input, so this is how the canvas learns which
     /// cell was clicked whatever the page is.
     MouseDown(i32, i32),
+    /// AppKit supplies window-local logical coordinates, including native child views.
+    CanvasPointer(i32, i32),
+    NativeShortcut(Shortcut),
     /// Time to read an extra tab for this task (it was woken and needed a moment to load).
     AiReadExtra(u64, TabId),
     /// Run (or retry) the page script of a pending agent tool call, by utility request id.
@@ -215,7 +247,9 @@ pub enum AppMessage {
     /// took too long, and the job goes ahead without it).
     AgentJob(u64, Option<String>),
     /// A tab's live-context re-read finished (None: the page could not be read).
-    PageRead(TabId, Option<String>),
+    PageRead(TabId, Option<ai_platform_contract::identity::DocumentKey>, u64, Option<String>),
+    FindDone(TabId, u64, String),
+    OmniboxReady(Surface, Option<u64>, Value),
 }
 
 type Shared = Rc<RefCell<AppState>>;
@@ -317,6 +351,9 @@ impl AppState {
             "download_dir": self.download_dir(),
             "history_count": self.store.history_count().unwrap_or(-1),
             "webview2_version": webview2_version(),
+            "engine_name": platform::ENGINE_NAME,
+            "engine_version": webview_version(),
+            "data_dir": self.data_dir,
         })
     }
 
@@ -363,12 +400,13 @@ impl AppState {
         }
     }
 
-    fn emit(&mut self, event: &str, payload: Value) {
+    fn emit(&mut self, event: &str, mut payload: Value) {
+        self.ai.ui.record(event, &mut payload);
         self.emit_raw("shell", event, payload.clone());
-        if self.panel == Panel::Ai {
+        if self.sidebar.is_some() {
             self.emit_raw("sidebar", event, payload.clone());
         }
-        if self.overlay_rect.is_open() {
+        if self.overlay.is_some() {
             self.emit_raw("overlay", event, payload);
         }
     }
@@ -379,21 +417,16 @@ impl AppState {
         self.mark_dirty();
     }
 
-    fn reply(&mut self, r: Reply) {
+    fn reply(&mut self, source: Surface, r: Reply) {
         let Ok(body) = serde_json::to_string(&r) else { return };
         let script = format!("window.__native&&window.__native._reply({body})");
-        if let Some(wv) = self.shell.as_ref() {
-            let _ = wv.evaluate_script(&script);
-        }
-        if self.overlay_rect.is_open() {
-            if let Some(wv) = self.overlay.as_ref() {
-                let _ = wv.evaluate_script(&script);
-            }
-        }
-        if self.panel == Panel::Ai {
-            if let Some(wv) = self.sidebar.as_ref() {
-                let _ = wv.evaluate_script(&script);
-            }
+        let view = match source {
+            Surface::Shell => self.shell.as_ref(),
+            Surface::Overlay => self.overlay.as_ref(),
+            Surface::Sidebar => self.sidebar.as_ref(),
+        };
+        if let Some(view) = view {
+            let _ = view.evaluate_script(&script);
         }
     }
 
@@ -423,7 +456,7 @@ impl AppState {
             .tabs
             .tabs()
             .iter()
-            .map(|t| session::tab_to_record(t, 0.0, now))
+            .map(|t| session::tab_to_record(t, t.scroll_y, now))
             .collect();
         let groups: Vec<GroupRecord> = self.groups.iter().map(session::group_to_record).collect();
         let rect = match &self.window {
@@ -482,18 +515,19 @@ impl AppState {
         if crate::pdf::is_pdf_url(url) {
             return crate::pdf::viewer_url(url);
         }
-        if url == tabs::NEWTAB_URL {
-            return host::newtab_url(&self.store);
-        }
-        if url == "native://settings" {
-            return host::settings_url(
+        let resolved = if url == tabs::NEWTAB_URL {
+            host::newtab_url(&self.store)
+        } else if url == "native://settings" {
+            host::settings_url(
                 &self.settings,
                 self.system_dark,
                 self.store.history_count().unwrap_or(-1),
                 webview2_version(),
-            );
-        }
-        host::expand_internal(url, &host::newtab_url(&self.store))
+            )
+        } else {
+            host::expand_internal(url, &host::newtab_url(&self.store))
+        };
+        platform::page_asset_url(&resolved)
     }
 
     /// A page asked to open a link in a new window. Inside the canvas on screen it
@@ -574,9 +608,11 @@ impl AppState {
             return;
         }
         self.canvas_shown = None;
-        // A background tab's webview is destroyed when it is deactivated (see
-        // `sleep_background_tabs`), so re-create it before showing it.
+        // Discarded tabs are rebuilt; warm tabs keep their live document and history.
         self.build_webview(id);
+        if let Some(live) = self.live.get_mut(&id) {
+            live.last_used = Instant::now();
+        }
         self.active = Some(id);
         let ids: Vec<TabId> = self.tabs.tabs().iter().map(|t| t.id).collect();
         for other in ids {
@@ -607,35 +643,31 @@ impl AppState {
         self.ai_on_activated(id);
     }
 
-    /// Destroy the webview of every tab except `keep`.
-    ///
-    /// Each live page webview costs roughly 120 MB of working set (measured:
-    /// 31 webviews = 4.5 GB). Keeping them all alive is what makes a
-    /// tab-per-page browser heavier than Chrome, which sleeps background tabs.
-    /// The tab entry, its URL and title survive; only the renderer goes. State
-    /// like scroll position and form input is lost, which is the same trade-off
-    /// Chrome's tab discarding makes.
-    ///
-    /// The one exception is the `--proof` harness with `+no_tab_sleep`
-    /// ([`crate::ai::mode::NO_TAB_SLEEP`]), which needs N tabs to really be N live
-    /// pages so R0a-1's "+N renderers" budget has a referent, and needs the price of
-    /// this trade-off measured before the trade-off is decided. `tabs_may_sleep` is
-    /// false only inside such a run; ordinary browsing always sleeps them.
+    /// Keep a small warm pool; editing, media, downloads and AI work take precedence.
     fn sleep_background_tabs(&mut self, keep: &[TabId]) {
         if !crate::ai::mode::tabs_may_sleep() {
             return;
         }
-        let victims: Vec<TabId> = self
-            .live
-            .keys()
-            .copied()
-            .filter(|id| !keep.contains(id))
-            .collect();
+        let candidates = self.live.iter().filter(|(id, _)| !keep.contains(id)).map(|(id, live)| {
+            let tab = self.tabs.get(*id);
+            crate::tab_lifecycle::Candidate {
+                id: id.0,
+                idle: live.last_used.elapsed(),
+                protected: !live.lifecycle_known || live.editing || live.playing
+                    || tab.is_some_and(|t| t.pinned || t.loading)
+                    || self.download_owners.values().any(|owner| owner == id)
+                    || self.ai.agent_run != 0
+                    || self.ai.tasks.values().any(|task| task.tab == id.0 || task.extra_tabs.contains(&id.0))
+                    || self.ai.agent_evals.values().any(|eval| eval.tab == id.0),
+            }
+        }).collect();
+        let victims = crate::tab_lifecycle::eviction_candidates(candidates,
+            Duration::from_secs(u64::from(self.settings.sleep_after_minutes) * 60));
         if victims.is_empty() {
             return;
         }
         let mut slept = 0usize;
-        for id in victims {
+        for id in victims.into_iter().map(TabId) {
             if self.live.remove(&id).is_some() {
                 slept += 1;
             }
@@ -822,7 +854,6 @@ impl AppState {
     /// A page in a canvas cell gets rounded corners (like Edge's split view); any other
     /// page is square.
     fn shape_tab(&self, id: TabId) {
-        use tao::platform::windows::WindowExtWindows;
         let Some(window) = self.window.as_ref() else { return };
         let Some(live) = self.live.get(&id) else { return };
         let (r, shown) = self.tab_geom(id);
@@ -835,7 +866,7 @@ impl AppState {
             return;
         }
         live.shaped.set(Some(key));
-        crate::sys::round_child_at(window.hwnd() as isize, (key.0, key.1, key.2, key.3), radius);
+        platform::shape_webview(&live.webview, window, (key.0, key.1, key.2, key.3), radius);
     }
 
     fn apply_layout(&mut self) {
@@ -856,7 +887,7 @@ impl AppState {
                 } else if let Some(visible) = shown {
                     let _ = live.webview.set_visible(visible);
                 } else {
-                    let _ = live.webview.set_visible(true);
+                    let _ = live.webview.set_visible(self.active == Some(id));
                 }
             }
             self.shape_tab(id);
@@ -888,25 +919,30 @@ impl AppState {
 
     // ---- 4. command dispatch -------------------------------------------
 
-    fn dispatch(&mut self, raw: &str) -> Reply {
+    fn dispatch(&mut self, source: Surface, raw: &str) -> Option<Reply> {
         let req: Request = match serde_json::from_str(raw) {
             Ok(r) => r,
-            Err(e) => return Reply::err(None, format!("bad envelope: {e}")),
+            Err(e) => return Some(Reply::err(None, format!("bad envelope: {e}"))),
         };
         let id = req.id;
-        match self.run(&req) {
+        match self.run_from(&req, source) {
             Ok(data) => match data {
-                Some(d) => Reply::ok(id, d),
-                None => Reply::empty(id),
+                Some(d) => Some(Reply::ok(id, d)),
+                None if req.cmd == "omnibox.query" => None,
+                None => Some(Reply::empty(id)),
             },
             Err(e) => {
                 self.note(format!("{} failed: {e}", req.cmd));
-                Reply::err(id, e)
+                Some(Reply::err(id, e))
             }
         }
     }
 
     fn run(&mut self, req: &Request) -> Result<Option<Value>, String> {
+        self.run_from(req, Surface::Shell)
+    }
+
+    fn run_from(&mut self, req: &Request, source: Surface) -> Result<Option<Value>, String> {
         let p = &req.payload;
         let id_arg = || p.get("tab_id").and_then(Value::as_u64).map(TabId).or(self.active);
         match req.cmd.as_str() {
@@ -949,6 +985,7 @@ impl AppState {
             "ai.ask" => self.ai_ask(p),
             "ai.stop" => self.ai_stop(p),
             "ai.status" => Ok(Some(self.ai_status())),
+            "ai.session" => Ok(Some(self.ai.ui.snapshot())),
             "ai.models" => self.ai_models(),
             "ai.config.set" => self.ai_config_set(p),
             "ai.provider.set" => self.ai_provider_set(p),
@@ -956,7 +993,7 @@ impl AppState {
             "agent.run" => self.agent_run(p),
             "agent.stop" => self.agent_stop(),
             "agent.approve" => self.agent_approve(p),
-            "agent.call" => self.agent_call(p),
+            "agent.call" => self.agent_call(p, source),
             "agent.context" => Ok(Some(self.agent_context())),
             "ai.pane.resize" => {
                 let wanted = p.get("width").and_then(Value::as_f64).ok_or("ai.pane.resize: missing width")?.round() as i32;
@@ -1172,39 +1209,18 @@ impl AppState {
                 Ok(None)
             }
             "find.start" | "find.query" | "find.next" | "find.prev" | "find.stop" => {
-                let tab = id_arg().unwrap_or(TabId(0));
-                if req.cmd == "find.stop" {
-                    self.find = None;
-                    if self.panel == Panel::Find {
-                        self.panel = Panel::None;
-                    }
-                    self.emit("find.result", json!({ "closed": true }));
-                    self.apply_layout();
-                    return Ok(None);
-                }
-                if req.cmd == "find.start" {
-                    self.panel = Panel::Find;
-                    self.apply_layout();
-                }
-                let query = p.get("query").and_then(Value::as_str).unwrap_or("").to_string();
-                let result = FindResult {
-                    tab_id: tab.0,
-                    query,
-                    total: 0,
-                    active: 0,
-                    // wry 0.57 exposes no WebView2 find API; the flag list is
-                    // empty so the UI shows "n/a" instead of a fake count.
-                    supported_flags: Vec::new(),
-                };
-                self.find = Some(result.clone());
-                self.emit("find.result", json!(result));
-                Ok(None)
+                self.find_query(&req.cmd, p)
             }
             "omnibox.query" => {
                 let text = p.get("text").and_then(Value::as_str).unwrap_or("");
-                let limit = p.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
+                let limit = p.get("limit").and_then(Value::as_u64).unwrap_or(8).clamp(1, 40) as usize;
                 let res = self.omnibox_results(text, limit);
-                self.emit("omnibox.results", res.clone());
+                if let Some(worker) = &self.omnibox_worker {
+                    if worker.send(omnibox_worker::Query { source, id: req.id, text: text.chars().take(2_000).collect(),
+                        limit, base: res.clone() }).is_ok() {
+                        return Ok(None);
+                    }
+                }
                 Ok(Some(res))
             }
             "omnibox.activate" => {
@@ -1342,6 +1358,10 @@ impl AppState {
                 let key = p.get("key").and_then(Value::as_str).ok_or("missing key")?;
                 let value = p.get("value").cloned().unwrap_or(Value::Null);
                 self.settings.apply(key, &value).map_err(|e| e.to_string())?;
+                #[cfg(target_os = "macos")]
+                if key == "download_dir" {
+                    *self.download_destination.borrow_mut() = PathBuf::from(self.download_dir());
+                }
                 if key == "history_cap" {
                     self.store
                         .vacuum_after_cap_change(self.settings.history_cap)
@@ -1361,6 +1381,10 @@ impl AppState {
                 if !sys::shell_open_folder(&dir) {
                     return Err(format!("cannot open {dir}"));
                 }
+                Ok(None)
+            }
+            "settings.open" => {
+                self.open_settings();
                 Ok(None)
             }
             "shell.focus_omnibox" => {
@@ -1583,9 +1607,7 @@ impl AppState {
             "downloads" => self.set_panel(Panel::Downloads),
             "history" => self.set_panel(Panel::History),
             "settings" => {
-                if let Some(id) = self.active {
-                    self.navigate(id, "native://settings", false);
-                }
+                self.open_settings();
             }
             "toggle-rail" => {
                 self.settings.rail_collapsed = !self.settings.rail_collapsed;
@@ -1699,9 +1721,7 @@ impl AppState {
                 self.zoom_tab(id, name);
             }
             "open_settings" => {
-                if let Some(id) = self.active {
-                    self.navigate(id, "native://settings", false);
-                }
+                self.open_settings();
             }
             "escape" => {
                 self.emit("shell.escape", json!({}));
@@ -1739,7 +1759,9 @@ impl AppState {
             "egress_log": self.egress,
             "log": self.log,
             "webview2_version": webview2_version(),
-            "find_supported": false,
+            "engine_name": platform::ENGINE_NAME,
+            "engine_version": webview_version(),
+            "find_supported": true,
         });
         self.emit("diagnostics.report", report.clone());
         report
@@ -1769,7 +1791,8 @@ impl AppState {
     /// One dispatch of a driver command, returning the reply's ok flag.
     fn driver_call(&mut self, cmd: &str, payload: Value) -> bool {
         let raw = json!({ "id": 0, "cmd": cmd, "payload": payload }).to_string();
-        let reply = self.dispatch(&raw);
+        let reply = self.dispatch(Surface::Shell, &raw);
+        let Some(reply) = reply else { return true };
         let text = serde_json::to_string(&reply).unwrap_or_default();
         let ok = text.contains("\"ok\":true");
         if !ok {
@@ -2008,30 +2031,6 @@ impl AppState {
             }
         }
 
-        let want_history = mode == Mode::Search || matches!(intent, Intent::Search(_));
-        if want_history {
-            let query = if trimmed.is_empty() {
-                HistoryQuery::default()
-            } else {
-                history::parse_query(trimmed)
-            };
-            let entries = if trimmed.is_empty() {
-                self.store.recent(5).unwrap_or_default()
-            } else {
-                self.store
-                    .search_history(&query, limit, ipc::now_secs())
-                    .unwrap_or_default()
-            };
-            for e in entries {
-                rows.push(json!({
-                    "kind": "history",
-                    "url": e.url,
-                    "title": if e.title.is_empty() { history::host_of(&e.url) } else { e.title.as_str() },
-                    "hint": history::host_of(&e.url),
-                }));
-            }
-        }
-
         json!({ "mode": mode, "chip": mode.chip_label(), "rows": rows.into_iter().take(limit).collect::<Vec<_>>() })
     }
 
@@ -2049,6 +2048,7 @@ impl AppState {
         let (geom, canvas_visible) = self.tab_geom(id);
         let visible = canvas_visible.unwrap_or(self.active == Some(id));
         let initial = self.resolve_url(&tab.url);
+        let pdf = crate::pdf::PdfSession::default();
         let proxy_title = self.proxy();
         let proxy_nav = self.proxy();
         let proxy_dl = self.proxy();
@@ -2059,13 +2059,13 @@ impl AppState {
         let mut context = match self.context.take() {
             Some(c) => c,
             None => {
-                let dir = self.data_dir.join("webview2");
+                let dir = platform::context_dir(&self.data_dir);
                 WebContext::new(Some(dir))
             }
         };
         // `WebViewId<'a>` borrows the id string for the life of the build.
         let webview_id = format!("tab-{}", id.0);
-        let mut builder = WebViewBuilder::new_with_web_context(&mut context)
+        let builder = WebViewBuilder::new_with_web_context(&mut context)
             .with_id(&webview_id)
             .with_bounds(layout::rect(geom.x, geom.y, geom.w, geom.h))
             .with_visible(visible)
@@ -2074,15 +2074,32 @@ impl AppState {
             // Browser accelerators are off so Ctrl+F/Ctrl+P/Ctrl+R never fire a
             // WebView2 action behind our back; the process message hook in
             // `main` delivers ours. Ctrl+W/Ctrl+T are not WebView2 accelerators.
-            .with_browser_accelerator_keys(false)
             .with_url(&initial)
-            // The only page-facing IPC: a selection report. It cannot reach the
-            // command dispatcher; the shell treats it as untrusted, bounded text.
+            // Page reports are untrusted and cannot reach the command dispatcher.
+            // Only the bundled Settings document may send settings changes.
             .with_initialization_script(include_str!("../ui/probe.js"))
+            .with_custom_protocol("asset".into(), asset_handler())
             .with_ipc_handler(move |req: HttpRequest<String>| {
                 let _ = proxy_probe.send_event(AppMessage::PageProbe(id, req.body().clone()));
             })
-            .with_asynchronous_custom_protocol("pdf".into(), |_id, req, responder| crate::pdf::serve(req, responder))
+            .with_asynchronous_custom_protocol("pdf".into(), {
+                let proxy = self.proxy();
+                move |_id, req, responder| {
+                    if req.uri().path() == "/data" {
+                        let _ = proxy.send_event(AppMessage::PdfRequest(id, req, responder));
+                    } else {
+                        crate::pdf::serve(req, responder);
+                    }
+                }
+            })
+            .with_on_page_load_handler({
+                let proxy = self.proxy();
+                move |event, _| {
+                    if matches!(event, wry::PageLoadEvent::Finished) {
+                        let _ = proxy.send_event(AppMessage::PageLoaded(id));
+                    }
+                }
+            })
             .with_navigation_handler({
                 let proxy_pdf = self.proxy();
                 move |url| {
@@ -2107,8 +2124,19 @@ impl AppState {
             })
             .with_download_started_handler({
                 let proxy = proxy_dl.clone();
+                #[cfg(target_os = "macos")]
+                let destination = self.download_destination.clone();
                 move |url, path| {
-                    let _ = proxy.send_event(AppMessage::DownloadStarted(url, path.clone()));
+                    // WKWebView's completion callback omits its path. Reserve and pass the
+                    // actual destination at start so both the native download and UI agree.
+                    #[cfg(target_os = "macos")]
+                    {
+                        match platform::macos::download_destination(path, &destination.borrow()) {
+                            Ok(chosen) => *path = chosen,
+                            Err(_) => return false,
+                        }
+                    }
+                    let _ = proxy.send_event(AppMessage::DownloadStarted(id, url, path.clone()));
                     true
                 }
             })
@@ -2119,9 +2147,7 @@ impl AppState {
                 }
             });
 
-        if let Some(env) = self.environment.clone() {
-            builder = builder.with_environment(env);
-        }
+        let builder = platform::configure(builder, self.environment.as_ref(), false);
         let built = builder.build_as_child(window);
         // Put the shared environment back regardless of the outcome so the next
         // tab joins the same WebView2 browser process (W10).
@@ -2132,7 +2158,11 @@ impl AppState {
                 if let Err(e) = wv.set_bounds(layout::rect(geom.x, geom.y, geom.w, geom.h)) {
                     self.note(format!("tab bounds: {e}"));
                 }
-                self.live.insert(id, LiveTab { webview: wv, pending_scroll: None, shaped: Default::default() });
+                self.live.insert(id, LiveTab {
+                    webview: wv, pdf, pending_scroll: (tab.scroll_y > 0.0).then_some(tab.scroll_y),
+                    last_used: Instant::now(), lifecycle_known: false, editing: false, playing: false,
+                    shaped: Default::default(),
+                });
                 self.shape_tab(id);
                 if let Some(t) = self.tabs.get_mut(id) {
                     t.sleeping = false;
@@ -2230,10 +2260,7 @@ fn commands_catalog() -> &'static [CommandSpec] {
 
 /// `%LOCALAPPDATA%\native-browser`.
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    base.join("native-browser")
+    platform::data_dir()
 }
 
 fn asset_handler() -> impl Fn(&str, HttpRequest<Vec<u8>>) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> + Send + Sync + 'static {
@@ -2264,14 +2291,14 @@ pub fn run(start_tick: u64) -> ! {
 pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<String>) -> ! {
     let dir = data_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        crate::webview2::show_fatal(&format!("Cannot create {}\n\n{e}", dir.display()));
+        platform::show_fatal(&format!("Cannot create {}\n\n{e}", dir.display()));
         std::process::exit(2);
     }
     let (settings, settings_warn) = settings::load(&dir.join("settings.json"));
     let store = match Store::open(&dir.join("data.db"), settings.history_cap) {
         Ok(s) => s,
         Err(e) => {
-            crate::webview2::show_fatal(&format!(
+            platform::show_fatal(&format!(
                 "Cannot open the history database in {}\n\n{e}",
                 dir.display()
             ));
@@ -2281,8 +2308,16 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
     let (saved, session_warn) = session::load(&dir.join("session.json"));
 
     let mut state = AppState {
-        data_dir: dir,
+        data_dir: dir.clone(),
         store,
+        #[cfg(target_os = "macos")]
+        download_destination: Rc::new(RefCell::new(PathBuf::from(
+            if settings.download_dir.trim().is_empty() {
+                settings::default_download_dir()
+            } else {
+                settings.download_dir.clone()
+            }
+        ))),
         settings,
         tabs: TabSet::new(),
         groups: Vec::new(),
@@ -2291,6 +2326,9 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
         live: HashMap::new(),
         downloads: Vec::new(),
         next_download_id: 0,
+        download_owners: HashMap::new(),
+        last_tab_prune: Instant::now(),
+        shutting_down: false,
         shell: None,
         overlay: None,
         sidebar: None,
@@ -2302,12 +2340,16 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
         overlay_rect: Overlay::Closed,
         menu_open: false,
         find: None,
+        find_seq: 0,
+        omnibox_worker: None,
         proxy: None,
         start_tick,
         shell_ready_ms: None,
         dpi_scale: 1.0,
         system_dark: false,
+        #[cfg(windows)]
         shell_focus_in_input: false,
+        #[cfg(windows)]
         shell_hwnd: 0,
         session_dirty_at: None,
         last_nav_emit: HashMap::new(),
@@ -2349,6 +2391,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             tab.pinned = t.pinned;
             tab.group_id = t.group_id.map(GroupId);
             tab.zoom = t.zoom;
+            tab.scroll_y = t.scroll_y;
             tab.canvas = t.canvas.clone();
             tab.member_of = t.member_of.map(TabId);
             state.tabs.insert_at(state.tabs.len(), tab);
@@ -2381,8 +2424,10 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
     let shared: Shared = Rc::new(RefCell::new(state));
 
     // ---- event loop with the process message hook ----------------------
+    #[cfg(windows)]
     let hook_state = shared.clone();
     let mut builder = EventLoopBuilder::<AppMessage>::with_user_event();
+    #[cfg(windows)]
     {
         use tao::platform::windows::EventLoopBuilderExtWindows;
         builder.with_msg_hook(move |msg| dispatch_accelerator(&hook_state, msg));
@@ -2390,6 +2435,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
     let event_loop = builder.build();
     let proxy = event_loop.create_proxy();
     shared.borrow_mut().proxy = Some(proxy.clone());
+    shared.borrow_mut().omnibox_worker = Some(omnibox_worker::start(dir.join("data.db"), proxy.clone()));
 
     // ---- window ---------------------------------------------------------
     let window = {
@@ -2406,7 +2452,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             b = b.with_position(tao::dpi::PhysicalPosition::new(restored_window.x, restored_window.y));
         }
         b.build(&event_loop).unwrap_or_else(|e| {
-            crate::webview2::show_fatal(&format!("Cannot create the window: {e}"));
+            platform::show_fatal(&format!("Cannot create the window: {e}"));
             std::process::exit(4);
         })
     };
@@ -2424,7 +2470,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
         s.dpi_scale = window.scale_factor();
         s.window_id = Some(window.id());
         s.window = Some(window);
-        s.context = Some(WebContext::new(Some(s.data_dir.join("webview2"))));
+        s.context = Some(WebContext::new(Some(platform::context_dir(&s.data_dir))));
     }
 
     // One WebView2 environment for the whole app. Created after the event loop
@@ -2432,12 +2478,18 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
     // non-fatal: wry then falls back to one environment per webview, which
     // costs processes but still works.
     {
-        let dir = shared.borrow().data_dir.join("webview2");
-        match crate::webview2::create_shared_environment(&dir) {
+        let dir = platform::context_dir(&shared.borrow().data_dir);
+        match platform::create_shared_environment(&dir) {
             Ok(env) => shared.borrow_mut().environment = Some(env),
-            Err(e) => shared
-                .borrow_mut()
-                .note(format!("shared WebView2 environment unavailable: {e}")),
+            Err(e) => {
+                #[cfg(target_os = "macos")]
+                {
+                    platform::show_fatal(&format!("Cannot open the WebKit profile: {e}"));
+                    std::process::exit(4);
+                }
+                #[cfg(windows)]
+                shared.borrow_mut().note(format!("shared WebView2 environment unavailable: {e}"));
+            }
         }
     }
 
@@ -2465,7 +2517,18 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
     }
 
     // Mouse watcher: reports left-button presses with their screen position.
+    #[cfg(target_os = "macos")]
+    let native_events = {
+        let s = shared.borrow();
+        platform::macos::install_events(s.window.as_ref().expect("window installed"), proxy.clone())
+            .unwrap_or_else(|e| {
+                platform::show_fatal(&e);
+                std::process::exit(4);
+            })
+    };
+    #[cfg(windows)]
     let mouse_proxy = proxy.clone();
+    #[cfg(windows)]
     std::thread::spawn(move || {
         use windows::Win32::Foundation::POINT;
         use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
@@ -2519,17 +2582,21 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
     let window_id = shared.borrow().window_id;
 
     event_loop.run(move |event, _target, control_flow| {
+        #[cfg(target_os = "macos")]
+        let _keep_native_events = &native_events;
         *control_flow = ControlFlow::WaitUntil(Instant::now() + TICK);
         match event {
             Event::WindowEvent { window_id: id, event, .. } if Some(id) == window_id => {
                 handle_window_event(&shared, event, control_flow)
             }
-            Event::UserEvent(AppMessage::Ipc(raw)) => {
+            Event::UserEvent(AppMessage::Ipc(source, raw)) => {
                 let reply = {
                     let mut s = shared.borrow_mut();
-                    s.dispatch(&raw)
+                    s.dispatch(source, &raw)
                 };
-                shared.borrow_mut().reply(reply);
+                if let Some(reply) = reply {
+                    shared.borrow_mut().reply(source, reply);
+                }
             }
             Event::UserEvent(AppMessage::TabTitle(id, title)) => {
                 let mut s = shared.borrow_mut();
@@ -2548,11 +2615,13 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
                 let mut s = shared.borrow_mut();
                 s.on_navigation(id, &url);
             }
-            Event::UserEvent(AppMessage::AiFrame(frame)) => {
-                shared.borrow_mut().ai_on_frame(frame);
+            Event::UserEvent(AppMessage::AiFrame(generation, frame)) => {
+                let mut s = shared.borrow_mut();
+                if s.ai.link_generation == generation { s.ai_on_frame(frame); }
             }
-            Event::UserEvent(AppMessage::AiLinkClosed(reason)) => {
-                shared.borrow_mut().ai_on_link_closed(reason);
+            Event::UserEvent(AppMessage::AiLinkClosed(generation, reason)) => {
+                let mut s = shared.borrow_mut();
+                if s.ai.link_generation == generation { s.ai_on_link_closed(reason); }
             }
             Event::UserEvent(AppMessage::AiCaptured(tab, what, result)) => {
                 shared.borrow_mut().ai_on_captured(tab, what, result);
@@ -2569,18 +2638,55 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             Event::UserEvent(AppMessage::AgentJob(id, raw)) => {
                 shared.borrow_mut().agent_job_done(id, raw);
             }
-            Event::UserEvent(AppMessage::PageRead(tab, raw)) => {
-                shared.borrow_mut().page_read_done(tab, raw);
+            Event::UserEvent(AppMessage::PageRead(tab, document, sequence, raw)) => {
+                shared.borrow_mut().page_read_done(tab, document, sequence, raw);
+            }
+            Event::UserEvent(AppMessage::FindDone(tab, sequence, raw)) => {
+                shared.borrow_mut().find_done(tab, sequence, raw);
+            }
+            Event::UserEvent(AppMessage::OmniboxReady(source, id, result)) => {
+                shared.borrow_mut().reply(source, Reply::ok(id, result));
             }
             Event::UserEvent(AppMessage::MouseDown(x, y)) => {
                 shared.borrow_mut().canvas_mouse_down(x, y);
             }
-            Event::UserEvent(AppMessage::PageProbe(tab, raw)) => {
-                shared.borrow_mut().ai_on_probe(tab, &raw);
+            Event::UserEvent(AppMessage::CanvasPointer(x, y)) => {
+                shared.borrow_mut().canvas_local_mouse_down(x, y);
             }
-            Event::UserEvent(AppMessage::DownloadStarted(url, path)) => {
+            Event::UserEvent(AppMessage::NativeShortcut(shortcut)) => {
+                let name = shortcut_name(&shortcut);
+                let args = shortcut_args(&shortcut);
+                AppState::emit_public(&shared, "shell.shortcut", json!({ "name": name, "args": args }));
+                shared.borrow_mut().perform_shortcut(name, args);
+            }
+            Event::UserEvent(AppMessage::PageProbe(tab, raw)) => {
                 let mut s = shared.borrow_mut();
-                s.on_download_started(url, &path);
+                if !s.lifecycle_probe(tab, &raw) && !s.find_probe(tab, &raw) && !s.settings_probe(tab, &raw) {
+                    s.ai_on_probe(tab, &raw);
+                }
+            }
+            Event::UserEvent(AppMessage::PageLoaded(tab)) => {
+                let mut s = shared.borrow_mut();
+                if let Some(page) = s.tabs.get_mut(tab) { page.loading = false; }
+                s.emit_tabs();
+            }
+            Event::UserEvent(AppMessage::PdfRequest(tab, req, responder)) => {
+                let s = shared.borrow();
+                let source = crate::pdf::requested_source(&req);
+                let Some(live) = s.live.get(&tab).filter(|_| s.tabs.get(tab).is_some_and(|page| page.url == source)) else {
+                    responder.respond(wry::http::Response::builder().status(403).body(Vec::new()).unwrap());
+                    return;
+                };
+                let cookies = if source.starts_with("http") { live.webview.cookies_for_url(&source) } else { Ok(Vec::new()) };
+                match cookies {
+                    Ok(cookies) => crate::pdf::serve_authenticated(req, responder, cookies, &live.pdf),
+                    Err(_) => responder.respond(wry::http::Response::builder().status(503)
+                        .body(b"Could not access the browser session; retry shortly.".to_vec()).unwrap()),
+                }
+            }
+            Event::UserEvent(AppMessage::DownloadStarted(tab, url, path)) => {
+                let mut s = shared.borrow_mut();
+                s.on_download_started(tab, url, &path);
             }
             Event::UserEvent(AppMessage::DownloadFinished(url, path, ok)) => {
                 let mut s = shared.borrow_mut();
@@ -2589,6 +2695,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             Event::UserEvent(AppMessage::Flush) => {
                 let mut s = shared.borrow_mut();
                 s.ai_tick();
+                s.lifecycle_tick();
                 if matches!(s.session_dirty_at, Some(t) if Instant::now() >= t) {
                     s.flush_session();
                 }
@@ -2677,6 +2784,8 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
                 shut_down(&shared);
                 *control_flow = ControlFlow::Exit;
             }
+            #[cfg(target_os = "macos")]
+            Event::LoopDestroyed => shut_down(&shared),
             _ => {}
         }
     });
@@ -2709,12 +2818,16 @@ impl AppState {
         self.mark_dirty();
     }
 
-    fn on_download_started(&mut self, url: String, suggested: &std::path::Path) {
+    fn on_download_started(&mut self, tab: TabId, url: String, suggested: &std::path::Path) {
+        #[cfg(windows)]
         let dir = PathBuf::from(self.download_dir());
+        #[cfg(target_os = "macos")]
+        let dir = suggested.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(self.download_dir()));
         let (dir, name) = downloads::resolve_destination(suggested, &dir);
         if let Err(e) = std::fs::create_dir_all(&dir) {
             self.note(format!("download dir: {e}"));
         }
+        #[cfg(windows)]
         let name = downloads::unique_name(&dir, &name);
         // Ids must come from the surviving records, not a private counter: the
         // counter is restored from the session, but `download.action` matches
@@ -2726,6 +2839,7 @@ impl AppState {
             .max(self.downloads.iter().map(|d| d.id).max().unwrap_or(0))
             + 1;
         let path = dir.join(&name).display().to_string();
+        self.download_owners.insert(self.next_download_id, tab);
         self.downloads.push(Download {
             id: self.next_download_id,
             url,
@@ -2751,6 +2865,7 @@ impl AppState {
             .rev()
             .find(|d| d.url == url && d.state == DownloadState::InProgress)
         {
+            self.download_owners.remove(&d.id);
             d.state = if ok { DownloadState::Completed } else { DownloadState::Failed };
             if let Some(p) = path {
                 d.path = p.display().to_string();
@@ -2783,6 +2898,10 @@ fn handle_window_event(shared: &Shared, event: WindowEvent, control_flow: &mut C
 
 fn shut_down(shared: &Shared) {
     let mut s = shared.borrow_mut();
+    if s.shutting_down {
+        return;
+    }
+    s.shutting_down = true;
     s.ai_shutdown();
     s.flush_session();
     if s.settings.clear_history_on_exit {
@@ -2803,34 +2922,33 @@ fn shut_down(shared: &Shared) {
 fn build_shell(shared: &Shared) {
     let mut s = shared.borrow_mut();
     let proxy = s.proxy();
-    let mut builder = WebViewBuilder::new()
+    let builder = WebViewBuilder::new()
         .with_id("shell")
         .with_bounds(layout::rect(0, 0, 1280, 820))
         .with_visible(true)
         .with_focused(false)
-        .with_https_scheme(true)
         .with_custom_protocol("asset".into(), asset_handler())
         .with_ipc_handler(move |req: HttpRequest<String>| {
-            let _ = proxy.send_event(AppMessage::Ipc(req.body().clone()));
+            let _ = proxy.send_event(AppMessage::Ipc(Surface::Shell, req.body().clone()));
         })
         .with_navigation_handler(|url| is_asset_origin(&url))
         .with_url(ui::SHELL_URL);
-    if let Some(env) = s.environment.clone() {
-        builder = builder.with_environment(env);
-    }
+    let builder = platform::configure(builder, s.environment.as_ref(), true);
     let Some(window) = s.window.as_ref() else { return };
     match builder.build_as_child(window) {
         Ok(wv) => {
             // Remember the shell's child HWND: keystrokes going to it are the
             // shell's own, so the accelerator hook must not intercept them.
-            s.shell_hwnd = wv.hwnd().0 as isize;
+            #[cfg(windows)]
+            { s.shell_hwnd = wv.hwnd().0 as isize; }
             s.shell = Some(wv);
             s.note("shell webview ready");
         }
         Err(e) => {
             drop(s);
-            crate::webview2::show_fatal(&format!(
-                "Cannot create the shell webview.\n\n{e}\n\nWebView2 runtime: {}",
+            platform::show_fatal(&format!(
+                "Cannot create the shell webview.\n\n{e}\n\n{} runtime: {}",
+                platform::ENGINE_NAME,
                 webview_version().unwrap_or_else(|| "not detected".into())
             ));
             std::process::exit(5);
@@ -2855,21 +2973,18 @@ impl AppState {
     /// second webview would double the very cost being measured.
     fn build_overlay_webview(&mut self) {
         let proxy = self.proxy();
-        let mut builder = WebViewBuilder::new()
+        let builder = WebViewBuilder::new()
             .with_id("overlay")
             .with_bounds(layout::rect(0, 0, 0, 0))
             .with_visible(false)
             .with_transparent(true)
-            .with_https_scheme(true)
             .with_custom_protocol("asset".into(), asset_handler())
             .with_ipc_handler(move |req: HttpRequest<String>| {
-                let _ = proxy.send_event(AppMessage::Ipc(req.body().clone()));
+                let _ = proxy.send_event(AppMessage::Ipc(Surface::Overlay, req.body().clone()));
             })
             .with_navigation_handler(|url| is_asset_origin(&url))
             .with_url("asset://shell/overlay.html");
-        if let Some(env) = self.environment.clone() {
-            builder = builder.with_environment(env);
-        }
+        let builder = platform::configure(builder, self.environment.as_ref(), true);
         let Some(window) = self.window.as_ref() else { return };
         match builder.build_as_child(window) {
             Ok(wv) => {
@@ -2884,44 +2999,25 @@ impl AppState {
 impl AppState {
     /// A page webview committed a navigation.
     fn on_navigation(&mut self, id: TabId, url: &str) {
+        if let Some(live) = self.live.get_mut(&id) {
+            live.pdf.cancel();
+            live.lifecycle_known = false;
+            live.editing = false;
+            live.playing = false;
+        }
+        if self.active == Some(id) {
+            self.find_seq += 1;
+            self.find = None;
+        }
         // The PDF viewer page stands for the document it shows.
         let shown = crate::pdf::source_of(url);
         let url = shown.as_deref().unwrap_or(url);
         self.navigation_seq += 1;
         self.ai_on_navigation(id, url);
 
-        // The settings page reports changes by navigating its own fragment.
-        // Apply the change and keep the tab's URL pretty instead of recording a
-        // bogus visit to the fragment.
-        if let Some((key, value)) = host::settings_change(url) {
-            let coalesced = match key.as_str() {
-                "history_cap" | "sleep_after_minutes" => value
-                    .parse::<u64>()
-                    .map(Value::from)
-                    .unwrap_or(Value::Null),
-                "rail_collapsed" | "vertical_tabs" | "compact_tab_rows" | "clear_history_on_exit"
-                | "clear_cookies_on_exit" | "clear_cache_on_exit" | "always_show_full_url" => {
-                    Value::Bool(value == "true")
-                }
-                _ => Value::String(value),
-            };
-            match self.settings.apply(&key, &coalesced) {
-                Ok(()) => {
-                    self.save_settings();
-                    if key == "rail_collapsed" || key == "vertical_tabs" {
-                        self.apply_layout();
-                    }
-                    let payload = self.settings_payload();
-                    self.emit("state.settings", payload);
-                    self.emit_tabs();
-                }
-                Err(e) => self.note(format!("settings from page: {e}")),
-            }
-        }
-
-        let display = if url.starts_with("asset://shell/pages/newtab.html") {
+        let display = if host::is_internal_page(url, "newtab.html") {
             tabs::NEWTAB_URL.to_string()
-        } else if url.starts_with("asset://shell/pages/settings.html") {
+        } else if host::is_internal_page(url, "settings.html") {
             "native://settings".to_string()
         } else {
             url.to_string()
@@ -2933,7 +3029,7 @@ impl AppState {
                 t.url = display;
                 changed = true;
             }
-            t.loading = false;
+            t.loading = true;
         }
         let (back, fwd) = match self.live.get(&id) {
             Some(live) => (
@@ -2945,16 +3041,6 @@ impl AppState {
         if let Some(t) = self.tabs.get_mut(id) {
             t.can_go_back = back;
             t.can_go_forward = fwd;
-        }
-
-        // Scroll restore: applied once, failure logged, never claimed (§6.4).
-        if let Some(live) = self.live.get_mut(&id) {
-            if let Some(y) = live.pending_scroll.take() {
-                let script = format!("try{{window.scrollTo(0,{y})}}catch(e){{}}");
-                if let Err(e) = live.webview.evaluate_script(&script) {
-                    self.note(format!("scroll restore failed for tab {}: {e}", id.0));
-                }
-            }
         }
 
         if changed {
@@ -3012,6 +3098,7 @@ impl AppState {
 }
 
 /// Decode a `MSG` into (vk, mods) and consult `keys::resolve`.
+#[cfg(windows)]
 fn dispatch_accelerator(shared: &Shared, msg: *const std::ffi::c_void) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_SYSKEYDOWN};
     use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;

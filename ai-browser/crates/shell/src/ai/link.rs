@@ -70,17 +70,14 @@ pub struct Link {
 impl Link {
     /// Start the engine thread and begin delivering its frames. `on_frame` runs on
     /// the reader thread, so it must only forward (post to the event loop).
-    /// `envs` are secrets the engine reads from the environment (the API key); they
-    /// are applied to this process because the engine shares it.
+    /// Credentials belong only to this engine instance, never the process environment.
     pub fn spawn(
         config: &Path,
         envs: &[(String, String)],
         on_frame: impl Fn(Frame) + Send + 'static,
         on_closed: impl FnOnce(String) + Send + 'static,
     ) -> Result<Link, Failure> {
-        for (key, value) in envs {
-            std::env::set_var(key, value);
-        }
+        let credentials = envs.iter().cloned().collect();
         let (to_engine, engine_in) = channel::<Vec<u8>>();
         let (engine_out, from_engine) = channel::<Vec<u8>>();
         let running = Arc::new(AtomicBool::new(true));
@@ -93,7 +90,7 @@ impl Link {
                 let input = BufReader::new(ChannelReader { rx: engine_in, chunk: Vec::new(), pos: 0 });
                 let output: Box<dyn Write + Send> = Box::new(ChannelWriter(engine_out));
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    ai_utility::server::run(input, output, &config)
+                    ai_utility::server::run_with_credentials(input, output, &config, credentials)
                 }));
                 if outcome.is_err() {
                     eprintln!("ai engine: panicked; the browser is unaffected");

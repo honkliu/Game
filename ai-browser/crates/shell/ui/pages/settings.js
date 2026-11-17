@@ -1,10 +1,7 @@
 // Settings page (§4.8), rendered in an unprivileged page webview.
 //
-// It has no host bridge, so changes are applied by navigating the *fragment*:
-//   asset://shell/pages/settings.html#set=theme%3Ddark
-// The host's navigation handler sees a settings URL with `set=` and applies it
-// without a real navigation. That keeps the page unprivileged and the control
-// state host-owned.
+// Only the embedded settings document can send these bounded settings messages.
+// It never receives the privileged shell command bridge.
 
 (() => {
   'use strict';
@@ -18,8 +15,6 @@
   }
 
   const frag = readFragment();
-  const tpl = localStorage.getItem('native.search_template');
-  if (tpl) document.getElementById('search_template').value = tpl;
 
   // The host appends the current settings to the fragment before navigation,
   // so a reload still shows the true state; without it the defaults are shown
@@ -60,18 +55,36 @@
     const count = document.getElementById('history_count');
     if (count) count.textContent = s.history_count >= 0 ? String(s.history_count) : 'unavailable';
     const build = document.getElementById('build');
-    if (build) build.textContent = `WebView2 runtime: ${s.webview2_version || 'unknown'}`;
+    if (build) build.textContent = `${s.engine_name || 'WebView2'} runtime: ${s.webview2_version || 'unknown'}`;
     const data = document.getElementById('data_note');
-    if (data) data.textContent = '%LOCALAPPDATA%\\native-browser';
+    if (data) data.textContent = s.data_dir || '%LOCALAPPDATA%\\native-browser';
     document.documentElement.dataset.theme =
       (s.theme === 'system' ? (s.system_dark ? 'dark' : 'light') : s.theme) || 'light';
   }
 
   applyInitial(initial);
 
+  const resultEl = document.createElement('p');
+  resultEl.setAttribute('role', 'status');
+  document.querySelector('main').appendChild(resultEl);
+  window.__settingsResult = (result) => {
+    resultEl.textContent = result.ok ? 'Saved.' : (result.error || 'Could not save setting.');
+    if (result.ok) {
+      applyInitial(result.settings);
+      const bytes = new TextEncoder().encode(JSON.stringify(result.settings));
+      const encoded = btoa(Array.from(bytes, c => String.fromCharCode(c)).join(''))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+      history.replaceState(null, '', '#state=' + encoded);
+    }
+  };
+
   function send(key, value) {
-    const payload = `${key}=${encodeURIComponent(String(value))}`;
-    location.hash = `set=${encodeURIComponent(payload)}`;
+    try {
+      resultEl.textContent = 'Saving...';
+      window.ipc.postMessage(JSON.stringify({ ai: 'settings', key, value }));
+    } catch (error) {
+      resultEl.textContent = 'Settings bridge is unavailable. Reopen Settings and try again.';
+    }
   }
 
   for (const r of document.querySelectorAll('input[name="theme"]')) {
@@ -98,7 +111,6 @@
       return;
     }
     tplInput.removeAttribute('aria-invalid');
-    localStorage.setItem('native.search_template', tplInput.value);
     send('search_template', tplInput.value);
   });
 
@@ -109,10 +121,6 @@
   document.getElementById('download_dir').addEventListener('change', (e) => send('download_dir', e.target.value));
 
   document.getElementById('open_folder').addEventListener('click', () => {
-    // Without a bridge the page cannot open Explorer. Say so instead of
-    // silently doing nothing; the keyboard path is the Advanced panel in the
-    // shell menu, which has the host bridge.
-    const note = document.getElementById('data_note');
-    if (note) note.textContent = 'Open via the shell menu → Settings → Open data folder (this page cannot open Explorer)';
+    send('open_folder', true);
   });
 })();

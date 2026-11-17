@@ -1,7 +1,7 @@
 //! Host-side URL construction for internal pages and search.
 //!
-//! Page webviews get no host bridge (§6.4), so anything a page needs arrives in
-//! its URL fragment. These builders are pure so they are unit-testable.
+//! Internal pages receive initial state in URL fragments, not a command bridge.
+//! Settings writes use a separate, origin-checked message channel.
 
 use crate::history::HistoryEntry;
 use crate::omnibox;
@@ -59,6 +59,8 @@ pub fn settings_url(settings: &settings::Settings, system_dark: bool, history_co
         "download_dir": settings.download_dir,
         "history_count": history_count,
         "webview2_version": webview2_version,
+        "engine_name": crate::platform::ENGINE_NAME,
+        "data_dir": crate::platform::data_dir(),
     });
     format!("asset://shell/pages/settings.html#state={}", b64url(&payload.to_string()))
 }
@@ -73,56 +75,10 @@ pub fn error_url(code: &str, url: &str, navigation_id: u64) -> String {
     )
 }
 
-/// Parse the `#set=key%3Dvalue` fragment a settings page navigates to.
-/// Returns `(key, value)` when the URL is the settings page carrying a change.
-pub fn settings_change(url: &str) -> Option<(String, String)> {
-    if !url.starts_with("asset://shell/pages/settings.html") {
-        return None;
-    }
-    let hash = url.split_once('#')?.1;
-    let mut raw = None;
-    for pair in hash.split('&') {
-        if let Some(v) = pair.strip_prefix("set=") {
-            raw = Some(percent_decode(v));
-        }
-    }
-    let raw = raw?;
-    let (k, v) = raw.split_once('=')?;
-    Some((k.to_string(), v.to_string()))
-}
-
-/// Minimal percent-decoding for the settings fragment (no crate needed for
-/// the small, well-formed payloads the host itself produces).
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
-                match u8::from_str_radix(hex, 16) {
-                    Ok(b) => {
-                        out.push(b);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push(bytes[i]);
-                        i += 1;
-                    }
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+pub fn is_internal_page(url: &str, page: &str) -> bool {
+    ["asset://shell/pages/", "http://asset.shell/pages/", "https://asset.shell/pages/"]
+        .iter().filter_map(|prefix| url.strip_prefix(prefix))
+        .any(|rest| rest.split(['#', '?']).next() == Some(page))
 }
 
 /// Resolve what the omnibox should load, and whether the address was typed.
@@ -186,23 +142,19 @@ mod tests {
     }
 
     #[test]
-    fn settings_change_parses_only_settings_page() {
-        let url = "asset://shell/pages/settings.html#set=theme%3Ddark";
-        assert_eq!(
-            settings_change(url),
-            Some(("theme".into(), "dark".into()))
-        );
-        assert_eq!(settings_change("asset://shell/index.html#set=a%3Db"), None);
-        assert_eq!(settings_change("https://example.com/#set=a%3Db"), None);
-        assert_eq!(settings_change("asset://shell/pages/settings.html"), None);
-    }
-
-    #[test]
-    fn percent_decode_handles_utf8_and_plus() {
-        assert_eq!(percent_decode("a%20b+c"), "a b c");
-        assert_eq!(percent_decode("caf%C3%A9"), "café");
-        // Malformed escapes pass through rather than panicking.
-        assert_eq!(percent_decode("100%"), "100%");
+    fn internal_pages_require_the_exact_origin_and_path() {
+        for prefix in ["asset://shell", "http://asset.shell", "https://asset.shell"] {
+            assert!(is_internal_page(&format!("{prefix}/pages/settings.html#state=abc"), "settings.html"));
+        }
+        for url in [
+            "https://example.com/pages/settings.html",
+            "https://asset.shell.example.com/pages/settings.html",
+            "https://asset.shell@example.com/pages/settings.html",
+            "http://asset.shell/pages/settings.html/extra",
+            "asset://shell/index.html",
+        ] {
+            assert!(!is_internal_page(url, "settings.html"), "{url}");
+        }
     }
 
     #[test]

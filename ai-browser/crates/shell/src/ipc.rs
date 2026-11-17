@@ -18,6 +18,23 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    Shell,
+    Overlay,
+    Sidebar,
+}
+
+impl Surface {
+    pub fn target(self) -> &'static str {
+        match self {
+            Self::Shell => "shell",
+            Self::Overlay => "overlay",
+            Self::Sidebar => "sidebar",
+        }
+    }
+}
+
 /// A command from the UI shell.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
@@ -86,6 +103,7 @@ impl<'a> Event<'a> {
 /// Every command name the host accepts. An exhaustive match in `app.rs` means
 /// adding a command here forces an implementation.
 pub const COMMANDS: &[&str] = &[
+    "ai.session",
     "nav.open",
     "nav.back",
     "nav.forward",
@@ -125,6 +143,7 @@ pub const COMMANDS: &[&str] = &[
     "download.clear_list",
     "settings.update",
     "settings.open_folder",
+    "settings.open",
     "shell.focus_omnibox",
     "shell.toggle_rail",
     "shell.open_palette",

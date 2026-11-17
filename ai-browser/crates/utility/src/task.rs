@@ -32,6 +32,7 @@ use crate::tabs::Tabs;
 const MAX_PROMPT_LINKS: usize = 80;
 
 pub struct TaskEnv<'a> {
+    pub credentials: &'a std::collections::HashMap<String, String>,
     pub shell: &'a dyn ShellLink,
     pub tabs: &'a Tabs,
 }
@@ -212,7 +213,7 @@ fn execute(
         ],
     );
 
-    let catalog = Catalog::from_config(config);
+    let catalog = Catalog::from_config_with_credentials(config, env.credentials);
     let host = router::host_of(&snapshot.url);
     let routed = router::route(&RouteInput {
         task,

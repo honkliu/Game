@@ -41,6 +41,7 @@ struct TaskEntry {
 }
 
 struct Shared {
+    credentials: HashMap<String, String>,
     out: Mutex<Box<dyn Write + Send>>,
     pending: Mutex<HashMap<u64, Sender<ResponsePayload>>>,
     next_id: AtomicU64,
@@ -146,7 +147,7 @@ fn handle_complete(shared: &Arc<Shared>, workers: &mut Vec<JoinHandle<()>>, id: 
 
     let worker_shared = Arc::clone(shared);
     let spawned = std::thread::Builder::new().name(format!("task-{}", view.task.0)).spawn(move || {
-        let env = TaskEnv { shell: &*worker_shared, tabs: &worker_shared.tabs };
+        let env = TaskEnv { shell: &*worker_shared, tabs: &worker_shared.tabs, credentials: &worker_shared.credentials };
         task::run(&env, &view, &control, &config, config_failure);
         lock(&worker_shared.tasks).remove(&view.task.0);
     });
@@ -175,7 +176,7 @@ fn handle_agent_run(shared: &Arc<Shared>, workers: &mut Vec<JoinHandle<()>>, id:
     let worker = Arc::clone(shared);
     let spawned = std::thread::Builder::new().name(format!("agent-{run_id}")).spawn(move || {
         let (config, _) = task::load_config(&worker.config_path);
-        let catalog = Catalog::from_config(&config);
+        let catalog = Catalog::from_config_with_credentials(&config, &worker.credentials);
         worker.hub.sync(&worker.agent_store.config().mcp_servers);
         let env = agent::Env {
             shell: &*worker,
@@ -218,7 +219,7 @@ fn handle_agent_control(shared: &Arc<Shared>, workers: &mut Vec<JoinHandle<()>>,
             let worker = Arc::clone(shared);
             let spawned = std::thread::Builder::new().name("agent-admin".into()).spawn(move || {
                 let (config, _) = task::load_config(&worker.config_path);
-                let catalog = Catalog::from_config(&config);
+                let catalog = Catalog::from_config_with_credentials(&config, &worker.credentials);
                 match agent::admin::handle(&worker.agent_store, &worker.hub, &catalog, &params) {
                     Ok(value) => respond(&worker, id, &value),
                     Err(message) => worker.write(&Frame::failure(id, Failure::unsupported("agent.control_failed").with_detail(message))),
@@ -308,7 +309,7 @@ fn handle_frame(shared: &Arc<Shared>, workers: &mut Vec<JoinHandle<()>>, frame: 
             Method::AgentControl => handle_agent_control(shared, workers, request.id, request.params),
             Method::ListModels => {
                 let (config, _) = task::load_config(&shared.config_path);
-                respond(shared, request.id, &Catalog::from_config(&config).list());
+                respond(shared, request.id, &Catalog::from_config_with_credentials(&config, &shared.credentials).list());
             }
             Method::Ping => respond(shared, request.id, &"pong"),
             _ => shared.write(&Frame::failure(request.id, Failure::unsupported("method.not_served"))),
@@ -319,7 +320,13 @@ fn handle_frame(shared: &Arc<Shared>, workers: &mut Vec<JoinHandle<()>>, frame: 
 /// Serves frames until `input` ends, then stops every task and waits for the
 /// workers (each still sends its one `task.finish`).
 pub fn run(input: impl BufRead, output: Box<dyn Write + Send>, config_path: &Path) -> std::io::Result<()> {
+    run_with_credentials(input, output, config_path, HashMap::new())
+}
+
+pub fn run_with_credentials(input: impl BufRead, output: Box<dyn Write + Send>, config_path: &Path,
+    credentials: HashMap<String, String>) -> std::io::Result<()> {
     let shared = Arc::new(Shared {
+        credentials,
         out: Mutex::new(output),
         pending: Mutex::new(HashMap::new()),
         next_id: AtomicU64::new(1),

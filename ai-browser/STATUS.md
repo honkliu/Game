@@ -3,10 +3,12 @@
 Spec: `../ai-native-browser-design-and-engineering-backlog.md`.
 
 ## Architecture
-- `crates/shell`: the browser and the only executable (`browser.exe`). Rust, WebView2 via wry/tao. It owns identity, tabs, policy and action dispatch. The AI engine (`crates/utility`, library `ai-engine`) runs as a thread inside the same process.
+- `crates/shell`: the browser and the only executable (`browser.exe` on Windows, `browser` on macOS). Rust, WebView2/WKWebView via wry/tao. It owns identity, tabs, policy and action dispatch. The AI engine (`crates/utility`, library `ai-engine`) runs as a thread inside the same process.
 - `crates/contract`: the shared message contract.
 - `ui/`: the docked AI pane, TypeScript + Preact + signals, built with Vite into `crates/shell/ui/sidebar/` and **embedded in `browser.exe`** by `crates/shell/build.rs` (which runs `npm run build`; set `AI_BROWSER_SKIP_UI_BUILD=1` to skip, `AI_BROWSER_UI_DIR=<dir>` to serve shell assets from disk).
-- Kernel: WebView2.
+- Kernel: WebView2 on Windows; system WKWebView on macOS 14+. The AI engine and UI
+  are shared. Platform adapters, build instructions and verification boundaries:
+  [macOS support](docs/MACOS.md).
 
 ## AI pane (Edge-Copilot style)
 - **Agent** switch in the header (not tabs). Off: cited answers about the page. On: the tool-calling agent (browse, read, click, type, fetch, search, skills, MCP) with approvals.
@@ -25,23 +27,29 @@ Spec: `../ai-native-browser-design-and-engineering-backlog.md`.
 - Each cell is a real page with its own history and is content only: no header, no address box, no border (cells are 2 px apart; only the focused cell shows a ring). Click anywhere in the canvas to focus the nearest cell. The shared address bar, find, zoom (toolbar and Ctrl+wheel) and the AI context follow the focused cell. A shared canvas bar reshapes the grid (extra pages close). Links opening new windows fill the next empty cell. The agent targets cells by 0-based `row`/`col`. The grid is saved with the session.
 
 ## PDF viewer
-- PDF links and addresses (`*.pdf`) open in a bundled pdf.js viewer (`pdf://` protocol, `ui/pdf/`) instead of WebView2's plugin viewer, so selected text and page text reach the AI like any page. The tab keeps the real PDF URL. Known limits: cookies are not sent when fetching the PDF; PDFs without a `.pdf` extension still use the built-in viewer. Tested in `e2e/suite5.mjs`.
+- PDF links and addresses (`*.pdf`) open in a bundled pdf.js viewer (`pdf://` protocol, `ui/pdf/`) instead of WebView2's plugin viewer, so selected text and page text reach the AI like any page. The tab keeps the real PDF URL. Native fetching uses the page's browser cookies, never forwards them to another origin, and limits loads to 64 MiB with cancellation and deadlines. Loading errors are visible. Windows cookie-authenticated loading, redirect isolation, limits, text selection and PDF find are covered by `e2e/suite5.mjs`. macOS parent-domain cookie handling still needs native validation.
 
 ## Window chrome (Chrome layout)
-- Frameless window: a 36 px tab strip is the title bar (tabs, `+`, new canvas, drag area, min/max/close), then one 36 px address row (back/forward/reload, omnibox, zoom − % +, Ask AI, downloads, menu), then the page. Horizontal tabs are the default; Settings `vertical_tabs` switches to the old rail. Find-in-page UI is gone (the zoom control replaced it). Resize handles are on the top edge and corners; double-click the drag area to maximize. Tested in `e2e/suite7.mjs`.
+- Frameless window: a 36 px tab strip is the title bar (tabs, `+`, new canvas, drag area, min/max/close), then one 36 px address row (back/forward/reload, omnibox, zoom − % +, Ask AI, downloads, menu), then the page. Horizontal tabs are the default; Settings `vertical_tabs` switches to the old rail. The browser menu opens a reusable Settings tab; Ctrl+K opens the command palette. Ctrl+F opens find with case, whole-word and highlight controls. Resize handles are on the top edge and corners; double-click the drag area to maximize.
 - Chat/agent replies render Markdown (tables, lists, code, links); links open in a new tab. Text selection is reported only after the mouse is released. Tested in `e2e/suite6.mjs`.
 
 ## Verified (automated)
 - `cargo test --workspace` (all pass), `npm test` in `ui` (Vitest), Playwright e2e over CDP: `e2e/suite.mjs` … `suite5.mjs` (shell, ask, multi-tab, agent loop, approvals, prompts, skills, MCP, live context, editable context, selection, context panel, history, canvas: layout, focus, real-click focus, zoom, reshape, limits, clear, pop-ups, close, agent tool; PDF viewer; canvas restore after restart checked by hand script). The real-click tests can fail if another window steals the foreground while they run.
 - Run e2e: build into `%TEMP%\ai-target`, `set BROWSER_EXE`, then `node e2e\suiteN.mjs`.
+- `e2e/suite12.mjs` exercises real menu-to-Settings opening, save/reload and failed-save reporting, startup/existing-view new tabs without duplicate search controls, local-history inline completion and explicit selection, configured search, all-six-cell zoom/return, edited warm tabs, HTML find, and hidden/reloaded AI transcript recovery. The focused fixture-only regressions run with `npm --prefix e2e ci` then `npm --prefix e2e test` after setting `BROWSER_EXE`; Windows CI runs the same command.
 
 ## Not verified or not done
+- Native macOS runtime validation is pending. The WKWebView backend and native smoke test cross-check from Windows; the workflow is configured to run and package on Apple Silicon and Intel Macs.
 - The real Qwen endpoint was exercised only through earlier manual runs, not in e2e. MCP stdio on Windows and real MCP servers, click/fill on arbitrary real sites, and waking sleeping tabs are untested.
-- Web search depends on DuckDuckGo HTML. MCP tokens and the API key are stored in plaintext (key encryption not built).
+- Submitted searches use the configurable `search_template` (DuckDuckGo HTML by default); address completion queries local history, not a network suggestion service.
+- Provider keys use the Windows/macOS credential vault, with legacy `ai.key` migration. Native vault migration and restart behavior still need runtime validation. MCP tokens and conversation history remain on disk; their privacy/retention improvements are not complete.
 - Not built: anchored annotations (§2.1), result strip (§2.4), Chromium fork, accessibility tree.
 
 ## Run
 `cd ai-browser; cargo run` (needs Node for the first build). Endpoint, model and key: pane header, Settings > Model.
+
+On macOS, run `bash run-ai-browser.sh` from the repository root. Native app
+packaging: `bash tools/package-macos.sh` from `ai-browser`.
 
 ## PDF cells
 - Extensionless PDF URLs (e.g. arxiv.org/pdf/ID) are detected via contentType and routed to the bundled viewer.

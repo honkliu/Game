@@ -22,6 +22,8 @@ serde_json = "1.0.154"
 # Streaming SSE over rustls. Redirects are disabled in code so the API key can
 # never follow a redirect to another host.
 ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
+keyring = { version = "=3.6.3", features = ["windows-native", "apple-native"] }
+sha2 = "0.10"
 
 [lints.rust]
 unsafe_code = "forbid"

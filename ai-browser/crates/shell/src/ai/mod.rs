@@ -39,5 +39,6 @@ pub mod processes;
 pub mod proof;
 pub mod provider;
 pub mod session;
+pub mod ui_state;
 
-pub use crate::webview2::{create_shared_environment, environments_constructed};
+pub use crate::platform::{create_shared_environment, environments_constructed};

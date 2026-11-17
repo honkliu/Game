@@ -4,14 +4,19 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "AI-native browser: the WebView2 shell and the single executable entry point"
+description = "AI-native browser: WebView2 on Windows and WKWebView on macOS"
 
 [[bin]]
 name = "browser"
 path = "src/main.rs"
 
+[[test]]
+name = "webkit"
+path = "tests/webkit.rs"
+harness = false
+
 [dependencies]
-# windowing + webview (WebView2 on Windows)
+# windowing + webview (WebView2 on Windows, WKWebView on macOS)
 wry = "=0.57.2"
 tao = "=0.37.2"
 # typed IPC envelope + JSON state files
@@ -29,8 +34,18 @@ ai-utility = { path = "../utility" }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 # url-template encoding (%s substitution) for the search engine
 percent-encoding = "2"
+url = "2"
 # The PDF viewer fetches documents for pages (same TLS stack as the AI utility).
 ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSAlert", "NSApplication", "NSEvent", "NSMenu", "NSMenuItem", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSObject", "NSProcessInfo", "NSString"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "WKContentWorld", "WKFrameInfo", "WKWebView"] }
+
+[target.'cfg(windows)'.dependencies]
 # Shared WebView2 environment. wry's `WebContext` is a zero-sized token on
 # Windows (see wry-0.57.2/src/web_context.rs), so every webview would otherwise
 # create its own browser process. Creating one environment ourselves and passing

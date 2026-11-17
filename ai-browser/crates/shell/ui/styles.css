@@ -231,6 +231,7 @@ kbd {
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-surface);
 }
+.find-bar[hidden] { display: none; }
 .find-glyph { width: 14px; height: 14px; color: var(--fg-muted); flex: none; }
 .find-input {
   flex: 0 1 320px;
@@ -750,8 +751,7 @@ kbd {
 .canvas-bar { display: flex; align-items: center; gap: 2px; padding-right: 6px; margin-right: 4px; border-right: 1px solid var(--border-subtle); }
 .canvas-bar[hidden] { display: none; }
 .cv-empty { position: absolute; display: flex; align-items: center; justify-content: center; pointer-events: auto; cursor: pointer; background: var(--bg-surface); color: var(--fg-muted); font: var(--text-sm); }
-/* ── find-in-page is replaced by the zoom control ───────────────────── */
-.find-bar { display: none !important; }
+/* ── page zoom ─────────────────────────────────────────────────────── */
 .zoom-ctl { display: flex; align-items: center; flex: none; }
 .zoom-label {
   min-width: 44px; height: 28px; padding: 0 4px;

@@ -227,7 +227,7 @@ export interface AskTurn {
 
 export type Turn = AgentTurn | AskTurn;
 
-export type AgentEvent =
+export type AgentEvent = { state_seq?: number } & (
   | { type: 'start'; run_id: number; model?: string }
   | { type: 'round'; run_id: number; n: number }
   | { type: 'delta'; run_id: number; text: string }
@@ -238,4 +238,4 @@ export type AgentEvent =
   | { type: 'compacted'; run_id: number }
   | { type: 'context'; run_id: number; content_chars?: number | null; content_sent?: number | null; headings?: number }
   | { type: 'done'; run_id: number; text?: string; rounds?: number; loaded_skills?: string[] }
-  | { type: 'error'; run_id: number; message?: string; stopped?: boolean };
+  | { type: 'error'; run_id: number; message?: string; stopped?: boolean });

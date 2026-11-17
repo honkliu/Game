@@ -9,12 +9,45 @@
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use std::borrow::Cow;
 use std::io::Read;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use wry::http::{header, Request, Response, StatusCode};
 use wry::RequestAsyncResponder;
 
+const MAX_PDF_BYTES: usize = 64 * 1024 * 1024;
+static ACTIVE_FETCHES: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Default)]
+pub struct PdfSession(Arc<Mutex<Option<Arc<AtomicBool>>>>);
+
+impl PdfSession {
+    pub fn cancel(&self) {
+        if let Some(cancelled) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            cancelled.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn begin(&self) -> Arc<AtomicBool> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        if let Some(previous) = self.0.lock().unwrap_or_else(|e| e.into_inner()).replace(cancelled.clone()) {
+            previous.store(true, Ordering::Relaxed);
+        }
+        cancelled
+    }
+}
+
+struct FetchPermit;
+impl Drop for FetchPermit {
+    fn drop(&mut self) { ACTIVE_FETCHES.fetch_sub(1, Ordering::Relaxed); }
+}
+
 /// What a page webview sees as the viewer's origin (`pdf://` is mapped to this on
 /// Windows when the HTTPS scheme option is off).
+#[cfg(windows)]
 const VIEWER_BASE: &str = "http://pdf.localhost/";
+#[cfg(target_os = "macos")]
+const VIEWER_BASE: &str = "pdf://localhost/";
 
 /// A link to a PDF the viewer can open: http(s) or a local file whose path ends in
 /// `.pdf`.
@@ -67,6 +100,15 @@ fn failure(status: StatusCode, message: &str) -> Response<Cow<'static, [u8]>> {
 /// document's bytes to the viewer (fetched here, so the viewer is not subject to
 /// the document site's CORS policy).
 pub fn serve(request: Request<Vec<u8>>, responder: RequestAsyncResponder) {
+    serve_authenticated(request, responder, Vec::new(), &PdfSession::default());
+}
+
+pub fn requested_source(request: &Request<Vec<u8>>) -> String {
+    request.uri().query().and_then(|q| query_param(q, "u")).unwrap_or_default()
+}
+
+pub fn serve_authenticated(request: Request<Vec<u8>>, responder: RequestAsyncResponder,
+    cookies: Vec<wry::cookie::Cookie<'static>>, session: &PdfSession) {
     let path = request.uri().path().to_string();
     if path != "/data" {
         let name = path.trim_start_matches('/');
@@ -77,36 +119,102 @@ pub fn serve(request: Request<Vec<u8>>, responder: RequestAsyncResponder) {
         responder.respond(response);
         return;
     }
-    let source = request.uri().query().and_then(|q| query_param(q, "u")).unwrap_or_default();
+    let source = requested_source(&request);
+    if ACTIVE_FETCHES.compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed).is_err()
+        && ACTIVE_FETCHES.compare_exchange(1, 2, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+        responder.respond(failure(StatusCode::TOO_MANY_REQUESTS, "Two PDFs are already loading; retry shortly."));
+        return;
+    }
+    let permit = FetchPermit;
+    let cancelled = session.begin();
     // A download can take long; never hold the UI thread.
     std::thread::spawn(move || {
-        responder.respond(match fetch(&source) {
+        let _permit = permit;
+        responder.respond(match fetch_authenticated(&source, &cookies, &cancelled) {
             Ok(bytes) => reply(StatusCode::OK, "application/pdf", Cow::Owned(bytes)),
             Err(e) => failure(StatusCode::BAD_GATEWAY, &e),
         });
     });
 }
 
+#[cfg(test)]
 fn fetch(source: &str) -> Result<Vec<u8>, String> {
-    if let Some(rest) = source.strip_prefix("file:///") {
-        let path = percent_decode_str(rest).decode_utf8_lossy().into_owned();
-        return std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"));
+    fetch_authenticated(source, &[], &AtomicBool::new(false))
+}
+
+fn read_bounded(mut reader: impl Read, cancelled: &AtomicBool, started: Instant) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 32 * 1024];
+    loop {
+        if cancelled.load(Ordering::Relaxed) { return Err("PDF loading cancelled".into()); }
+        if started.elapsed() > Duration::from_secs(90) { return Err("PDF loading timed out".into()); }
+        let count = reader.read(&mut buffer).map_err(|e| e.to_string())?;
+        if count == 0 { return Ok(bytes); }
+        if bytes.len() + count > MAX_PDF_BYTES { return Err("PDF exceeds the 64 MiB limit".into()); }
+        bytes.extend_from_slice(&buffer[..count]);
     }
-    if !(source.starts_with("http://") || source.starts_with("https://")) {
-        return Err("unsupported address".to_string());
+}
+
+fn cookie_header(cookies: &[wry::cookie::Cookie<'static>], path: &str) -> String {
+    let mut matching: Vec<_> = cookies.iter().filter(|cookie| {
+        let scope = cookie.path().unwrap_or("/");
+        path == scope || (path.starts_with(scope) && (scope.ends_with('/') || path.as_bytes().get(scope.len()) == Some(&b'/')))
+    }).collect();
+    matching.sort_by_key(|cookie| std::cmp::Reverse(cookie.path().unwrap_or("/").len()));
+    matching.into_iter().map(|cookie| format!("{}={}", cookie.name(), cookie.value())).collect::<Vec<_>>().join("; ")
+}
+
+fn fetch_authenticated(source: &str, cookies: &[wry::cookie::Cookie<'static>], cancelled: &AtomicBool) -> Result<Vec<u8>, String> {
+    let started = Instant::now();
+    let initial = url::Url::parse(source).map_err(|_| "invalid PDF address")?;
+    if initial.scheme() == "file" {
+        let path = initial.to_file_path().map_err(|_| "invalid local PDF address")?;
+        let file = std::fs::File::open(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        return read_bounded(file, cancelled, started);
+    }
+    if !matches!(initial.scheme(), "http" | "https") || !initial.username().is_empty() || initial.password().is_some() {
+        return Err("unsupported PDF address".into());
     }
     let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(20))
-        .timeout_read(std::time::Duration::from_secs(60))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36")
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(3))
+        .timeout(Duration::from_secs(90))
+        .redirects(0)
+        .user_agent("AI-Browser/0.1")
         .build();
-    let response = agent.get(source).call().map_err(|e| match e {
-        ureq::Error::Status(code, _) => format!("the server answered HTTP {code}"),
-        ureq::Error::Transport(t) => format!("could not connect ({:?})", t.kind()),
-    })?;
-    let mut bytes = Vec::new();
-    response.into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    Ok(bytes)
+    let mut current = initial.clone();
+    for _ in 0..=5 {
+        if cancelled.load(Ordering::Relaxed) { return Err("PDF loading cancelled".into()); }
+        let mut request = agent.get(current.as_str()).set("Accept", "application/pdf");
+        if current.origin() == initial.origin() {
+            let header = cookie_header(cookies, current.path());
+            if !header.is_empty() { request = request.set("Cookie", &header); }
+        }
+        let response = request.call().map_err(|e| match e {
+            ureq::Error::Status(code, _) => format!("the server answered HTTP {code}"),
+            ureq::Error::Transport(t) => format!("could not connect ({:?})", t.kind()),
+        })?;
+        if matches!(response.status(), 301 | 302 | 303 | 307 | 308) {
+            let next = current.join(response.header("Location").ok_or("redirect has no destination")?)
+                .map_err(|_| "invalid redirect")?;
+            if !matches!(next.scheme(), "http" | "https") || (current.scheme() == "https" && next.scheme() != "https")
+                || !next.username().is_empty() || next.password().is_some() {
+                return Err("unsafe PDF redirect".into());
+            }
+            current = next;
+            continue;
+        }
+        if response.header("Content-Length").and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|size| size > MAX_PDF_BYTES as u64) {
+            return Err("PDF exceeds the 64 MiB limit".into());
+        }
+        let bytes = read_bounded(response.into_reader(), cancelled, started)?;
+        if !bytes.windows(5).take(1024).any(|window| window == b"%PDF-") {
+            return Err("the server returned a non-PDF response (sign in to the site and retry)".into());
+        }
+        return Ok(bytes);
+    }
+    Err("too many PDF redirects".into())
 }
 
 #[cfg(test)]
@@ -128,5 +236,17 @@ mod tests {
         let src = "https://x.org/a b/ü.pdf?x=1&y=2#page=4";
         assert_eq!(source_of(&viewer_url(src)).as_deref(), Some(src));
         assert_eq!(source_of("https://x.org/"), None);
+    }
+
+    #[test]
+    fn reads_local_pdf_files_with_escaped_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("local document.pdf");
+        std::fs::write(&file, b"%PDF-1.4 local").unwrap();
+        let path = file.to_string_lossy().replace('\\', "/");
+        let prefix = if cfg!(windows) { "file:///" } else { "file://" };
+        let url = format!("{prefix}{}", path.replace(' ', "%20"));
+        assert_eq!(fetch(&url).unwrap(), b"%PDF-1.4 local");
+        assert!(is_pdf_url(&url));
     }
 }

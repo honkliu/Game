@@ -13,8 +13,17 @@
   function invoke(cmd, payload) {
     const id = nextId++;
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-      window.ipc.postMessage(JSON.stringify({ id, cmd, payload: payload || {} }));
+      const timer = setTimeout(() => {
+        if (pending.delete(id)) reject(new Error(cmd + ' timed out'));
+      }, 150000);
+      pending.set(id, { resolve, reject, timer });
+      try {
+        window.ipc.postMessage(JSON.stringify({ id, cmd, payload: payload || {} }));
+      } catch (e) {
+        pending.delete(id);
+        clearTimeout(timer);
+        reject(e);
+      }
     });
   }
 
@@ -35,6 +44,7 @@
       const entry = pending.get(reply.id);
       if (!entry) return;
       pending.delete(reply.id);
+      clearTimeout(entry.timer);
       if (reply.ok) entry.resolve(reply.data);
       else entry.reject(new Error(reply.error || 'command failed'));
     },

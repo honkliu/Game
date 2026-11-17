@@ -256,9 +256,10 @@ pub fn save(path: &Path, settings: &Settings) -> std::io::Result<()> {
 /// `%USERPROFILE%\Downloads`, which is where Windows puts it for the default
 /// shell layout; falls back to the profile root.
 pub fn default_download_dir() -> String {
-    if let Ok(profile) = std::env::var("USERPROFILE") {
+    let home = if cfg!(target_os = "macos") { "HOME" } else { "USERPROFILE" };
+    if let Ok(profile) = std::env::var(home) {
         let downloads = PathBuf::from(&profile).join("Downloads");
-        if downloads.is_dir() {
+        if cfg!(target_os = "macos") || downloads.is_dir() {
             return downloads.display().to_string();
         }
         return profile;

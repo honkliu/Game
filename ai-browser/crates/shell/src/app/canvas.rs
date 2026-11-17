@@ -541,6 +541,10 @@ impl AppState {
         // Geometry is in logical units; the cursor and window origin are physical.
         let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0).max(0.1);
         let (cx, cy) = (((x - origin.x) as f64 / scale) as i32, ((y - origin.y) as f64 / scale) as i32);
+        self.canvas_local_mouse_down(cx, cy);
+    }
+
+    pub(super) fn canvas_local_mouse_down(&mut self, cx: i32, cy: i32) {
         let area = self.canvas_area();
         if cx < area.x || cx >= area.x + area.w || cy < area.y || cy >= area.y + area.h {
             return;

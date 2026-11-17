@@ -257,10 +257,95 @@ pub fn resolve(vk: u32, mods: Mods, focused_is_input: bool) -> Outcome {
     }
 }
 
+/// Translate AppKit key events without assuming a US keyboard layout for letters.
+pub fn macos_key(code: u16, characters: &str) -> u32 {
+    match code {
+        48 => vk::TAB,
+        53 => vk::ESCAPE,
+        96 => vk::F5,
+        97 => vk::F6,
+        99 => vk::F3,
+        116 => vk::PRIOR,
+        121 => vk::NEXT,
+        123 => vk::LEFT,
+        124 => vk::RIGHT,
+        _ => match characters.chars().next() {
+            Some('+' | '=') => vk::OEM_PLUS,
+            Some('-') => vk::OEM_MINUS,
+            Some(',') => vk::COMMA,
+            Some('[' | '{') => 0xDB,
+            Some(']' | '}') => 0xDD,
+            Some(c) if c.is_ascii_alphanumeric() => c.to_ascii_uppercase() as u32,
+            _ => 0,
+        },
+    }
+}
+
+pub fn resolve_macos(key: u32, command: bool, control: bool, option: bool, shift: bool) -> Outcome {
+    use Shortcut as S;
+    if control && !command && !option && key == vk::TAB {
+        return Outcome::Consume(if shift { S::PrevTab } else { S::NextTab });
+    }
+    if control {
+        return Outcome::Pass;
+    }
+    if command && option {
+        return match key {
+            vk::LEFT => Outcome::Consume(S::PrevTab),
+            vk::RIGHT => Outcome::Consume(S::NextTab),
+            _ => Outcome::Pass,
+        };
+    }
+    // Leave Option text entry, system shortcuts and standard editing to AppKit.
+    if option || (command && matches!(key, vk::H | vk::TAB)) {
+        return Outcome::Pass;
+    }
+    if !command && !matches!(key, vk::ESCAPE | vk::F3 | vk::F5 | vk::F6) {
+        return Outcome::Pass;
+    }
+    if command && key == b'Y' as u32 {
+        return Outcome::Consume(S::OpenHistory { today: false });
+    }
+    if command && matches!(key, vk::OEM_PLUS | vk::OEM_MINUS) {
+        return resolve(key, Mods::CTRL, false);
+    }
+    if command && key == vk::J && shift {
+        return Outcome::Consume(S::OpenDownloads);
+    }
+    if command && matches!(key, 0xDB | 0xDD) {
+        return Outcome::Consume(match (key, shift) {
+            (0xDB, false) => S::PageBack,
+            (0xDD, false) => S::PageForward,
+            (0xDB, true) => S::PrevTab,
+            _ => S::NextTab,
+        });
+    }
+    resolve(key, Mods { ctrl: command, alt: false, shift }, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::vk::*;
     use super::*;
+
+    #[test]
+    fn mac_shortcuts_preserve_editing_and_system_commands() {
+        assert_eq!(resolve_macos(W, true, false, false, false), Outcome::Consume(Shortcut::CloseTab));
+        assert_eq!(resolve_macos(L, true, false, false, false), Outcome::Consume(Shortcut::FocusOmnibox));
+        assert_eq!(resolve_macos(TAB, false, true, false, true), Outcome::Consume(Shortcut::PrevTab));
+        assert_eq!(resolve_macos(LEFT, true, false, true, false), Outcome::Consume(Shortcut::PrevTab));
+        for key in [A, C, V, X, H, TAB, SPACE] {
+            assert_eq!(resolve_macos(key, true, false, false, false), Outcome::Pass);
+        }
+        assert_eq!(resolve_macos(SPACE, false, false, false, false), Outcome::Pass);
+        assert_eq!(resolve_macos(N0 + 2, false, false, true, false), Outcome::Pass);
+        assert_eq!(macos_key(12, "a"), A);
+        assert_eq!(macos_key(48, "\t"), TAB);
+        assert_eq!(macos_key(24, "="), OEM_PLUS);
+        assert_eq!(resolve_macos(OEM_PLUS, true, false, false, true), Outcome::Consume(Shortcut::ZoomIn));
+        assert_eq!(resolve_macos(macos_key(33, "["), true, false, false, false), Outcome::Consume(Shortcut::PageBack));
+        assert_eq!(resolve_macos(macos_key(30, "}"), true, false, false, true), Outcome::Consume(Shortcut::NextTab));
+    }
 
     fn sc(vk_code: u32, m: Mods) -> Option<Shortcut> {
         match resolve(vk_code, m, false) {

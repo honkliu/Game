@@ -18,7 +18,9 @@
 //!
 //! [`sys::CommandLineType::NoTypeArg`]: crate::sys::CommandLineType::NoTypeArg
 
-use crate::sys::{self, CommandLineType};
+use crate::sys;
+#[cfg(windows)]
+use crate::sys::CommandLineType;
 
 /// Image name shared by every WebView2 process, whatever role it is playing.
 const WEBVIEW_IMAGE: &str = "msedgewebview2.exe";
@@ -134,12 +136,15 @@ pub fn measure(root_pid: u32) -> Tree {
     let mut webview_working_set = 0u64;
     for entry in &tree {
         if entry.name.eq_ignore_ascii_case(WEBVIEW_IMAGE) {
+            #[cfg(windows)]
             let role = match sys::command_line_type(entry.pid) {
                 CommandLineType::NoTypeArg => Role::Browser,
                 CommandLineType::TypeArg(value) if value == "renderer" => Role::Renderer,
                 CommandLineType::TypeArg(value) => Role::Child(value),
                 CommandLineType::Unreadable => Role::Unclassified,
             };
+            #[cfg(target_os = "macos")]
+            let role = Role::Unclassified;
             webview_working_set += entry.working_set;
             members.push(Member {
                 pid: entry.pid,

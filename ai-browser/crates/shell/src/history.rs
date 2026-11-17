@@ -249,6 +249,7 @@ pub(crate) const SCHEMA: &str = "
         typed_count INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_history_visited ON history(visited_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_history_url_prefix ON history(url COLLATE NOCASE);
 ";
 
 pub(crate) fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<HistoryEntry> {
@@ -316,6 +317,31 @@ pub(crate) fn recent(conn: &Connection, limit: usize) -> Result<Vec<HistoryEntry
     let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(params![limit as i64], row_to_entry)?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub(crate) fn autocomplete(conn: &Connection, text: &str, limit: usize) -> Result<Vec<HistoryEntry>, StoreError> {
+    let text = text.trim();
+    if text.is_empty() || text.chars().any(char::is_whitespace) || text.starts_with(['>', '?', '/']) {
+        return Ok(Vec::new());
+    }
+    let prefixes = if text.contains("://") {
+        vec![text.to_string()]
+    } else {
+        vec![format!("https://{text}"), format!("https://www.{text}"),
+            format!("http://{text}"), format!("http://www.{text}")]
+    };
+    let sql = format!("{SELECT_COLS} WHERE url LIKE ?1 ESCAPE '\\'
+        ORDER BY typed_count DESC, visit_count DESC, visited_at DESC LIMIT ?2");
+    let mut statement = conn.prepare_cached(&sql)?;
+    let mut rows = Vec::new();
+    for prefix in prefixes {
+        rows.extend(statement.query_map(params![format!("{}%", escape_like(&prefix)), limit as i64], row_to_entry)?
+            .collect::<rusqlite::Result<Vec<_>>>()?);
+    }
+    rows.sort_by_key(|row| std::cmp::Reverse((row.typed_count, row.visit_count, row.visited_at)));
+    rows.dedup_by(|a, b| a.url == b.url);
+    rows.truncate(limit);
+    Ok(rows)
 }
 
 /// Ranked search. The SQL prefilter returns at most 4× `limit` candidates

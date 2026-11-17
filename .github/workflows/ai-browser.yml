@@ -1,0 +1,64 @@
+name: AI Browser
+
+on:
+  push:
+    paths: ['ai-browser/**', 'run-ai-browser.*', '.github/workflows/ai-browser.yml']
+  pull_request:
+    paths: ['ai-browser/**', 'run-ai-browser.*', '.github/workflows/ai-browser.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ai-browser
+        shell: pwsh
+    env:
+      CARGO_INCREMENTAL: '0'
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            ai-browser/ui/package-lock.json
+            ai-browser/e2e/package-lock.json
+      - name: Select stable Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Install UI dependencies
+        run: npm --prefix ui ci --no-audit --no-fund
+      - name: Check UI types
+        run: npm --prefix ui run typecheck
+      - name: Test UI
+        run: npm --prefix ui test
+      - name: Test Rust and native WKWebView integration
+        run: cargo test --locked --workspace
+      - name: Install Windows regression dependencies
+        if: runner.os == 'Windows'
+        run: npm --prefix e2e ci --ignore-scripts --no-audit --no-fund
+      - name: Run Windows browser regressions
+        if: runner.os == 'Windows'
+        env:
+          BROWSER_EXE: '${{ github.workspace }}\ai-browser\target\debug\browser.exe'
+        run: cargo build --locked -p browser && npm --prefix e2e test
+      - name: Package macOS application
+        if: runner.os == 'macOS'
+        run: bash tools/package-macos.sh
+      - name: Upload macOS application
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ai-browser-${{ runner.os }}-${{ runner.arch }}
+          path: ai-browser/dist/*/AI Browser.zip
+          if-no-files-found: error

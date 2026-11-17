@@ -95,6 +95,7 @@ pub fn is_change_probe(raw: &str) -> bool {
 /// pane needs to show that the content moved and how much there is.
 #[derive(Debug, Clone, Default)]
 pub struct PageSnapshot {
+    pub read_seq: u64,
     /// Increases every time the read content differs from the previous read.
     pub rev: u64,
     pub hash: u64,
@@ -159,10 +160,13 @@ pub enum Pending {
     /// An `agent.run` acknowledgement.
     AgentRun(u64),
     /// An `agent.control` reply for the UI request with this id (0: nobody waits).
-    Control(u64),
+    Control(crate::ipc::Surface, u64),
 }
 
 pub struct AiSession {
+    pub link_generation: u64,
+    pub provider_key_saved: bool,
+    pub ui: super::ui_state::UiState,
     pub identity: Identity,
     pub contexts: ContextStore,
     pub answers: AnswerStore,
@@ -188,6 +192,7 @@ pub struct AiSession {
     pub agent_seq: u64,
     /// Browser tool calls that wait for a page script: utility request id → the call.
     pub agent_evals: HashMap<u64, AgentEval>,
+    pub agent_documents: HashMap<u64, DocumentKey>,
     /// Runs and previews waiting for the active page's content before they are sent
     /// to the engine: job id → what to send.
     pub agent_jobs: HashMap<u64, AgentJob>,
@@ -200,6 +205,8 @@ pub struct AiSession {
 /// page has been read.
 #[derive(Debug)]
 pub struct AgentJob {
+    pub tab: Option<u64>,
+    pub document: Option<DocumentKey>,
     pub method: ai_platform_contract::frame::Method,
     pub params: serde_json::Value,
     pub pending: Pending,
@@ -211,6 +218,8 @@ pub struct AgentJob {
 #[derive(Debug, Clone)]
 pub struct AgentEval {
     pub tab: u64,
+    pub document: Option<DocumentKey>,
+    pub run: Option<u64>,
     pub script: String,
     pub attempts: u8,
     /// A page read is retried while the page is still empty (a freshly woken tab).
@@ -236,6 +245,9 @@ impl Default for AiSession {
 impl AiSession {
     pub fn new() -> AiSession {
         AiSession {
+            link_generation: 0,
+            provider_key_saved: false,
+            ui: super::ui_state::UiState::default(),
             identity: Identity::new(),
             contexts: ContextStore::default(),
             answers: AnswerStore::default(),
@@ -255,6 +267,7 @@ impl AiSession {
             agent_run: 0,
             agent_seq: 0,
             agent_evals: HashMap::new(),
+            agent_documents: HashMap::new(),
             agent_jobs: HashMap::new(),
             agent_job_seq: 0,
             page_snaps: HashMap::new(),

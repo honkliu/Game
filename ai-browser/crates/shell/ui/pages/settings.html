@@ -33,11 +33,7 @@
 </style>
 </head>
 <body>
-<!-- §4.8. Every control writes immediately; there is no Save button. Because
-     this page is an ordinary page webview it cannot reach the host's IPC, so
-     changes are persisted by re-navigating with the new value in the fragment
-     (`#set=<key>=<value>`), which the host intercepts. That keeps the page
-     unprivileged while still making every control real. -->
+<!-- Controls use a bounded, origin-checked settings channel, not the shell command bridge. -->
 <main class="settings">
   <h1>Settings</h1>
 
@@ -100,7 +96,7 @@
         <div><div class="label">Show full URL</div><div class="desc">No truncation in the address bar.</div></div>
         <label class="choice"><input type="checkbox" id="always_show_full_url">Enabled</label>
       </div>
-      <p class="note">Nothing else is collected. On disk the browser writes: <code>settings.json</code> (these settings), <code>session.json</code> (window and tab layout), <code>data.db</code> (history and bookmarks), and WebView2's own profile directory. No telemetry, no update checks, no crash reports.</p>
+      <p class="note">Nothing else is collected. On disk the browser writes: <code>settings.json</code> (these settings), <code>session.json</code> (window and tab layout), <code>data.db</code> (history and bookmarks), and the browser engine's own profile data. No telemetry, no update checks, no crash reports.</p>
     </section>
 
     <section id="advanced">
@@ -110,7 +106,7 @@
         <input type="number" id="history_cap" min="1000" max="1000000" step="1000" aria-label="History limit" />
       </div>
       <div class="row">
-        <div><div class="label">Sleep tabs after</div><div class="desc">Minutes of inactivity. Not yet implemented in this build.</div></div>
+        <div><div class="label">Sleep tabs after</div><div class="desc">Idle background tabs may sleep sooner when the warm pool is full. Editing, media and active work stay protected.</div></div>
         <input type="number" id="sleep_after_minutes" min="1" max="240" aria-label="Sleep after minutes" />
       </div>
       <div class="row">

@@ -89,7 +89,6 @@ export async function launch({ modelPort, debugPort = 9444, withProvider = true 
   const data = path.join(profile, 'native-browser');
   fs.mkdirSync(data, { recursive: true });
   if (withProvider && modelPort) {
-    fs.writeFileSync(path.join(data, 'ai.key'), 'test-key');
     fs.writeFileSync(path.join(data, 'ai.json'), JSON.stringify({
       schema: 1,
       flags: { ai_enabled: true, local_models_enabled: true, cloud_models_enabled: true, selection_toolbar: true,
@@ -101,7 +100,8 @@ export async function launch({ modelPort, debugPort = 9444, withProvider = true 
     }));
   }
   const child = spawn(exe, [], {
-    env: { ...process.env, LOCALAPPDATA: profile, BROWSER_DEBUG_PORT: String(debugPort) },
+    env: { ...process.env, LOCALAPPDATA: profile, AI_BROWSER_DATA_DIR: data,
+      BROWSER_AI_KEY: withProvider && modelPort ? 'test-key' : '', BROWSER_DEBUG_PORT: String(debugPort) },
     stdio: 'ignore',
   });
   let browser;
@@ -125,7 +125,13 @@ export async function launch({ modelPort, debugPort = 9444, withProvider = true 
     child, browser, ctx, shell, profile, data, find,
     invoke: (cmd, payload = {}) => shell.evaluate(([c, p]) => window.__native.invoke(c, p), [cmd, payload]),
     pageWith: async (urlRe, timeout) => find(urlRe, timeout),
-    async close() { try { await browser.close(); } catch {} child.kill(); await sleep(400); fs.rmSync(profile, { recursive: true, force: true }); },
+    async close() {
+      try { await browser.close(); } catch {}
+      if (child.exitCode === null && child.signalCode === null) {
+        await new Promise(resolve => { child.once('exit', resolve); child.kill(); });
+      }
+      fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    },
   };
   return app;
 }

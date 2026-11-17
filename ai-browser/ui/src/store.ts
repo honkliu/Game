@@ -71,6 +71,32 @@ let loadedSkills: string[] = [];
 let convId: string | null = null;
 let seq = 0;
 const nextId = () => ++seq;
+let sessionSeq = 0;
+
+function observeSessionEvent(payload: { state_seq?: number }) {
+  if (typeof payload.state_seq === 'number') sessionSeq = Math.max(sessionSeq, payload.state_seq);
+}
+
+export async function syncSession() {
+  try {
+    const snapshot = await native.invoke<{ sequence: number; turns: Turn[] }>('ai.session');
+    if (snapshot.sequence < sessionSeq) return;
+    sessionSeq = snapshot.sequence;
+    const previous = turns.value;
+    const restored = snapshot.turns.map((turn) => {
+      const old = previous.find((t) => t.kind === turn.kind && (
+        t.kind === 'agent' && turn.kind === 'agent' ? t.runId === turn.runId && t.runId !== 0 :
+          t.kind === 'ask' && turn.kind === 'ask' && t.turnId === turn.turnId
+      ));
+      return { ...turn, id: old?.id ?? nextId() };
+    });
+    const saved = previous.filter((t) => t.kind === 'agent' && !t.runId && t.status !== 'running');
+    turns.value = [...saved, ...restored].slice(-MAX_TURNS);
+    if (!busy.value) setStatus('');
+  } catch {
+    /* A closing host cannot provide a new session snapshot. */
+  }
+}
 
 export const setStatus = (text: string, kind?: 'warn' | 'error') => {
   status.value = { text, kind };
@@ -310,8 +336,10 @@ export async function deleteConversation(id: string) {
 }
 
 export async function openConversation(id: string) {
+  if (busy.value) return;
   try {
     const doc = await call<{ messages?: never[]; loaded_skills?: string[] }>('conv.load', { id });
+    await native.invoke('ai.history.clear', {});
     turns.value = fromMessages(Array.isArray(doc.messages) ? doc.messages : [], nextId);
     loadedSkills = Array.isArray(doc.loaded_skills) ? doc.loaded_skills : [];
     convId = id;
@@ -379,6 +407,7 @@ export function startStore() {
   const on = native.on.bind(native);
 
   on('agent.event', (ev: AgentEvent) => {
+    observeSessionEvent(ev);
     const running = turns.value.find((t) => t.kind === 'agent' && t.status === 'running' && (!t.runId || t.runId === ev.run_id));
     if (!running) return;
     updateTurn(running.id, (t) => (t.kind === 'agent' ? reduceAgent(t, ev) : t));
@@ -393,9 +422,11 @@ export function startStore() {
   });
 
   on('ai.delta', (p) => {
+    observeSessionEvent(p);
     turns.value = turns.value.map((t) => (t.kind === 'ask' && t.turnId === p?.turn_id && t.status === 'pending' ? { ...t, streamed: t.streamed + String(p.text || '') } : t));
   });
   on('ai.stage', (p) => {
+    observeSessionEvent(p);
     if (p?.stage === 'routed') {
       const label = `${p.model || 'model'} · ${p.local ? 'on this device' : 'cloud'}`;
       turns.value = turns.value.map((t) => (t.kind === 'ask' && t.turnId === p.turn_id ? { ...t, routeLabel: label } : t));
@@ -404,6 +435,7 @@ export function startStore() {
   });
   on('ai.answer', (p) => {
     if (!p || typeof p.turn_id !== 'number') return;
+    observeSessionEvent(p);
     if (!turns.value.some((t) => t.kind === 'ask' && t.turnId === p.turn_id)) pushTurn(newAskTurn(nextId(), p.turn_id, p.question || ''));
     turns.value = turns.value.map((t) => (t.kind === 'ask' && t.turnId === p.turn_id ? reduceAnswer(t, p) : t));
     const t = turns.value.find((x): x is AskTurn => x.kind === 'ask' && x.turnId === p.turn_id);
@@ -420,6 +452,7 @@ export function startStore() {
     }
   });
   on('ai.answer.stale', (p) => {
+    observeSessionEvent(p);
     const ids: number[] = p?.turn_ids ?? [];
     if (!ids.length) return;
     turns.value = turns.value.map((t) => (t.kind === 'ask' && ids.includes(t.turnId) ? { ...t, stale: true, staleStatus: p.status || 'stale' } : t));
@@ -437,7 +470,8 @@ export function startStore() {
   on('ai.candidate', (p: Candidate) => {
     if (p) candidates.value = [...candidates.value, p];
   });
-  on('ai.history.cleared', () => {
+  on('ai.history.cleared', (p) => {
+    observeSessionEvent(p);
     turns.value = turns.value.filter((t) => t.kind !== 'ask');
     candidates.value = [];
   });
@@ -458,6 +492,7 @@ export function startStore() {
     document.documentElement.dataset.theme = (s.theme || 'system') === 'system' ? (s.system_dark ? 'dark' : 'light') : s.theme;
   });
   window.addEventListener('focus', () => {
+    void syncSession();
     void refreshContext();
     void refreshStatus();
   });
@@ -476,7 +511,7 @@ export function startStore() {
   };
 
   void (async () => {
-    await Promise.all([refreshContext(), refreshStatus(), refreshAgentState()]);
+    await Promise.all([refreshContext(), refreshStatus(), refreshAgentState(), syncSession()]);
     native.invoke('ai.models', {}).catch(() => undefined);
     // First run: no endpoint yet, so the model form is the first thing shown.
     if (aiStatus.value && !aiStatus.value.provider?.configured) openSettings('model');

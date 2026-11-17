@@ -8,6 +8,7 @@
 export const COMMANDS = [
   'ai.ask',
   'ai.status',
+  'ai.session',
   'ai.models',
   'ai.stop',
   'ai.provider.set',
@@ -39,18 +40,26 @@ export interface NativeBridge extends Bridge {
   _reply(reply: { id: number; ok: boolean; data?: Payload; error?: string }): void;
 }
 
-/** Request ids start high: replies are broadcast to every shell webview, so a low id
- *  could settle another page's request. */
-export function createBridge(post: (raw: string) => void, firstId = 1_000_000): NativeBridge {
+/** Replies are addressed by the host to the originating webview. */
+export function createBridge(post: (raw: string) => void, firstId = 1, timeoutMs = 150_000): NativeBridge {
   let next = firstId;
-  const pending = new Map<number, { resolve: (v: Payload) => void; reject: (e: Error) => void }>();
+  const pending = new Map<number, { resolve: (v: Payload) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   const listeners = new Map<string, Set<Listener>>();
   return {
     invoke(cmd, payload = {}) {
       const id = next++;
       return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
-        post(JSON.stringify({ id, cmd, payload }));
+        const timer = setTimeout(() => {
+          if (pending.delete(id)) reject(new Error(`${cmd} timed out`));
+        }, timeoutMs);
+        pending.set(id, { resolve, reject, timer });
+        try {
+          post(JSON.stringify({ id, cmd, payload }));
+        } catch (e) {
+          pending.delete(id);
+          clearTimeout(timer);
+          reject(e);
+        }
       });
     },
     on(event, fn) {
@@ -68,6 +77,7 @@ export function createBridge(post: (raw: string) => void, firstId = 1_000_000): 
       const entry = pending.get(reply.id);
       if (!entry) return;
       pending.delete(reply.id);
+      clearTimeout(entry.timer);
       if (reply.ok) entry.resolve(reply.data);
       else entry.reject(new Error(reply.error || 'command failed'));
     },
@@ -78,25 +88,27 @@ export function createBridge(post: (raw: string) => void, firstId = 1_000_000): 
  *  the `agent.reply` event with the same `req`. This turns that pair into a promise. */
 export function createAgentCalls(bridge: Bridge, timeoutMs = 150_000) {
   let seq = 0;
-  const waiting = new Map<number, { resolve: (v: Payload) => void; reject: (e: Error) => void }>();
+  const waiting = new Map<number, { resolve: (v: Payload) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   bridge.on('agent.reply', (r) => {
     const w = waiting.get(r.req);
     if (!w) return;
     waiting.delete(r.req);
+    clearTimeout(w.timer);
     if (r.ok) w.resolve(r.value);
     else w.reject(new Error(r.error || 'failed'));
   });
   return function call<T = Payload>(op: string, params: object = {}): Promise<T> {
     const req = ++seq;
     return new Promise<T>((resolve, reject) => {
-      waiting.set(req, { resolve, reject });
-      bridge.invoke('agent.call', { ...params, op, req }).catch((e) => {
-        waiting.delete(req);
-        reject(e);
-      });
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (waiting.delete(req)) reject(new Error('timed out'));
       }, timeoutMs);
+      waiting.set(req, { resolve, reject, timer });
+      bridge.invoke('agent.call', { ...params, op, req }).catch((e) => {
+        waiting.delete(req);
+        clearTimeout(timer);
+        reject(e);
+      });
     });
   };
 }
@@ -115,7 +127,10 @@ let installed: NativeBridge | null = null;
  *  calls into and the end-to-end suites drive. */
 export function bridge(): NativeBridge {
   if (!installed) {
-    installed = createBridge((raw) => window.ipc?.postMessage(raw));
+    installed = createBridge((raw) => {
+      if (!window.ipc) throw new Error('ipc bridge unavailable');
+      window.ipc.postMessage(raw);
+    });
     window.__native = installed;
   }
   return installed;
