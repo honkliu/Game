@@ -8,9 +8,16 @@ fn main() {
     let pane_out = ui.join("sidebar");
 
     println!("cargo:rerun-if-changed=ui");
+    println!("cargo:rerun-if-changed=assets");
     println!("cargo:rerun-if-env-changed=AI_BROWSER_SKIP_UI_BUILD");
     for p in ["src", "sidebar.html", "package.json", "vite.config.ts", "tsconfig.json"] {
         println!("cargo:rerun-if-changed={}", pane_src.join(p).display());
+    }
+
+    if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("windows")) {
+        embed_resource::compile(manifest.join("assets").join("browser.rc"), embed_resource::NONE)
+            .manifest_required()
+            .expect("cannot embed the browser application icon");
     }
 
     build_pane(&pane_src, &pane_out);

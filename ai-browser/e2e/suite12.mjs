@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { launch, listen, startFixtures, startModel, run, sleep, nativeHitBounds } from './harness.mjs';
+import { launch, listen, startFixtures, startModel, run, sleep, nativeHitBounds, nativeAppIcons } from './harness.mjs';
 
 const waitFor = async (fn, ms = 15000) => {
   const end = Date.now() + ms;
@@ -26,6 +26,12 @@ let failed = 0;
 try {
   await app.shell.waitForFunction(() => !!window.__native);
   failed += await run([
+    ['the executable embeds multi-resolution icons and sets native window and taskbar icons', async () => {
+      const icons = nativeAppIcons(app.child.pid);
+      assert.equal(icons.window, true);
+      assert.equal(icons.taskbar, true);
+      assert.equal(icons.sizes.length, 10);
+    }],
     ['new tab has history but no duplicate search control', async () => {
       const page = await app.pageWith(/pages\/newtab\.html/);
       assert.ok(page);

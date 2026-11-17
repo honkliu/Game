@@ -2476,6 +2476,14 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             .with_min_inner_size(tao::dpi::LogicalSize::new(640.0, 480.0))
             .with_decorations(false)
             .with_visible(false);
+        #[cfg(windows)]
+        {
+            use tao::platform::windows::{IconExtWindows, WindowBuilderExtWindows};
+            let icon = |size| tao::window::Icon::from_resource(
+                1, Some(tao::dpi::PhysicalSize::new(size, size)),
+            ).expect("cannot load the browser application icon");
+            b = b.with_window_icon(Some(icon(32))).with_taskbar_icon(Some(icon(256)));
+        }
         if restored_window.x != 0 || restored_window.y != 0 {
             b = b.with_position(tao::dpi::PhysicalPosition::new(restored_window.x, restored_window.y));
         }

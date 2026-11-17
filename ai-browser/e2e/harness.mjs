@@ -188,6 +188,43 @@ $point.Y = $bounds.Top
   return JSON.parse(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }));
 }
 
+/** Inspect embedded icon resources and window icons without changing desktop focus. */
+export function nativeAppIcons(pid) {
+  const ps = `
+$ErrorActionPreference = 'Stop'
+Add-Type -Namespace BrowserIcon -Name Native -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+public static extern System.IntPtr LoadLibraryEx(string path, System.IntPtr file, uint flags);
+[DllImport("kernel32.dll")]
+public static extern bool FreeLibrary(System.IntPtr module);
+[DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+public static extern System.IntPtr LoadImage(System.IntPtr module, System.IntPtr name, uint type, int width, int height, uint flags);
+[DllImport("user32.dll")]
+public static extern bool DestroyIcon(System.IntPtr icon);
+[DllImport("user32.dll")]
+public static extern System.IntPtr SendMessage(System.IntPtr window, uint message, System.IntPtr wparam, System.IntPtr lparam);
+'@
+$process = Get-Process -Id ${pid}
+$module = [BrowserIcon.Native]::LoadLibraryEx($process.Path, [IntPtr]::Zero, 0x22)
+if ($module -eq [IntPtr]::Zero) { throw 'Cannot read the executable icon resources' }
+try {
+  $sizes = @(foreach ($size in 16,20,24,32,40,48,64,96,128,256) {
+    $icon = [BrowserIcon.Native]::LoadImage($module, [IntPtr]1, 1, $size, $size, 0)
+    if ($icon -eq [IntPtr]::Zero) { throw "Cannot load the embedded $size px icon" }
+    [void][BrowserIcon.Native]::DestroyIcon($icon)
+    $size
+  })
+  @{ sizes = $sizes;
+     window = [BrowserIcon.Native]::SendMessage($process.MainWindowHandle, 0x7f, [IntPtr]0, [IntPtr]0) -ne [IntPtr]::Zero;
+     taskbar = [BrowserIcon.Native]::SendMessage($process.MainWindowHandle, 0x7f, [IntPtr]1, [IntPtr]0) -ne [IntPtr]::Zero
+  } | ConvertTo-Json -Compress
+} finally {
+  [void][BrowserIcon.Native]::FreeLibrary($module)
+}
+`;
+  return JSON.parse(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }));
+}
+
 /** A real OS-level mouse click at physical screen coordinates (what a user's mouse does). */
 export function osClick(x, y, pid) {
   const ps = `Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y); [DllImport("user32.dll")] public static extern void mouse_event(int f,int dx,int dy,int d,int e); [DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h); [DllImport("user32.dll")] public static extern void keybd_event(byte k,byte s,int f,int e);' -Name W -Namespace N; [N.W]::SetProcessDPIAware() | Out-Null; ${pid ? `$h=(Get-Process -Id ${pid}).MainWindowHandle; [N.W]::keybd_event(18,0,0,0); [N.W]::SetForegroundWindow($h) | Out-Null; [N.W]::keybd_event(18,0,2,0); Start-Sleep -Milliseconds 400;` : ""} [N.W]::SetCursorPos(${Math.round(x)},${Math.round(y)}) | Out-Null; Start-Sleep -Milliseconds 150; [N.W]::mouse_event(2,0,0,0,0); Start-Sleep -Milliseconds 60; [N.W]::mouse_event(4,0,0,0,0)`;
