@@ -114,8 +114,6 @@ pub enum Shortcut {
     Find,
     FindNext,
     FindPrev,
-    ToggleHighlightAll,
-    ToggleRegex,
     OpenDownloads,
     OpenHistory { today: bool },
     PageBack,
@@ -188,8 +186,6 @@ pub fn resolve(vk: u32, mods: Mods, focused_is_input: bool) -> Outcome {
             vk::RIGHT => Outcome::Consume(S::PageForward),
             vk::HOME => Outcome::Consume(S::Home),
             vk::D => Outcome::Consume(S::FocusOmnibox),
-            vk::A => Outcome::Consume(S::ToggleHighlightAll),
-            vk::R => Outcome::Consume(S::ToggleRegex),
             _ => Outcome::Pass,
         };
     }
@@ -399,8 +395,8 @@ mod tests {
         assert_eq!(sc(F3, Mods::SHIFT), Some(Shortcut::FindPrev));
         assert_eq!(sc(G, Mods::CTRL), Some(Shortcut::FindNext));
         assert_eq!(sc(G, Mods::CTRL_SHIFT), Some(Shortcut::FindPrev));
-        assert_eq!(sc(A, Mods::ALT), Some(Shortcut::ToggleHighlightAll));
-        assert_eq!(sc(R, Mods::ALT), Some(Shortcut::ToggleRegex));
+        assert_eq!(sc(A, Mods::ALT), None);
+        assert_eq!(sc(R, Mods::ALT), None);
     }
 
     #[test]

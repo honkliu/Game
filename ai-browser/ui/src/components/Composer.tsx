@@ -1,8 +1,9 @@
 import { useEffect, useRef } from 'preact/hooks';
 import {
   agentOn, aiStatus, busy, candidates, extraTabs, focusTick, intent, localOnly, model, models, native, sendMessage,
-  status, stop, useSelection, type Intent,
+  modelFilter, modelMenu, status, stop, useSelection, type Intent,
 } from '../store';
+import { ModelPicker } from './ModelPicker';
 
 const QUICK: [string, { intent: Intent; selection?: boolean; question?: string }][] = [
   ['Summarize page', { intent: 'summarize' }],
@@ -61,19 +62,17 @@ export function Composer() {
         <button id={pre + '-send'} type="button" class="chip-btn is-accent" hidden={isBusy} onClick={on ? submit : submitAsk}>{on ? 'Send' : 'Ask'}</button>
         <button id={pre + '-stop'} type="button" class="chip-btn" hidden={!isBusy} onClick={() => void stop()}>Stop</button>
       </div>
+      <div class="ask-opts"><button type="button" class="chip-btn" aria-label="Change model" disabled={isBusy}
+        onClick={() => { modelFilter.value = ''; modelMenu.value = !modelMenu.value; }}>
+        Model: {models.value.find(entry => `${entry.provider_id}/${entry.model_id}` === model.value)?.display_name || model.value || 'Default'} <small>/model</small>
+      </button></div>
+      {modelMenu.value ? <ModelPicker /> : null}
       {!on ? (
         <>
           <div class="ask-opts">
             <select id="ask-intent" aria-label="Task" value={intent.value} onChange={(e) => (intent.value = e.currentTarget.value as Intent)}>
               {(['ask', 'summarize', 'explain', 'verify', 'translate', 'rewrite'] as Intent[]).map((k) => <option key={k} value={k}>{k.charAt(0).toUpperCase() + k.slice(1)}</option>)}
               <option value="act">Act (may open tabs)</option>
-            </select>
-            <select id="ask-model" aria-label="Model" value={model.value} onChange={(e) => (model.value = e.currentTarget.value)}>
-              <option value="">Auto route</option>
-              {models.value.map((m) => {
-                const id = `${m.provider_id}/${m.model_id}`;
-                return <option key={id} value={id}>{`${m.display_name || id}${m.local ? ' (local)' : ' (cloud)'}`}</option>;
-              })}
             </select>
             <label class="ask-opt">
               <input id="ask-sel" type="checkbox" checked={useSelection.value} disabled={!s?.selection} onChange={(e) => (useSelection.value = e.currentTarget.checked)} /> selection

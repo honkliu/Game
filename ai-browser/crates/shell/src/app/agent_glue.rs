@@ -352,7 +352,7 @@ impl AppState {
             ResponsePayload::Ok(value) => json!({ "req": req, "ok": true, "value": value }),
             ResponsePayload::Failure(f) => json!({ "req": req, "ok": false, "error": failure_message(&f) }),
         };
-        self.emit_raw(source.target(), "agent.reply", body);
+        self.emit_surface(source, "agent.reply", body);
     }
 
     pub(super) fn agent_run_failed(&mut self, run: u64, failure: &Failure) {

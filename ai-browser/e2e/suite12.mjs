@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { launch, listen, startFixtures, startModel, run, sleep } from './harness.mjs';
+import { launch, listen, startFixtures, startModel, run, sleep, nativeHitBounds } from './harness.mjs';
 
 const waitFor = async (fn, ms = 15000) => {
   const end = Date.now() + ms;
-  while (Date.now() < end) { const result = await fn(); if (result) return result; await sleep(75); }
+  while (Date.now() < end) {
+    try { const result = await fn(); if (result) return result; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    await sleep(75);
+  }
   throw new Error('timed out waiting for condition');
 };
 async function debugPort() {
@@ -34,9 +38,10 @@ try {
       assert.ok(restored, 'new tab also loads in an existing view');
       await restored.locator('#recent a').first().waitFor();
     }],
-    ['Settings opens from the real browser menu and persists changes', async () => {
-      await app.shell.locator('#btn-menu').click();
-      await app.shell.getByRole('menuitem', { name: 'Settings', exact: true }).click();
+    ['Settings opens directly from its toolbar button and persists changes', async () => {
+      assert.equal(await app.shell.locator('#btn-menu').count(), 0);
+      assert.equal(await app.shell.locator('#btn-settings').getAttribute('aria-haspopup'), null);
+      await app.shell.getByRole('button', { name: 'Settings', exact: true }).click();
       const page = await app.pageWith(/pages\/settings\.html/);
       assert.ok(page, 'Settings document opened');
       await page.locator('#search_template').waitFor();
@@ -52,6 +57,49 @@ try {
       await waitFor(() => JSON.parse(fs.readFileSync(file, 'utf8')).sleep_after_minutes === 7);
       await app.invoke('settings.open');
       assert.equal(app.ctx.pages().filter(p => /pages\/settings\.html/.test(p.url())).length, 1, 'reuses Settings tab');
+    }],
+    ['Settings stays accessible with River open on another working tab', async () => {
+      const settings = await app.pageWith(/pages\/settings\.html/);
+      const settingsId = (await app.invoke('agent.context')).page.tab_id;
+      await app.invoke('nav.open', { url: base + '/live?settings=river', disposition: 'new_tab' });
+      const working = await app.pageWith(/settings=river/);
+      const workingId = (await app.invoke('agent.context')).page.tab_id;
+      await working.locator('#nm').fill('Unsaved work beside River');
+      await app.shell.evaluate(() => {
+        window.__settingsPanel = '';
+        window.__native.on('shell.panel', p => { window.__settingsPanel = p.panel; });
+      });
+      await app.invoke('shortcut', { name: 'ask_ai' });
+      const pane = await app.pageWith(/sidebar/);
+      try {
+        await pane.waitForFunction(() => !!window.__agentUi);
+        const back = pane.getByRole('button', { name: 'Back', exact: true });
+        if (await back.count()) await back.click();
+        await pane.locator('textarea').fill('Keep this River draft');
+        const hit = await nativeHitBounds(app.shell, '#btn-settings', app.child.pid);
+        assert.deepEqual([hit.x, hit.y, hit.w, hit.h], [0, 0, hit.clientW, hit.clientH], 'native input reaches the full-window shell, not River');
+        await app.shell.getByRole('button', { name: 'Settings', exact: true }).click();
+        await waitFor(async () => (await app.invoke('agent.context')).page.tab_id === settingsId, 5000);
+        assert.equal(await app.shell.evaluate(() => window.__settingsPanel), 'ai', 'River remains open');
+        assert.equal((await app.invoke('agent.context')).page.tab_id, settingsId, 'reuses the existing Settings tab');
+        assert.equal(await pane.locator('textarea').inputValue(), 'Keep this River draft');
+        await settings.locator('#density').focus();
+        const focused = await settings.evaluate(() => document.hasFocus());
+        await settings.locator('#density').selectOption('compact');
+        await waitFor(() => JSON.parse(fs.readFileSync(path.join(app.data, 'settings.json'), 'utf8')).density === 'compact');
+        assert.equal(await settings.evaluate(() => document.hasFocus()), focused, 'layout changes preserve Settings focus');
+        await settings.locator('#density').selectOption('comfortable');
+        await waitFor(() => JSON.parse(fs.readFileSync(path.join(app.data, 'settings.json'), 'utf8')).density === 'comfortable');
+        await settings.reload();
+        await settings.locator('#density').waitFor();
+        assert.equal(await settings.locator('#density').inputValue(), 'comfortable');
+        await app.invoke('tab.select', { tab_id: workingId });
+        assert.equal(await working.locator('#nm').inputValue(), 'Unsaved work beside River');
+        assert.equal(await pane.locator('textarea').inputValue(), 'Keep this River draft');
+      } finally {
+        await app.invoke('shortcut', { name: 'ask_ai' });
+        await app.invoke('tab.select', { tab_id: settingsId });
+      }
     }],
     ['Settings reports a failed save without applying an unpersisted value', async () => {
       const page = await app.pageWith(/pages\/settings\.html/);
@@ -82,7 +130,7 @@ try {
       await sleep(200);
       assert.equal(JSON.parse(fs.readFileSync(path.join(app.data, 'settings.json'), 'utf8')).search_template,
         searchTemplate);
-      const spoof = 'http://asset.shell/pages/settings.html#set=' +
+      const spoof = 'https://asset.shell/pages/settings.html#set=' +
         encodeURIComponent('search_template=' + encodeURIComponent('https://untrusted.example/?q=%s'));
       await page.evaluate(url => {
         const link = document.createElement('a');
@@ -175,7 +223,7 @@ try {
       assert.equal(await page.locator('#nm').inputValue(), 'Keep this unsaved value');
       assert.equal(await page.evaluate(() => window.__warmMarker), 123);
     }],
-    ['find counts literal matches, navigates them, and supports whole-word matching', async () => {
+    ['plain toolbar find searches live without another row or advanced controls', async () => {
       await app.invoke('nav.open', { url: base + '/?find=1', disposition: 'new_tab' });
       const page = await app.pageWith(/find=1/);
       await page.waitForSelector('#p1');
@@ -184,27 +232,62 @@ try {
         window.__findResults = [];
         window.__native.on('find.result', result => window.__findResults.push(result));
       });
-      await app.shell.locator('#btn-menu').click();
-      await app.shell.getByRole('menuitem', { name: 'Find in page', exact: true }).click();
+      assert.deepEqual(await app.shell.evaluate(() => {
+        const input = document.querySelector('#find-input');
+        return [input.previousElementSibling.id, input.nextElementSibling.id];
+      }), ['btn-ai', 'btn-downloads']);
+      assert.equal(await app.shell.locator('#find-bar, #find-case, #find-word, #find-all, #find-next, #find-prev').count(), 0);
+      const bounds = await nativeHitBounds(app.shell, '#find-input', app.child.pid);
+      assert.deepEqual([bounds.x, bounds.y, bounds.w, bounds.h], [0, 0, bounds.clientW, bounds.clientH]);
+      const before = await page.evaluate(() => ({ height: innerHeight, width: innerWidth }));
+      await app.invoke('shortcut', { name: 'find' });
+      await app.shell.waitForFunction(() => document.activeElement?.id === 'find-input');
       await app.shell.locator('#find-input').fill('alpha');
       await app.shell.waitForFunction(() => window.__findResults.at(-1)?.total === 4);
-      await app.invoke('find.next', { query: 'alpha' });
+      await page.waitForFunction(() => CSS.highlights.get('browser-find')?.size === 4);
+      await app.shell.locator('#find-input').press('Enter');
       await app.shell.waitForFunction(() => window.__findResults.at(-1)?.active === 2);
-      await Promise.all([
-        app.invoke('find.next', { query: 'alpha' }),
-        app.invoke('find.next', { query: 'alpha' }),
-      ]);
-      await app.shell.waitForFunction(() => window.__findResults.at(-1)?.active === 4);
-      await app.shell.locator('#find-word').click();
-      await app.shell.waitForFunction(() => window.__findResults.at(-1)?.total === 3);
-      await app.shell.locator('#find-case').click();
-      await app.shell.waitForFunction(() => window.__findResults.at(-1)?.total === 2);
-      await app.invoke('shortcut', { name: 'toggle_highlight_all' });
-      await page.waitForFunction(() => CSS.highlights.get('browser-find')?.size === 2);
-      await app.invoke('shortcut', { name: 'toggle_highlight_all' });
+      await app.shell.locator('#find-input').press('Shift+Enter');
+      await app.shell.waitForFunction(() => window.__findResults.at(-1)?.active === 1);
+      await app.shell.locator('#find-input').fill('[not regex]');
+      await app.shell.waitForFunction(() => window.__findResults.at(-1)?.query === '[not regex]' && window.__findResults.at(-1)?.total === 0);
+      assert.equal(await app.shell.locator('#find-input').getAttribute('aria-invalid'), 'true');
+      await app.shell.locator('#find-input').press('Escape');
       await page.waitForFunction(() => !CSS.highlights.has('browser-find'));
-      await app.shell.locator('#find-close').click();
-      await app.shell.locator('#find-bar').waitFor({ state: 'hidden' });
+      assert.equal(await app.shell.locator('#find-input').inputValue(), '');
+      assert.equal(await app.shell.locator('#find-input').isVisible(), true);
+      assert.deepEqual(await page.evaluate(() => ({ height: innerHeight, width: innerWidth })), before);
+    }],
+    ['inline find keeps River open and follows the active page', async () => {
+      const firstId = (await app.invoke('agent.context')).page.tab_id;
+      const first = await app.pageWith(/find=1/);
+      await app.invoke('shortcut', { name: 'ask_ai' });
+      const river = await app.pageWith(/sidebar/);
+      await river.locator('textarea').fill('Preserve this search draft');
+      const before = await first.evaluate(() => ({ height: innerHeight, width: innerWidth }));
+      await app.invoke('shortcut', { name: 'find' });
+      await app.shell.locator('#find-input').fill('alpha');
+      await first.waitForFunction(() => CSS.highlights.get('browser-find')?.size === 4);
+      assert.deepEqual(await first.evaluate(() => ({ height: innerHeight, width: innerWidth })), before, 'find does not replace River or shift the page');
+      assert.equal(await river.locator('textarea').inputValue(), 'Preserve this search draft');
+      await app.invoke('nav.open', { url: base + '/?find=2', disposition: 'new_tab' });
+      const second = await app.pageWith(/find=2/);
+      await second.waitForSelector('#p1');
+      await app.shell.waitForFunction(id => {
+        const result = window.__findResults.at(-1);
+        return result?.query === 'alpha' && result.tab_id !== id && result.total === 0;
+      }, firstId).catch(async error => {
+        const results = await app.shell.evaluate(() => window.__findResults.slice(-6));
+        throw new Error(`${error.message}; recent find results: ${JSON.stringify(results)}`);
+      });
+      await app.invoke('tab.select', { tab_id: firstId });
+      const restored = await app.pageWith(/find=1/);
+      await app.shell.waitForFunction(id => window.__findResults.at(-1)?.tab_id === id, firstId);
+      const matches = await restored.evaluate(() => (document.body.innerText.match(/alpha/gi) || []).length);
+      assert.equal(await app.shell.evaluate(() => window.__findResults.at(-1).total), matches);
+      await app.shell.locator('#find-input').fill('');
+      await restored.waitForFunction(() => !CSS.highlights.has('browser-find-active'));
+      await app.invoke('shortcut', { name: 'ask_ai' });
     }],
   ]);
 } finally {
@@ -212,7 +295,13 @@ try {
   fixtures.close();
 }
 
-const model = await startModel((_messages, _body, n) => ({ text: `RECOVERED_RESULT_${n}`, delay: 700 }));
+const noteExample = '广喜，念<sup>注1</sup>鬼，曰："此教我先威<sup>注2</sup>众耳。"';
+const replyFixtures = await startFixtures();
+const replyUrl = `http://127.0.0.1:${replyFixtures.port}/?markdown-link=1&source=river`;
+const model = await startModel((_messages, _body, n) => ({
+  text: `RECOVERED_RESULT_${n}\n\n${noteExample}\n\n[**打开测试页面**][page]\n\n[page]: ${replyUrl}`,
+  delay: 700,
+}));
 const ai = await launch({ modelPort: model.port, debugPort: await debugPort() });
 try {
   failed += await run([
@@ -231,9 +320,31 @@ try {
       assert.ok(state.turns.some(turn => turn.status === 'done'));
       assert.equal(await pane.getByRole('button', { name: 'Stop', exact: true }).count(), 0);
     }],
+    ['River renders superscript notes from model replies as raised text', async () => {
+      const pane = await ai.pageWith(/sidebar/);
+      assert.deepEqual(await pane.locator('.rich sup').allTextContents(), ['注1', '注2']);
+      assert.equal(await pane.locator('.rich').evaluateAll(nodes => nodes.some(node => node.textContent.includes('<sup>'))), false);
+      assert.equal(await pane.locator('.rich sup').first().evaluate(node => {
+        const style = getComputedStyle(node);
+        return style.verticalAlign === 'super' && parseFloat(style.fontSize) < parseFloat(getComputedStyle(node.parentElement).fontSize);
+      }), true);
+    }],
+    ['a rendered reference link opens a browser tab without navigating River', async () => {
+      const pane = await ai.pageWith(/sidebar/);
+      const paneUrl = pane.url();
+      const link = pane.getByRole('link', { name: '打开测试页面', exact: true });
+      assert.equal(await link.getAttribute('href'), replyUrl);
+      await link.locator('strong').click();
+      const destination = await ai.pageWith(/markdown-link=1/);
+      await destination.waitForSelector('#p1');
+      assert.equal((await ai.invoke('agent.context')).page.url, replyUrl);
+      assert.equal(pane.url(), paneUrl);
+      assert.equal(await link.count(), 1);
+    }],
   ]);
 } finally {
   await ai.close();
   model.close();
+  replyFixtures.close();
 }
 process.exitCode = failed ? 1 : 0;

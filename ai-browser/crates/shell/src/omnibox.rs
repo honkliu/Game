@@ -25,7 +25,7 @@ impl Mode {
             Mode::Search => "Search",
             Mode::Command => "› Command",
             Mode::Find => "🔎 Find",
-            Mode::Ask => "✨ Ask AI",
+            Mode::Ask => "✨ River",
         }
     }
 }

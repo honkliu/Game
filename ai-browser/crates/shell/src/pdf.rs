@@ -43,9 +43,9 @@ impl Drop for FetchPermit {
 }
 
 /// What a page webview sees as the viewer's origin (`pdf://` is mapped to this on
-/// Windows when the HTTPS scheme option is off).
+/// Windows with the HTTPS scheme option enabled).
 #[cfg(windows)]
-const VIEWER_BASE: &str = "http://pdf.localhost/";
+const VIEWER_BASE: &str = "https://pdf.localhost/";
 #[cfg(target_os = "macos")]
 const VIEWER_BASE: &str = "pdf://localhost/";
 

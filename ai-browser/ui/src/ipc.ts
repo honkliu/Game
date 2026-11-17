@@ -12,6 +12,7 @@ export const COMMANDS = [
   'ai.models',
   'ai.stop',
   'ai.provider.set',
+  'ai.provider.delete',
   'ai.citation.scroll',
   'ai.history.clear',
   'ai.selection.act',
@@ -23,6 +24,18 @@ export const COMMANDS = [
   'agent.approve',
   'agent.call',
   'agent.context',
+  'settings.open',
+  'settings.state',
+  'settings.section',
+  'settings.update',
+  'settings.open_folder',
+  'history.query',
+  'history.forget',
+  'history.clear',
+  'download.action',
+  'download.clear_list',
+  'ai.conversation.open',
+  'ai.conversation.pending',
 ] as const;
 
 export type Command = (typeof COMMANDS)[number];

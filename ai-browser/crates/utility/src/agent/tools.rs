@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
-use super::{web, Env};
+use super::{tool_config, web, Env};
 use crate::control::lock;
 
 /// Results longer than this are stored; the model gets a preview and drills in.
@@ -24,10 +24,12 @@ pub enum Kind {
     Local,
     /// Executed by an MCP server.
     Mcp { server: String, tool: String },
+    Http(tool_config::HttpTool),
 }
 
 #[derive(Debug, Clone)]
 pub struct ToolDef {
+    pub id: String,
     pub name: String,
     pub description: String,
     pub parameters: Value,
@@ -53,6 +55,7 @@ impl ToolDef {
 
 fn def(name: &str, description: &str, properties: Value, required: &[&str], kind: Kind, write: bool) -> ToolDef {
     ToolDef {
+        id: name.into(),
         name: name.into(),
         description: description.into(),
         parameters: json!({ "type": "object", "properties": properties, "required": required }),
@@ -102,12 +105,12 @@ pub fn envelope(stash: &Mutex<Stash>, value: Value) -> String {
     let id = lock(stash).put(text);
     json!({
         "stashed": true, "result_id": id, "total_chars": total, "preview": preview,
-        "hint": "The full result is stored. Use read_result(result_id, offset, length) to page through it or grep_result(result_id, pattern) to search it."
+        "hint": "The full result is stored. If enabled in Tools settings, read_result pages through it and grep_result searches it; otherwise only this preview is available."
     })
     .to_string()
 }
 
-pub fn registry(env: &Env, stash: &Mutex<Stash>) -> Vec<ToolDef> {
+pub fn builtins() -> Vec<ToolDef> {
     let b = Kind::Browser;
     let l = Kind::Local;
     let tab = json!({ "type": "integer", "description": "Tab id from the browser context or list_tabs. Defaults to the active tab." });
@@ -194,17 +197,8 @@ pub fn registry(env: &Env, stash: &Mutex<Stash>) -> Vec<ToolDef> {
             l.clone(),
             false,
         ),
-        def(
-            "web_search",
-            "Search the web. Returns titles, URLs and snippets.",
-            json!({ "query": { "type": "string" }, "limit": { "type": "integer", "description": "1-10, default 6." } }),
-            &["query"],
-            l.clone(),
-            false,
-        ),
     ];
-    if env.store.skills().iter().any(|s| s.mode == "auto") {
-        tools.push(def(
+    tools.push(def(
             "fetch_skill",
             "Load the full instructions of a skill from the catalog in the system prompt, by id.",
             json!({ "skill_id": { "type": "string" } }),
@@ -212,9 +206,7 @@ pub fn registry(env: &Env, stash: &Mutex<Stash>) -> Vec<ToolDef> {
             l.clone(),
             false,
         ));
-    }
-    if !lock(stash).is_empty() {
-        tools.push(def(
+    tools.push(def(
             "read_result",
             "Read part of a stored large tool result.",
             json!({ "result_id": { "type": "string" }, "offset": { "type": "integer" }, "length": { "type": "integer", "description": "Max 65536." } }),
@@ -222,7 +214,7 @@ pub fn registry(env: &Env, stash: &Mutex<Stash>) -> Vec<ToolDef> {
             l.clone(),
             false,
         ));
-        tools.push(def(
+    tools.push(def(
             "grep_result",
             "Search a stored tool result for text (case-insensitive; use | between alternatives). Returns up to 50 matching lines.",
             json!({ "result_id": { "type": "string" }, "pattern": { "type": "string" } }),
@@ -230,9 +222,14 @@ pub fn registry(env: &Env, stash: &Mutex<Stash>) -> Vec<ToolDef> {
             l,
             false,
         ));
-    }
-    tools.extend(env.mcp.tools());
     tools
+}
+
+pub fn registry(env: &Env, _stash: &Mutex<Stash>) -> Vec<ToolDef> {
+    let Ok(config) = tool_config::load(env.store, env.mcp) else { return Vec::new() };
+    tool_config::definitions(&config, env.mcp).into_iter()
+        .filter(|tool| config.enabled.get(&tool.id).copied().unwrap_or(false))
+        .collect()
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -251,21 +248,6 @@ pub fn run_local(env: &Env, name: &str, args: &Value, stash: &Mutex<Stash>, load
                 format!("URL: {}\nContent-Type: {}\n\n{}", page.final_url, page.content_type, page.body)
             };
             Ok(Value::String(text.chars().take(FETCH_TEXT).collect()))
-        }
-        "web_search" => {
-            let query = str_arg(args, "query")?;
-            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(6).clamp(1, 10) as usize;
-            let rows = web::search(query, limit)?;
-            if rows.is_empty() {
-                return Ok(Value::String("No results.".into()));
-            }
-            Ok(Value::String(
-                rows.iter()
-                    .enumerate()
-                    .map(|(i, (t, u, s))| format!("{}. {t}\n   {u}\n   {s}", i + 1))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ))
         }
         "fetch_skill" => {
             let wanted = str_arg(args, "skill_id")?;

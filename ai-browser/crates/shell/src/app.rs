@@ -54,6 +54,7 @@ mod lifecycle;
 mod find;
 mod omnibox_worker;
 mod settings_page;
+mod providers;
 mod popups;
 const SESSION_DEBOUNCE: Duration = Duration::from_millis(500);
 const TICK: Duration = Duration::from_millis(250);
@@ -110,6 +111,7 @@ pub struct AppState {
     data_dir: PathBuf,
     store: Store,
     settings: Settings,
+    settings_page: settings_page::State,
     tabs: TabSet,
     groups: Vec<Group>,
     active: Option<TabId>,
@@ -402,6 +404,7 @@ impl AppState {
 
     fn emit(&mut self, event: &str, mut payload: Value) {
         self.ai.ui.record(event, &mut payload);
+        self.emit_settings(event, payload.clone());
         self.emit_raw("shell", event, payload.clone());
         if self.sidebar.is_some() {
             self.emit_raw("sidebar", event, payload.clone());
@@ -424,6 +427,7 @@ impl AppState {
             Surface::Shell => self.shell.as_ref(),
             Surface::Overlay => self.overlay.as_ref(),
             Surface::Sidebar => self.sidebar.as_ref(),
+            Surface::Settings(id) => self.settings_view(id),
         };
         if let Some(view) = view {
             let _ = view.evaluate_script(&script);
@@ -906,7 +910,6 @@ impl AppState {
                 "header_h": l.header_h,
                 "vertical_tabs": self.settings.vertical_tabs,
                 "rail_collapsed": self.settings.rail_collapsed,
-                "find_open": self.panel == Panel::Find,
                 "panel": panel_str(self.panel),
                 "page_x": l.page_x,
                 "page_y": l.page_y,
@@ -989,6 +992,18 @@ impl AppState {
             "ai.models" => self.ai_models(),
             "ai.config.set" => self.ai_config_set(p),
             "ai.provider.set" => self.ai_provider_set(p),
+            "ai.provider.delete" => self.ai_provider_delete(p),
+            "ai.conversation.open" => {
+                if self.ai.agent_run != 0 || !self.ai.tasks.is_empty() || !self.ai.agent_jobs.is_empty() {
+                    return Err("stop the current task before opening a conversation".into());
+                }
+                let id = p.get("id").and_then(Value::as_str).ok_or("conversation ID required")?;
+                self.settings_page.conversation = Some(id.to_string());
+                self.ai_show_pane();
+                self.emit_raw("sidebar", "conversation.open", json!({}));
+                Ok(None)
+            }
+            "ai.conversation.pending" => Ok(Some(json!({ "id": self.settings_page.conversation.take() }))),
             "ai.history.clear" => self.ai_history_clear(),
             "agent.run" => self.agent_run(p),
             "agent.stop" => self.agent_stop(),
@@ -1240,8 +1255,6 @@ impl AppState {
                 match omnibox::classify(&text) {
                     Intent::Command { verb, .. } => self.run_verb(&verb),
                     Intent::Find(q) => {
-                        self.panel = Panel::Find;
-                        self.apply_layout();
                         self.emit("shell.focus_find", json!({ "query": q }));
                     }
                     Intent::Ask { question, intent, all_tabs } => {
@@ -1357,6 +1370,10 @@ impl AppState {
             "settings.update" => {
                 let key = p.get("key").and_then(Value::as_str).ok_or("missing key")?;
                 let value = p.get("value").cloned().unwrap_or(Value::Null);
+                if matches!(source, Surface::Settings(_)) {
+                    self.update_preferences(key, &value)?;
+                    return Ok(Some(self.settings_payload()));
+                }
                 self.settings.apply(key, &value).map_err(|e| e.to_string())?;
                 #[cfg(target_os = "macos")]
                 if key == "download_dir" {
@@ -1384,7 +1401,19 @@ impl AppState {
                 Ok(None)
             }
             "settings.open" => {
-                self.open_settings();
+                let section = p.get("section").and_then(Value::as_str).unwrap_or("general");
+                self.open_settings_section(section, p.get("skill_draft").cloned());
+                Ok(None)
+            }
+            "settings.state" => Ok(Some(json!({
+                "section": self.settings_page.section,
+                "skill_draft": self.settings_page.skill_draft.take(),
+                "settings": self.settings_payload(), "downloads": self.downloads,
+            }))),
+            "settings.section" => {
+                let section = p.get("section").and_then(Value::as_str).unwrap_or("general");
+                if !settings_page::valid_section(section) { return Err("unknown settings section".into()); }
+                self.settings_page.section = section.to_string();
                 Ok(None)
             }
             "shell.focus_omnibox" => {
@@ -1604,8 +1633,8 @@ impl AppState {
         }
         match verb {
             "pin-tab" => self.perform_shortcut("toggle_pin", Value::Null),
-            "downloads" => self.set_panel(Panel::Downloads),
-            "history" => self.set_panel(Panel::History),
+            "downloads" => self.open_settings_section("downloads", None),
+            "history" => self.open_settings_section("history", None),
             "settings" => {
                 self.open_settings();
             }
@@ -1665,16 +1694,15 @@ impl AppState {
             "ask_ai" => self.ai_open_ask(),
             "close_palette" => self.close_overlay(),
             "find" => {
-                self.panel = Panel::Find;
-                self.apply_layout();
+                self.close_overlay();
+                if let Some(shell) = self.shell.as_ref() { let _ = shell.focus(); }
                 self.emit("shell.focus_changed", json!({ "scope": "find" }));
             }
-            "find_next" | "find_prev" | "toggle_highlight_all" | "toggle_regex" => {
+            "find_next" | "find_prev" => {
                 self.emit("shell.find_action", json!({ "action": name }));
             }
-            "open_downloads" => self.set_panel(Panel::Downloads),
-            "open_history" => self.set_panel(Panel::History),
-            "open_history_today" => self.set_panel(Panel::History),
+            "open_downloads" => self.open_settings_section("downloads", None),
+            "open_history" | "open_history_today" => self.open_settings_section("history", None),
             "page_back" | "page_forward" => {
                 if let Some(id) = self.active {
                     if let Some(live) = self.live.get(&id) {
@@ -2009,7 +2037,7 @@ impl AppState {
             }
             Intent::Find(q) => rows.push(json!({ "kind": "find", "title": format!("Find “{q}” in page") })),
             Intent::Ask { question, .. } => {
-                let label = if question.is_empty() { "Ask the assistant".to_string() } else { format!("Ask AI: {question}") };
+                let label = if question.is_empty() { "River".to_string() } else { format!("River: {question}") };
                 rows.push(json!({ "kind": "ask", "title": trimmed, "hint": label }));
             }
             Intent::Url(url) => {
@@ -2183,7 +2211,6 @@ impl AppState {
 fn panel_str(p: Panel) -> &'static str {
     match p {
         Panel::None => "none",
-        Panel::Find => "find",
         Panel::Downloads => "downloads",
         Panel::History => "history",
         Panel::Ai => "ai",
@@ -2319,6 +2346,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             }
         ))),
         settings,
+        settings_page: settings_page::State::default(),
         tabs: TabSet::new(),
         groups: Vec::new(),
         active: None,
@@ -3023,12 +3051,8 @@ impl AppState {
             url.to_string()
         };
 
-        let mut changed = false;
         if let Some(t) = self.tabs.get_mut(id) {
-            if t.url != display {
-                t.url = display;
-                changed = true;
-            }
+            t.url = display;
             t.loading = true;
         }
         let (back, fwd) = match self.live.get(&id) {
@@ -3043,9 +3067,7 @@ impl AppState {
             t.can_go_forward = fwd;
         }
 
-        if changed {
-            self.emit_tabs();
-        }
+        self.emit_tabs();
 
         // History is written on *commit*, not on request. The command path can
         // only see navigations the host initiated; a link click, a form POST or
@@ -3197,8 +3219,6 @@ fn shortcut_name(s: &Shortcut) -> &'static str {
         S::AskAi => "ask_ai",
         S::FindNext => "find_next",
         S::FindPrev => "find_prev",
-        S::ToggleHighlightAll => "toggle_highlight_all",
-        S::ToggleRegex => "toggle_regex",
         S::OpenDownloads => "open_downloads",
         S::OpenHistory { today: false } => "open_history",
         S::OpenHistory { today: true } => "open_history_today",
@@ -3295,7 +3315,6 @@ mod tests {
     #[test]
     fn panel_str_is_stable_for_the_wire() {
         assert_eq!(panel_str(Panel::None), "none");
-        assert_eq!(panel_str(Panel::Find), "find");
         assert_eq!(panel_str(Panel::Downloads), "downloads");
         assert_eq!(panel_str(Panel::History), "history");
     }
@@ -3353,8 +3372,6 @@ mod tests {
             Shortcut::AskAi,
             Shortcut::FindNext,
             Shortcut::FindPrev,
-            Shortcut::ToggleHighlightAll,
-            Shortcut::ToggleRegex,
             Shortcut::OpenDownloads,
             Shortcut::OpenHistory { today: false },
             Shortcut::OpenHistory { today: true },

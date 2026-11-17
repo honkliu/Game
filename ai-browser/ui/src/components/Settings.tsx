@@ -1,11 +1,10 @@
 import { useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
-import { agentState, aiStatus, call, native, refreshAgentState, refreshStatus, setStatus, settingsTab, skillDraft, view, type SettingsTab } from '../store';
+import { agentState, aiStatus, busy, call, model, native, refreshAgentState, refreshStatus, setModel, setStatus, settingsTab, skillDraft } from '../store';
 import type { AgentState, McpServer, SkillInfo, SkillMode } from '../types';
+import { ToolsSettings } from './ToolsSettings';
+import { ModelsSettings } from './ModelsSettings';
 
-const TABS: [SettingsTab, string][] = [
-  ['skills', 'Skills'], ['mcp', 'MCP'], ['prompts', 'Prompts'], ['instructions', 'Instructions'], ['model', 'Model'], ['general', 'General'],
-];
 const MODES: SkillMode[] = ['always-on', 'auto', 'off'];
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -70,29 +69,17 @@ function InstructionsTab({ s }: { s: AgentState }) {
 }
 
 function ModelTab() {
-  const p = aiStatus.value?.provider ?? {};
-  const [url, setUrl] = useState(p.base_url ?? '');
-  const [model, setModel] = useState(p.model_id ?? '');
-  const [key, setKey] = useState('');
-  const a = useAction();
-  const save = () => a.run('Saving…', async () => {
-    await native.invoke('ai.provider.set', { base_url: url, model_id: model, api_key: key });
-    setKey('');
+  const refresh = async () => {
     await refreshStatus();
-  });
-  return (
-    <>
-      <p class="ag-help">Any OpenAI-compatible endpoint. Agent mode needs a model that supports tool calling.</p>
-      <Field label="Endpoint"><input type="text" spellcheck={false} placeholder="http://host:8001/v1" value={url} onInput={(e) => setUrl(e.currentTarget.value)} /></Field>
-      <Field label="Model name"><input type="text" spellcheck={false} placeholder="e.g. QWen" value={model} onInput={(e) => setModel(e.currentTarget.value)} /></Field>
-      <Field label="API key"><input type="password" placeholder={p.key_saved ? 'saved — leave empty to keep it' : 'API key'} value={key} onInput={(e) => setKey(e.currentTarget.value)} /></Field>
-      <div><button type="button" class="chip-btn is-accent" onClick={() => void save()}>Save</button>{' '}
-        {p.key_saved ? <button type="button" class="chip-btn" onClick={() => void a.run('Removing…', async () => {
-          await native.invoke('ai.provider.set', { base_url: p.base_url, model_id: p.model_id, clear_key: true });
-          await refreshStatus();
-        })}>Remove saved key</button> : null} {a.view}</div>
-    </>
-  );
+    await native.invoke('ai.models', {}).catch(() => undefined);
+  };
+  return <ModelsSettings connections={aiStatus.value?.provider?.connections ?? []} disabled={busy.value || aiStatus.value?.busy}
+    onSave={async payload => { await native.invoke('ai.provider.set', payload); await refresh(); }}
+    onDelete={async id => {
+      await native.invoke('ai.provider.delete', { id });
+      if (model.value.startsWith(id + '/')) setModel('');
+      await refresh();
+    }} />;
 }
 
 function GeneralTab({ s }: { s: AgentState }) {
@@ -104,7 +91,7 @@ function GeneralTab({ s }: { s: AgentState }) {
       <label class="ag-check"><input type="checkbox" checked={auto} onChange={(e) => setAuto(e.currentTarget.checked)} /><span> Run actions without asking (click, type, navigate and non-read-only MCP tools). Off is safer.</span></label>
       <label class="ag-check">Max tool rounds per run <input type="number" min={1} max={60} class="ag-num" value={rounds} onInput={(e) => setRounds(e.currentTarget.value)} /></label>
       <div><button type="button" class="chip-btn is-accent" onClick={() => void a.run('Saving…', () => call('config.set', { auto_approve: auto, max_rounds: Number(rounds) || 25 }))}>Save</button> {a.view}</div>
-      <p class="ag-help">The model endpoint and key are on the Model tab.</p>
+      <p class="ag-help">Model endpoints and keys are on the Models tab.</p>
     </>
   );
 }
@@ -258,27 +245,23 @@ function McpEditor({ m, done }: { m: Partial<McpServer>; done: () => void }) {
 
 // ── shell of the settings view ───────────────────────────────────────────
 
-export function Settings() {
+export function SettingsPanel() {
   const s = agentState.value;
   const tab = settingsTab.value;
   // MCP connections take a while; keep the status fresh while that tab is open.
-  useMcpPolling(tab === 'mcp');
+  useMcpPolling(tab === 'mcp' || tab === 'tools');
   return (
-    <div class="agent">
-      <div class="ask-top"><strong>Agent settings</strong><span class="ask-ctx" /><button type="button" class="chip-btn" onClick={() => (view.value = 'chat')}>Back</button></div>
-      <div class="ag-tabs">
-        {TABS.map(([id, label]) => <button type="button" key={id} class={'ag-tab' + (id === tab ? ' is-on' : '')} onClick={() => (settingsTab.value = id)}>{label}</button>)}
-      </div>
-      <div class="ag-body">
-        {!s ? <p class="overlay-empty">Loading…</p>
+      <div class="ag-body settings-agent-body">
+        {tab === 'model' ? <ModelTab /> : !s ? <p class="overlay-empty">Loading…</p>
+          : tab === 'tools' ? <ToolsSettings tools={s.tools || []} error={s.tools_error}
+              onEditMcp={() => { settingsTab.value = 'mcp'; }}
+              onChange={async (op, payload) => { agentState.value = await call<AgentState>(op, payload); }} />
           : tab === 'prompts' ? <PromptsTab s={s} />
           : tab === 'instructions' ? <InstructionsTab s={s} />
           : tab === 'skills' ? <SkillsTab s={s} />
           : tab === 'mcp' ? <McpTab s={s} />
-          : tab === 'model' ? <ModelTab />
           : <GeneralTab s={s} />}
       </div>
-    </div>
   );
 }
 

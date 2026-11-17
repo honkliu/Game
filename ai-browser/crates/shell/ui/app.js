@@ -83,6 +83,10 @@
   };
 
   const $ = (sel) => document.querySelector(sel);
+  const assistantName = /^zh(?:-|$)/i.test(navigator.language) ? '洛' : 'River';
+  $('#assistant-name').textContent = assistantName;
+  $('#btn-ai').setAttribute('aria-label', assistantName);
+  $('#btn-ai').title = assistantName + ' (Ctrl+Shift+A)';
   const el = {
     app: $('#app'),
     rail: $('#rail'),
@@ -105,16 +109,8 @@
     star: $('#bookmark-btn'),
     downloadsBtn: $('#btn-downloads'),
     downloadBadge: $('#download-badge'),
-    menu: $('#btn-menu'),
-    findBar: $('#find-bar'),
+    settings: $('#btn-settings'),
     findInput: $('#find-input'),
-    findCount: $('#find-count'),
-    findClose: $('#find-close'),
-    findNext: $('#find-next'),
-    findPrev: $('#find-prev'),
-    findCase: $('#find-case'),
-    findWord: $('#find-word'),
-    findAll: $('#find-all'),
     panel: $('#downloads-panel'),
     downloadsList: $('#downloads-list'),
     downloadsEmpty: $('#downloads-empty'),
@@ -152,6 +148,8 @@
 
     const vertical = !!state.settings.vertical_tabs;
     document.documentElement.dataset.tabs = vertical ? 'vertical' : 'horizontal';
+    const selectedTab = state.tabs.find(t => t.shown) || activeTab();
+    document.documentElement.style.setProperty('--active-tab-hue', String(selectedTab ? tabHue(selectedTab) : 210));
     state.settings.rail_collapsed = vertical && !!state.settings.rail_collapsed;
     el.rail.classList.toggle('is-collapsed', state.settings.rail_collapsed);
     el.railToggle.setAttribute('aria-pressed', String(!state.settings.rail_collapsed));
@@ -461,6 +459,7 @@
       omniTyped = text;
       state.omnibox.explicitSelection = false;
       state.omnibox.rows = (res && res.rows) || [];
+      if (res.mode === 'ask') el.chip.textContent = '✨ ' + assistantName;
       state.omnibox.selected = 0;
       if (complete && el.omnibox.value === text && typeof res.completion === 'string' &&
           res.completion.length > text.length && res.completion.toLowerCase().startsWith(text.toLowerCase())) {
@@ -493,7 +492,8 @@
         <span class="dropdown-text"><span class="dropdown-title"></span><span class="dropdown-sub"></span></span>
         <span class="dropdown-hint"></span>`;
       row.querySelector('.dropdown-title').textContent = r.title || r.url || '';
-      row.querySelector('.dropdown-sub').textContent = r.hint || r.url || '';
+      row.querySelector('.dropdown-sub').textContent = r.kind === 'ask'
+        ? (r.hint || '').replace(/^River(?=:|$)/, assistantName) : r.hint || r.url || '';
       row.querySelector('.dropdown-hint').textContent = r.kind === 'history' ? 'open' : '';
       row.addEventListener('mousedown', (e) => { e.preventDefault(); state.omnibox.selected = i; activateRow(); });
       el.dropdown.appendChild(row);
@@ -652,35 +652,31 @@
     if (!el.itemMenu.hidden && !e.target.closest('#item-menu')) closeItemMenu();
   });
 
-  // ── find bar (§4.6) ──────────────────────────────────────────────────
+  // ── inline page search ──────────────────────────────────────────────
   let findSeq = 0;
+  let findTarget = '';
+  let findComposing = false;
+  const searchedTabs = new Set();
   function findQuery(kind) {
     const q = el.findInput.value;
     const seq = ++findSeq;
-    invoke(kind || 'find.query', {
-      query: q,
-      case_sensitive: el.findCase.getAttribute('aria-pressed') === 'true',
-      regex_or_whole_word: el.findWord.getAttribute('aria-pressed') === 'true',
-      highlight_all: el.findAll.getAttribute('aria-pressed') === 'true',
-    })
+    const tab = activeTab();
+    findTarget = tab ? `${tab.id}:${tab.url}` : '';
+    if (tab) {
+      if (q) searchedTabs.add(tab.id);
+      else searchedTabs.delete(tab.id);
+    }
+    invoke(kind || 'find.query', { query: q, highlight_all: true })
       .then((r) => { if (seq === findSeq && r) renderFind(r); })
       .catch((e) => console.error('find', e));
   }
 
   function renderFind(r) {
-    el.findCount.textContent = r.supported_flags && r.supported_flags.length
-      ? `${r.active}/${r.total}`
-      : 'n/a';
-    if (r.supported_flags && r.supported_flags.length === 0) {
-      el.findInput.setAttribute('title', r.error || 'Find is unavailable on this page');
-    } else {
-      el.findInput.setAttribute('title', r.limited ? 'Search limit reached; counts cover the scanned content' : 'Find in page');
-    }
-    el.findAll.disabled = !(r.supported_flags || []).includes('highlight_all');
+    el.findInput.setAttribute('aria-invalid', String(!!el.findInput.value && !r.total));
+    el.findInput.title = r.error || (el.findInput.value ? `${r.active || 0}/${r.total || 0}` : 'Find in page (Ctrl+F)');
   }
 
   function openFind(query) {
-    el.findBar.hidden = false;
     if (typeof query === 'string') el.findInput.value = query;
     el.findInput.focus();
     el.findInput.select();
@@ -688,30 +684,28 @@
   }
 
   function closeFind() {
-    el.findBar.hidden = true;
+    ++findSeq;
     el.findInput.value = '';
+    el.findInput.removeAttribute('aria-invalid');
+    el.findInput.title = 'Find in page (Ctrl+F)';
+    searchedTabs.delete(activeTab()?.id);
     invoke('find.stop', {}).catch(() => {});
   }
 
-  el.findInput.addEventListener('input', () => findQuery('find.query'));
+  function refreshFindTarget() {
+    const tab = activeTab();
+    if (!tab || tab.loading) { findTarget = ''; return; }
+    if (findComposing) return;
+    if (findTarget !== `${tab.id}:${tab.url}` && (el.findInput.value || searchedTabs.has(tab.id))) findQuery();
+  }
+  el.findInput.addEventListener('input', () => { if (!findComposing) findQuery(); });
+  el.findInput.addEventListener('compositionstart', () => { findComposing = true; });
+  el.findInput.addEventListener('compositionend', () => { findComposing = false; findQuery(); });
   el.findInput.addEventListener('keydown', (e) => {
+    if (e.isComposing || findComposing) return;
     if (e.key === 'Enter') { e.preventDefault(); findQuery(e.shiftKey ? 'find.prev' : 'find.next'); }
     else if (e.key === 'Escape') { e.preventDefault(); closeFind(); focusPage(); }
   });
-  el.findClose.addEventListener('click', closeFind);
-  el.findNext.addEventListener('click', () => findQuery('find.next'));
-  el.findPrev.addEventListener('click', () => findQuery('find.prev'));
-  el.findCase.addEventListener('click', () => togglePressed(el.findCase, () => findQuery('find.query')));
-  el.findAll.addEventListener('click', () => togglePressed(el.findAll, () => findQuery('find.query')));
-  el.findWord.setAttribute('aria-disabled', 'false');
-  el.findWord.title = 'Whole word';
-  el.findWord.addEventListener('click', () => togglePressed(el.findWord, () => findQuery('find.query')));
-
-  function togglePressed(btn, after) {
-    const on = btn.getAttribute('aria-pressed') === 'true';
-    btn.setAttribute('aria-pressed', String(!on));
-    if (after) after();
-  }
 
   // ── downloads (§4.4) ─────────────────────────────────────────────────
   function renderDownloads() {
@@ -814,18 +808,7 @@
   el.star.addEventListener('click', () => invoke('tab.bookmark', {}));
   el.downloadsBtn.addEventListener('click', () => invoke('shortcut', { name: 'open_downloads' }));
   document.getElementById('btn-ai').addEventListener('click', () => invoke('shortcut', { name: 'ask_ai' }));
-  el.menu.addEventListener('click', () => {
-    const r = el.menu.getBoundingClientRect();
-    openItemMenu(null, r.right - 220, r.bottom + 2, [
-      { label: 'Settings', run: () => invoke('settings.open', {}) },
-      { label: 'History', run: () => invoke('shortcut', { name: 'open_history' }) },
-      { label: 'Downloads', run: () => invoke('shortcut', { name: 'open_downloads' }) },
-      { label: 'Find in page', run: () => openFind() },
-      { sep: true },
-      { label: 'Command palette (Ctrl+K)', run: () => invoke('shell.open_palette', {}) },
-      { label: 'Open data folder', run: () => invoke('settings.open_folder', {}) },
-    ]);
-  });
+  el.settings.addEventListener('click', () => invoke('settings.open', {}));
   el.newTab.addEventListener('click', () => invoke('tab.new', {}));
   el.newCanvas.addEventListener('click', () => {
     const r = el.newCanvas.getBoundingClientRect();
@@ -898,6 +881,7 @@
     if (p.active_tab_id !== undefined) state.activeTabId = p.active_tab_id;
     if (p.canvas !== undefined) state.canvas = p.canvas;
     renderTabs();
+    refreshFindTarget();
   });
 
   on('state.groups', (p) => {
@@ -906,12 +890,14 @@
   });
 
   on('tab.created', () => { /* full state follows in state.tabs */ });
+  on('tab.closed', p => searchedTabs.delete(p?.tab_id));
   on('tab.activated', (p) => {
     if (p && p.tabs) {
       state.tabs = p.tabs.tabs || state.tabs;
       state.groups = p.tabs.groups || state.groups;
     }
     updateChrome();
+    refreshFindTarget();
   });
   on('tab.navigated', (p) => {
     if (!p || p.id == null) return;
@@ -940,12 +926,13 @@
     updateChrome();
   });
   on('find.result', (r) => {
-    if (r && r.closed) { el.findBar.hidden = true; return; }
+    if (r && r.closed) { renderFind({}); return; }
     renderFind(r || {});
   });
   on('shell.focus_changed', (p) => {
     if (!p) return;
     if (p.scope === 'omnibox') focusOmnibox(!!p.select_all);
+    else if (p.scope === 'find') openFind();
     else if (p.scope === 'cycle') cycleFocus();
   });
   on('shell.focus_find', (p) => openFind(p && p.query));
@@ -953,23 +940,18 @@
     const panel = p && p.panel;
     el.panel.hidden = panel !== 'downloads';
     if (panel === 'downloads') { renderDownloads(); const first = el.downloadsList.querySelector('.download-row'); if (first) first.focus(); }
-    if (panel !== 'find' && !el.findBar.hidden) { /* keep find open until host says otherwise */ }
   });
   on('shell.find_action', (p) => {
     if (!p) return;
     if (p.action === 'find_next') findQuery('find.next');
     else if (p.action === 'find_prev') findQuery('find.prev');
-    else if (p.action === 'toggle_highlight_all' && !el.findAll.disabled) {
-      togglePressed(el.findAll, () => findQuery('find.query'));
-    }
-    else if (p.action === 'toggle_regex') toast('Regular-expression search is not supported; use Whole word.');
   });
   on('shell.shortcut', (p) => {
     if (!p) return;
     switch (p.name) {
       case 'escape':
         if (!el.itemMenu.hidden) { closeItemMenu(); return; }
-        if (!el.findBar.hidden) { closeFind(); return; }
+        if (el.findInput.value) { closeFind(); return; }
         break;
       case 'item_menu': {
         const row = document.activeElement && document.activeElement.closest('.tab-row');
@@ -1005,7 +987,7 @@
   });
   on('shell.escape', () => {
     if (!el.itemMenu.hidden) { closeItemMenu(); return; }
-    if (!el.findBar.hidden) { closeFind(); return; }
+    if (el.findInput.value) { closeFind(); return; }
     if (state.omnibox.open) { closeDropdown(); return; }
   });
   on('shell.toast', (p) => { if (p && p.text) toast(p.text); });
@@ -1014,7 +996,6 @@
   on('shell.layout', (p) => {
     if (!p) return;
     document.documentElement.style.setProperty('--rail-w', `${p.rail_w}px`);
-    el.findBar.hidden = !p.find_open;
     if (p.canvas !== undefined) { state.canvas = p.canvas; renderCanvas(); }
   });
   on('diagnostics.report', (r) => {

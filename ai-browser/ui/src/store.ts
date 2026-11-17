@@ -6,18 +6,19 @@
 import { batch, computed, signal } from '@preact/signals';
 import { bridge, createAgentCalls } from './ipc';
 import { contextSignature, echoOf, reconcileEdit, type ContextEdit } from './context';
+import { modelCommand } from './model_commands';
 import {
   agentStatusLine, failureLine, fromMessages, newAgentTurn, newAskTurn, reduceAgent, reduceAnswer, toMessages,
 } from './reducers';
 import type {
-  AgentContext, AgentEvent, AgentState, AiStatus, AskTurn, Candidate, ConversationRow, ModelInfo, Turn,
+  AgentContext, AgentEvent, AgentState, AiStatus, AskTurn, Candidate, ConversationRow, ListedModel, ModelInfo, Turn,
 } from './types';
 
 export const native = bridge();
 export const call = createAgentCalls(native);
 
 export type View = 'chat' | 'settings' | 'history';
-export type SettingsTab = 'skills' | 'mcp' | 'prompts' | 'instructions' | 'model' | 'general';
+export type SettingsTab = 'tools' | 'skills' | 'mcp' | 'prompts' | 'instructions' | 'model' | 'general' | 'history' | 'downloads' | 'chats';
 export type Intent = 'ask' | 'summarize' | 'explain' | 'verify' | 'translate' | 'rewrite' | 'act';
 
 const MAX_TURNS = 100;
@@ -34,7 +35,7 @@ export const agentOn = signal(store()?.getItem('agentOn') !== '0');
 /** auto: the assistant navigates the page itself. manual: it only offers a link. */
 export const navAuto = signal(store()?.getItem('navAuto') !== '0');
 export const view = signal<View>('chat');
-export const settingsTab = signal<SettingsTab>('prompts');
+export const settingsTab = signal<SettingsTab>('general');
 export const turns = signal<Turn[]>([]);
 export const status = signal<{ text: string; kind?: 'warn' | 'error' }>({ text: '' });
 export const ctx = signal<AgentContext | null>(null);
@@ -45,7 +46,14 @@ export const agentState = signal<AgentState | null>(null);
 export const focusTick = signal(0);
 
 export const intent = signal<Intent>('ask');
-export const model = signal('');
+export const model = signal(store()?.getItem('model') ?? '');
+export const modelMenu = signal(false);
+export const modelFilter = signal('');
+export function setModel(id: string) {
+  model.value = id;
+  store()?.setItem('model', id);
+}
+window.addEventListener('storage', event => { if (event.key === 'model') model.value = event.newValue ?? ''; });
 export const useSelection = signal(false);
 export const localOnly = signal(false);
 export const extraTabs = signal<number[]>([]);
@@ -183,14 +191,28 @@ export async function refreshStatus() {
   }
 }
 
-function applyStatus(s: AiStatus) {
+export function applyStatus(s: AiStatus) {
   aiStatus.value = s;
+  if (s.models?.length) applyModels(s.models);
+  else if (s.provider?.connections) {
+    models.value = s.provider.connections.flatMap(connection => connection.models.map(entry => ({
+      ...entry, display_name: entry.display_name || entry.model_id,
+      provider_id: connection.id, available: connection.enabled,
+    })));
+  }
   const had = useSelection.peek();
   if (!s.selection) useSelection.value = false;
   else if (!had) useSelection.value = true;
   const live = new Set((s.other_tabs ?? []).map((t) => t.tab_id));
   const kept = extraTabs.peek().filter((id) => live.has(id));
   if (kept.length !== extraTabs.peek().length) extraTabs.value = kept;
+}
+
+export function applyModels(entries: ListedModel[]) {
+  models.value = entries.map(entry => ({
+    ...entry.manifest, local: entry.manifest.execution === 'local',
+    available: entry.available, unavailable_reason: entry.unavailable_reason,
+  }));
 }
 
 export async function refreshAgentState() {
@@ -208,6 +230,20 @@ export const NAV_INTENT = /^\s*(open|go to|goto|visit|navigate to|take me to|打
 
 export async function sendMessage(text: string, over?: { intent: Intent; selection?: boolean; question?: string }) {
   if (busy.value) return;
+  const command = modelCommand(text, models.value, agentOn.value);
+  if (command) {
+    if (command.kind === 'select') {
+      setModel(command.id);
+      modelMenu.value = false;
+      setStatus(`Model: ${command.label}`);
+      focusInput();
+    } else {
+      modelFilter.value = command.query;
+      modelMenu.value = true;
+      setStatus(command.error || 'Choose a model below.');
+    }
+    return;
+  }
   if (!agentOn.value && !over && NAV_INTENT.test(text)) setAgentOn(true);
   if (agentOn.value) await sendAgent(text.trim());
   else await sendAsk(over ? (over.question ?? '') : text.trim(), over);
@@ -356,10 +392,7 @@ export async function saveAsSkill() {
   try {
     const draft = await call('skill.distill', { messages: list.map((m) => ({ role: m.role, content: m.content })) });
     setStatus('');
-    skillDraft.value = draft;
-    settingsTab.value = 'skills';
-    view.value = 'settings';
-    await refreshAgentState();
+    await native.invoke('settings.open', { section: 'skills', skill_draft: draft });
   } catch (e) {
     setStatus('Could not draft a skill: ' + errText(e), 'error');
   }
@@ -368,9 +401,7 @@ export async function saveAsSkill() {
 export const skillDraft = signal<any>(null);
 
 export function openSettings(tab: SettingsTab) {
-  settingsTab.value = tab;
-  view.value = 'settings';
-  void refreshAgentState();
+  native.invoke('settings.open', { section: tab }).catch(error => setStatus(errText(error), 'error'));
 }
 
 // ── selection routing ────────────────────────────────────────────────────
@@ -459,7 +490,7 @@ export function startStore() {
     setStatus('The page changed; these citations no longer point at it.', 'warn');
   });
   on('ai.models', (p) => {
-    models.value = p?.models ?? [];
+    applyModels(p?.models ?? []);
   });
   on('ai.context', (p: AiStatus) => {
     if (p) applyStatus(p);
@@ -487,6 +518,13 @@ export function startStore() {
     });
   }
   on('sidebar.selection', (p) => void onSidebarSelection(p?.intent));
+  const pendingConversation = async () => {
+    try {
+      const { id } = await native.invoke<{ id?: string }>('ai.conversation.pending');
+      if (id) await openConversation(id);
+    } catch (e) { setStatus(errText(e), 'error'); }
+  };
+  on('conversation.open', () => void pendingConversation());
   on('state.settings', (p) => {
     const s = p || {};
     document.documentElement.dataset.theme = (s.theme || 'system') === 'system' ? (s.system_dark ? 'dark' : 'light') : s.theme;
@@ -513,7 +551,6 @@ export function startStore() {
   void (async () => {
     await Promise.all([refreshContext(), refreshStatus(), refreshAgentState(), syncSession()]);
     native.invoke('ai.models', {}).catch(() => undefined);
-    // First run: no endpoint yet, so the model form is the first thing shown.
-    if (aiStatus.value && !aiStatus.value.provider?.configured) openSettings('model');
+    await pendingConversation();
   })();
 }

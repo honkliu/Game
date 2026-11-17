@@ -23,6 +23,7 @@ pub enum Surface {
     Shell,
     Overlay,
     Sidebar,
+    Settings(crate::tabs::TabId),
 }
 
 impl Surface {
@@ -31,6 +32,7 @@ impl Surface {
             Self::Shell => "shell",
             Self::Overlay => "overlay",
             Self::Sidebar => "sidebar",
+            Self::Settings(_) => "settings",
         }
     }
 }

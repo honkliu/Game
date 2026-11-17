@@ -2,7 +2,7 @@
 //! disk (DESIGN §6.4 Security: shell webviews load only bundled `asset://`
 //! content; no local HTTP server).
 //!
-//! On Windows, wry maps `asset://host/path` to `http://asset.host/path`
+//! On Windows, wry maps `asset://host/path` to `https://asset.host/path`
 //! internally, so `asset://shell/index.html` arrives with path `/shell/index.html`
 //! and Host `shell`. We ignore the host and serve from the root directory.
 

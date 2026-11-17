@@ -147,6 +147,47 @@ export async function run(cases) {
   return failed;
 }
 
+/** Hit-test native sibling views inside this process's window without moving the desktop pointer. */
+export async function nativeHitBounds(page, selector, pid) {
+  const { x, y, w, h } = await page.evaluate(sel => {
+    const r = document.querySelector(sel).getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: innerWidth, h: innerHeight };
+  }, selector);
+  const ps = `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class NativeHit {
+  [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out Rect r);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out Rect r);
+  [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref Point p);
+  [DllImport("user32.dll")] public static extern IntPtr ChildWindowFromPointEx(IntPtr h, Point p, uint flags);
+}
+'@
+[NativeHit]::SetProcessDPIAware() | Out-Null
+$window = (Get-Process -Id ${pid}).MainWindowHandle
+if ($window -eq [IntPtr]::Zero) { throw 'test browser window not found' }
+$client = New-Object NativeHit+Rect
+[NativeHit]::GetClientRect($window, [ref]$client) | Out-Null
+$point = New-Object NativeHit+Point
+$point.X = [int][Math]::Round(${x / w} * $client.Right)
+$point.Y = [int][Math]::Round(${y / h} * $client.Bottom)
+$hit = [NativeHit]::ChildWindowFromPointEx($window, $point, 3)
+if ($hit -eq [IntPtr]::Zero -or $hit -eq $window) { throw 'no native view at menu position' }
+$bounds = New-Object NativeHit+Rect
+[NativeHit]::GetWindowRect($hit, [ref]$bounds) | Out-Null
+$point.X = $bounds.Left
+$point.Y = $bounds.Top
+[NativeHit]::ScreenToClient($window, [ref]$point) | Out-Null
+@{ x=$point.X; y=$point.Y; w=$bounds.Right-$bounds.Left; h=$bounds.Bottom-$bounds.Top;
+   clientW=$client.Right; clientH=$client.Bottom } | ConvertTo-Json -Compress
+`;
+  return JSON.parse(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }));
+}
+
 /** A real OS-level mouse click at physical screen coordinates (what a user's mouse does). */
 export function osClick(x, y, pid) {
   const ps = `Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y); [DllImport("user32.dll")] public static extern void mouse_event(int f,int dx,int dy,int d,int e); [DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h); [DllImport("user32.dll")] public static extern void keybd_event(byte k,byte s,int f,int e);' -Name W -Namespace N; [N.W]::SetProcessDPIAware() | Out-Null; ${pid ? `$h=(Get-Process -Id ${pid}).MainWindowHandle; [N.W]::keybd_event(18,0,0,0); [N.W]::SetForegroundWindow($h) | Out-Null; [N.W]::keybd_event(18,0,2,0); Start-Sleep -Milliseconds 400;` : ""} [N.W]::SetCursorPos(${Math.round(x)},${Math.round(y)}) | Out-Null; Start-Sleep -Milliseconds 150; [N.W]::mouse_event(2,0,0,0,0); Start-Sleep -Milliseconds 60; [N.W]::mouse_event(4,0,0,0,0)`;

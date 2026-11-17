@@ -58,6 +58,8 @@ pub struct AgentConfig {
     pub skill_modes: HashMap<String, String>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    #[serde(default)]
+    pub tools: Option<super::tool_config::ToolConfig>,
 }
 
 fn default_rounds() -> u32 {
@@ -72,6 +74,7 @@ impl Default for AgentConfig {
             max_rounds: default_rounds(),
             skill_modes: HashMap::new(),
             mcp_servers: Vec::new(),
+            tools: None,
         }
     }
 }
@@ -199,10 +202,15 @@ impl Store {
     }
 
     pub fn config(&self) -> AgentConfig {
-        fs::read_to_string(self.config_path())
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+        self.load_config().unwrap_or_default()
+    }
+
+    pub fn load_config(&self) -> Result<AgentConfig, String> {
+        match fs::read_to_string(self.config_path()) {
+            Ok(text) => serde_json::from_str(&text).map_err(|error| error.to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AgentConfig::default()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     pub fn save_config(&self, config: &AgentConfig) -> Result<(), String> {

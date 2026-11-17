@@ -36,6 +36,25 @@ export interface Provider {
   model_id?: string;
   key_saved?: boolean;
   configured?: boolean;
+  connections?: ProviderConnection[];
+}
+
+export interface ProviderModel {
+  model_id: string;
+  display_name?: string | null;
+  context_window?: number;
+  supports_tools?: boolean;
+  aliases?: string[];
+  modalities?: string[];
+}
+
+export interface ProviderConnection {
+  id: string;
+  base_url: string;
+  enabled: boolean;
+  models: ProviderModel[];
+  key_saved?: boolean;
+  key_error?: string;
 }
 
 export interface Coverage {
@@ -48,6 +67,7 @@ export interface Coverage {
 }
 
 export interface AiStatus {
+  busy?: boolean;
   enabled: boolean;
   reason?: string;
   askable: boolean;
@@ -58,6 +78,7 @@ export interface AiStatus {
   multi_tab?: boolean;
   cloud_enabled?: boolean;
   provider?: Provider;
+  models?: ListedModel[];
 }
 
 export interface ModelInfo {
@@ -65,6 +86,15 @@ export interface ModelInfo {
   model_id: string;
   display_name?: string;
   local?: boolean;
+  supports_tools?: boolean;
+  available?: boolean;
+  unavailable_reason?: string;
+}
+
+export interface ListedModel {
+  manifest: ModelInfo & { execution?: string };
+  available: boolean;
+  unavailable_reason?: string;
 }
 
 export interface Citation {
@@ -128,11 +158,40 @@ export interface McpServer {
   tools: McpTool[];
 }
 
+export interface HttpToolConfig {
+  id: string;
+  name?: string;
+  title: string;
+  description: string;
+  method: 'GET' | 'POST';
+  url: string;
+  parameters: Record<string, unknown>;
+  body: unknown;
+  response: 'json' | 'text' | 'duckduckgo_html';
+  read_only: boolean;
+}
+
+export interface ConfiguredTool {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  source: 'browser' | 'local' | 'http' | 'mcp';
+  target: string;
+  enabled: boolean;
+  read_only: boolean;
+  parameters: Record<string, unknown>;
+  http?: HttpToolConfig;
+  model_definition?: Record<string, unknown>;
+}
+
 export interface AgentState {
   config: { auto_approve: boolean; custom_instructions: string; max_rounds: number };
   skills: SkillInfo[];
   prompts: PromptInfo[];
   mcp: McpServer[];
+  tools?: ConfiguredTool[];
+  tools_error?: string | null;
 }
 
 export interface ConversationRow {

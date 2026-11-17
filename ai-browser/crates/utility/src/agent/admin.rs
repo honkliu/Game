@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 use super::mcp::Hub;
 use super::store::{slug, valid_id, McpServerConfig, Store};
+use super::tool_config::{self, HttpTool, ToolOverride};
 use crate::control::{now_ms, TaskControl};
 use crate::provider::{Catalog, ChatRequest};
 
@@ -20,6 +21,7 @@ fn strings(p: &Value, key: &str) -> Vec<String> {
 }
 
 pub fn state(store: &Store, hub: &Hub) -> Value {
+    let (tools, tools_error) = tool_config::catalog(store, hub);
     let config = store.config();
     json!({
         "config": {
@@ -30,6 +32,8 @@ pub fn state(store: &Store, hub: &Hub) -> Value {
         "skills": store.skills().iter().map(|k| k.to_json(false)).collect::<Vec<_>>(),
         "prompts": store.prompts(),
         "mcp": hub.status(&config.mcp_servers),
+        "tools": tools,
+        "tools_error": tools_error,
     })
 }
 
@@ -97,6 +101,64 @@ fn distill(store: &Store, catalog: &Catalog, p: &Value) -> Result<Value, String>
 pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<Value, String> {
     match s(p, "op") {
         "state" => Ok(state(store, hub)),
+        "tools.enable" => {
+            let id = s(p, "id");
+            let enabled = p["enabled"].as_bool().ok_or("Enabled must be a boolean.")?;
+            let mut tools = tool_config::load(store, hub)?;
+            if !tool_config::catalog(store, hub).0.iter().any(|tool| tool["id"] == id) {
+                return Err("Unknown tool.".into());
+            }
+            tools.enabled.insert(id.to_string(), enabled);
+            let mut config = store.load_config()?;
+            config.tools = Some(tools);
+            store.save_config(&config)?;
+            Ok(state(store, hub))
+        }
+        "tools.http.save" => {
+            let tool: HttpTool = serde_json::from_value(p["tool"].clone()).map_err(|error| error.to_string())?;
+            tool.validate()?;
+            let mut tools = tool_config::load(store, hub)?;
+            let existing = tools.http.iter().position(|old| old.id == tool.id);
+            if existing.is_some() && p["editing"] != true {
+                return Err("That tool ID already exists. Edit the existing tool instead.".into());
+            }
+            tools.enabled.insert(tool.id.clone(), p["enabled"].as_bool().unwrap_or(false));
+            if let Some(index) = existing { tools.http[index] = tool; }
+            else { tools.http.push(tool); }
+            tool_config::validate_names(&tools, hub)?;
+            let mut config = store.load_config()?;
+            config.tools = Some(tools);
+            store.save_config(&config)?;
+            Ok(state(store, hub))
+        }
+        "tools.definition.save" | "tools.definition.reset" => {
+            let id = s(p, "id");
+            let mut tools = tool_config::load(store, hub)?;
+            let known = tool_config::catalog(store, hub).0.into_iter().any(|tool| tool["id"] == id && tool["source"] != "http");
+            if !known { return Err("Unknown non-HTTP tool.".into()); }
+            if s(p, "op") == "tools.definition.reset" {
+                tools.overrides.remove(id);
+            } else {
+                let edit: ToolOverride = serde_json::from_value(p["definition"].clone()).map_err(|error| error.to_string())?;
+                edit.validate()?;
+                tools.overrides.insert(id.to_string(), edit);
+            }
+            tool_config::validate_names(&tools, hub)?;
+            let mut config = store.load_config()?;
+            config.tools = Some(tools);
+            store.save_config(&config)?;
+            Ok(state(store, hub))
+        }
+        "tools.http.delete" => {
+            let mut tools = tool_config::load(store, hub)?;
+            let id = s(p, "id");
+            tools.http.retain(|tool| tool.id != id);
+            tools.enabled.remove(id);
+            let mut config = store.load_config()?;
+            config.tools = Some(tools);
+            store.save_config(&config)?;
+            Ok(state(store, hub))
+        }
         "config.set" => {
             let mut c = store.config();
             if let Some(v) = p.get("auto_approve").and_then(Value::as_bool) {
@@ -197,6 +259,14 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             }
             store.save_config(&c)?;
             hub.sync(&c.mcp_servers);
+            let mut selection = tool_config::load(store, hub)?;
+            for tool in hub.tools() {
+                if matches!(&tool.kind, super::tools::Kind::Mcp { server, .. } if server == &id) {
+                    selection.enabled.entry(tool.id).or_insert(true);
+                }
+            }
+            c.tools = Some(selection);
+            store.save_config(&c)?;
             Ok(state(store, hub))
         }
         "mcp.delete" => {

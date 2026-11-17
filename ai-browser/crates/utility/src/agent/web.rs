@@ -1,4 +1,4 @@
-//! The agent's own web access: `fetch_url` and `web_search`.
+//! Public-only `fetch_url` access and pure HTML/search-result parsing.
 //!
 //! Requests are made by the utility (not the page), so they carry no cookies and
 //! cannot reach the user's logged-in sessions. Only public http(s) hosts are allowed,
@@ -203,18 +203,9 @@ pub fn html_to_text(html: &str) -> (String, String) {
 }
 
 /// DuckDuckGo's HTML endpoint, parsed for `(title, url, snippet)`.
-pub fn search(query: &str, limit: usize) -> Result<Vec<(String, String, String)>, String> {
-    let mut encoded = String::new();
-    for b in query.bytes() {
-        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
-            encoded.push(b as char);
-        } else {
-            encoded.push_str(&format!("%{b:02X}"));
-        }
-    }
-    let page = fetch(&format!("https://html.duckduckgo.com/html/?q={encoded}"))?;
+pub fn search_results(html: &str, limit: usize) -> Vec<(String, String, String)> {
     let mut results = Vec::new();
-    let mut rest = page.body.as_str();
+    let mut rest = html;
     while let Some(i) = rest.find("class=\"result__a\"") {
         rest = &rest[i..];
         let href = attr(rest, "href").unwrap_or_default();
@@ -238,7 +229,7 @@ pub fn search(query: &str, limit: usize) -> Result<Vec<(String, String, String)>
             break;
         }
     }
-    Ok(results)
+    results
 }
 
 fn attr(tag_start: &str, name: &str) -> Option<String> {

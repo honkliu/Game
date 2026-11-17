@@ -12,6 +12,8 @@
   },
   "dependencies": {
     "@preact/signals": "^2.11.4",
+    "dompurify": "^3.4.17",
+    "marked": "^18.2.0",
     "preact": "^11.2.0"
   },
   "devDependencies": {

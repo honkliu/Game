@@ -29,14 +29,8 @@ impl AppState {
             if let Some(live) = self.live.get(&tab) {
                 let _ = live.webview.evaluate_script(&script);
             }
-            if self.panel == Panel::Find { self.panel = Panel::None; }
             self.emit("find.result", json!({ "closed": true }));
-            self.apply_layout();
             return Ok(None);
-        }
-        if command == "find.start" {
-            self.panel = Panel::Find;
-            self.apply_layout();
         }
         let active = if total > 0 { index.rem_euclid(total as i64) as u64 + 1 } else { 0 };
         self.find = Some(FindResult { tab_id: tab.0, query: query.to_string(),

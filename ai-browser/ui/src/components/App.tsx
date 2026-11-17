@@ -1,10 +1,10 @@
-import { agentOn, agentState, navAuto, newChat, openSettings, saveAsSkill, sendMessage, setAgentOn, setNavAuto, view } from '../store';
+import { agentOn, agentState, navAuto, newChat, openSettings, saveAsSkill, sendMessage, setAgentOn, setNavAuto } from '../store';
 import { native } from '../store';
 import { Transcript } from './Transcript';
 import { ContextBar } from './ContextBar';
 import { Composer } from './Composer';
-import { Settings } from './Settings';
-import { History } from './History';
+
+const assistantName = /^zh(?:-|$)/i.test(navigator.language) ? '洛' : 'River';
 
 /** A grip on the pane's left edge. The pane is its own webview and moves as it resizes,
  *  so the drag is measured in screen coordinates and the shell clamps and applies it. */
@@ -36,7 +36,7 @@ function Header() {
   const on = agentOn.value;
   return (
     <div id="mode-bar">
-      <strong class="bar-title">✦ AI</strong>
+      <strong class="bar-title">✦ {assistantName}</strong>
       <label class="switch" title="Agent mode: the assistant can use tools, browse and act. Off: ask about the page and get cited answers.">
         <input type="checkbox" id="agent-switch" role="switch" aria-label="Agent mode" checked={on} onChange={(e) => setAgentOn(e.currentTarget.checked)} />
         <span class="switch-track" />
@@ -51,17 +51,15 @@ function Header() {
       ) : null}
       <span class="bar-fill" />
       <button type="button" class="chip-btn" onClick={newChat}>New</button>
-      {on ? <button type="button" class="chip-btn" onClick={() => (view.value = 'history')}>History</button> : null}
-      <button type="button" class="chip-btn" onClick={() => openSettings('skills')}>Skills</button>
-      <button type="button" class="chip-btn" onClick={() => openSettings('prompts')}>⚙</button>
+      <button type="button" class="chip-btn" aria-label="Settings" title="Settings" onClick={() => openSettings('general')}>⚙</button>
     </div>
   );
 }
 
 function Chat() {
   const state = agentState.value;
-  const mcp = state ? state.mcp.filter((m) => m.status === 'connected') : [];
-  const tools = mcp.reduce((n, m) => n + m.tools.length, 0);
+  const tools = state?.tools || [];
+  const enabled = tools.filter(tool => tool.enabled).length;
   return (
     <div class="chat">
       <Transcript onStarter={(text) => void sendMessage(text)} />
@@ -69,8 +67,8 @@ function Chat() {
       <Composer />
       {agentOn.value ? (
         <div class="ag-foot">
-          <button type="button" id="ag-mcp" class="ag-chip" onClick={() => openSettings('mcp')}>
-            {state ? (state.mcp.length ? `MCP: ${mcp.length}/${state.mcp.length} servers · ${tools} tools` : 'MCP: add a server') : 'MCP'}
+          <button type="button" id="ag-tools" class="ag-chip" onClick={() => openSettings('tools')}>
+            {state ? `Tools: ${enabled}/${tools.length} enabled` : 'Tools'}
           </button>
           <button type="button" class="ag-chip" onClick={() => void saveAsSkill()}>Save chat as skill</button>
           <button type="button" class="ag-chip" onClick={() => openSettings('prompts')}>Edit prompts</button>
@@ -81,12 +79,11 @@ function Chat() {
 }
 
 export function App() {
-  const v = view.value;
   return (
     <>
       <ResizeGrip />
       <Header />
-      {v === 'settings' ? <Settings /> : v === 'history' ? <History /> : <Chat />}
+      <Chat />
     </>
   );
 }

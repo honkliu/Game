@@ -53,7 +53,7 @@ pub fn page_asset_url(url: &str) -> String {
     // Wry rewrites custom schemes during construction, but not in load_url.
     #[cfg(windows)]
     if let Some(path) = url.strip_prefix("asset://shell/") {
-        return format!("http://asset.shell/{path}");
+        return format!("https://asset.shell/{path}");
     }
     url.to_string()
 }
@@ -66,8 +66,10 @@ pub fn configure<'a>(
     #[cfg(windows)]
     {
         use wry::WebViewBuilderExtWindows;
+        // Mixed HTTP/HTTPS aliases can be upgraded past the custom protocol handler.
+        let builder = builder.with_https_scheme(true);
         let mut builder = if trusted_ui {
-            builder.with_https_scheme(true)
+            builder
         } else {
             builder.with_browser_accelerator_keys(false)
         };
@@ -109,7 +111,7 @@ mod tests {
     fn page_asset_navigation_preserves_state_and_external_urls() {
         let url = "asset://shell/pages/settings.html#state=abc-_";
         #[cfg(windows)]
-        assert_eq!(super::page_asset_url(url), "http://asset.shell/pages/settings.html#state=abc-_");
+        assert_eq!(super::page_asset_url(url), "https://asset.shell/pages/settings.html#state=abc-_");
         #[cfg(not(windows))]
         assert_eq!(super::page_asset_url(url), url);
         assert_eq!(super::page_asset_url("https://example.com/asset://shell/"), "https://example.com/asset://shell/");

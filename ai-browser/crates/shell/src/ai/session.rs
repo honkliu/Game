@@ -165,7 +165,7 @@ pub enum Pending {
 
 pub struct AiSession {
     pub link_generation: u64,
-    pub provider_key_saved: bool,
+    pub provider_view: Option<serde_json::Value>,
     pub ui: super::ui_state::UiState,
     pub identity: Identity,
     pub contexts: ContextStore,
@@ -246,7 +246,7 @@ impl AiSession {
     pub fn new() -> AiSession {
         AiSession {
             link_generation: 0,
-            provider_key_saved: false,
+            provider_view: None,
             ui: super::ui_state::UiState::default(),
             identity: Identity::new(),
             contexts: ContextStore::default(),

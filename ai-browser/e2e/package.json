@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node suite5.mjs && node suite11.mjs && node suite12.mjs"
+    "test": "node suite5.mjs && node suite11.mjs && node suite12.mjs && node suite13.mjs && node suite14.mjs"
   },
   "devDependencies": {
     "playwright": "1.64.1"

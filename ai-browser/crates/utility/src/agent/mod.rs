@@ -12,6 +12,7 @@
 pub mod admin;
 pub mod mcp;
 pub mod store;
+pub mod tool_config;
 pub mod tools;
 pub mod web;
 
@@ -269,9 +270,9 @@ fn nav_mode(params: &Value) -> Option<&'static str> {
 
 fn nav_instructions(mode: &str) -> &'static str {
     if mode == "auto" {
-        "\n\n# Navigation mode: AUTO\nWhen the user asks to open, visit or go to a site or page, do it now: call `navigate` with its URL so it appears in the main browser view (no confirmation is needed). If you are not sure of the official URL (for example a site named in Chinese), call `web_search` first and navigate to the best official result; well-known examples: 新浪新闻 is https://news.sina.com.cn/. Then say what you opened. `open_tab` opens a new tab in front.\n"
+        "\n\n# Navigation mode: AUTO\nUse only enabled tools supplied with this request. When the user asks to open, visit or go to a site or page, use `navigate` if available so it appears in the main browser view (no confirmation is needed). If you are not sure of the official URL, use an enabled search tool if one is configured, then navigate to the best official result. If the necessary tool is unavailable, explain what needs enabling in Tools settings rather than assuming a tool or search provider exists. Then say what you opened. `open_tab`, when enabled, opens a new tab in front.\n"
     } else {
-        "\n\n# Navigation mode: MANUAL\nDo not take over the user's view. When the user asks to open, visit or go to a site or page, call `open_tab` (or `navigate`) with its URL: the pane then shows it as a clickable link and the user decides whether to open it. If you are not sure of the official URL (for example a site named in Chinese), call `web_search` first; well-known examples: 新浪新闻 is https://news.sina.com.cn/. Then tell the user the link is ready to click.\n"
+        "\n\n# Navigation mode: MANUAL\nUse only enabled tools supplied with this request. Do not take over the user's view. When the user asks to open, visit or go to a site or page, use `open_tab` (or `navigate`) if enabled: the pane then shows it as a clickable link and the user decides whether to open it. If you are not sure of the official URL, use an enabled search tool if one is configured. If the necessary tool is unavailable, explain what needs enabling in Tools settings rather than assuming a tool or search provider exists. Then tell the user the link is ready to click.\n"
     }
 }
 
@@ -353,11 +354,14 @@ fn pick_model(env: &Env, wanted: Option<&str>) -> Result<ModelChoice, Failure> {
     });
     let chosen = usable
         .clone()
-        .find(|m| wanted.is_some_and(|w| w == format!("{}/{}", m.manifest.provider_id, m.manifest.model_id)))
-        .or_else(|| usable.clone().next())
+        .find(|m| wanted.is_none_or(|w| w == format!("{}/{}", m.manifest.provider_id, m.manifest.model_id)))
         .ok_or_else(|| {
             Failure::unavailable("agent.no_tool_model")
-                .with_detail("Agent mode needs a model with tool calling. Add one in AI settings and tick \"supports tools\".")
+                .with_detail(if wanted.is_some() {
+                    "The selected model is unavailable or does not support tool calling. Choose another model."
+                } else {
+                    "Agent mode needs a model with tool calling. Add one in AI settings and tick \"supports tools\"."
+                })
         })?;
     let provider = env
         .catalog
@@ -404,7 +408,7 @@ fn run_tool(
         if !args.is_object() {
             return Outcome { content: "The arguments were not a valid JSON object. Call the tool again with valid JSON.".into(), ok: false };
         }
-        let opens_page = matches!(call.name.as_str(), "navigate" | "open_tab");
+        let opens_page = matches!(def.id.as_str(), "navigate" | "open_tab");
         if nav == Some("manual") && opens_page {
             let url = args.get("url").and_then(Value::as_str).unwrap_or("").trim().to_string();
             if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -416,10 +420,10 @@ fn run_tool(
                 ok: true,
             };
         }
-        if nav == Some("auto") && call.name == "open_tab" && args.get("background").is_none() {
+        if nav == Some("auto") && def.id == "open_tab" && args.get("background").is_none() {
             args["background"] = json!(false);
         }
-        let navigates_freely = nav == Some("auto") && call.name == "navigate";
+        let navigates_freely = nav == Some("auto") && def.id == "navigate";
         if def.write && !auto_approve && !def.trusted && !navigates_freely {
             emit(env, run, json!({ "type": "approval", "call_id": call.id, "name": call.name, "args": describe_args(&args), "server": def.server() }));
             match env.approvals.ask(run, &call.id, control) {
@@ -436,15 +440,16 @@ fn run_tool(
         let result = match &def.kind {
             Kind::Browser => match env.shell.call(
                 Method::AgentTool,
-                &json!({ "run_id": run, "call_id": call.id, "name": call.name, "args": args }),
+                &json!({ "run_id": run, "call_id": call.id, "name": def.id, "args": args }),
                 control,
             ) {
                 Ok(ai_platform_contract::frame::ResponsePayload::Ok(v)) => Ok(v),
                 Ok(ai_platform_contract::frame::ResponsePayload::Failure(f)) => Err(f.detail.clone().unwrap_or_else(|| f.code.clone())),
                 Err(f) => Err(f.code),
             },
-            Kind::Local => tools::run_local(env, &call.name, &args, stash, loaded),
+            Kind::Local => tools::run_local(env, &def.id, &args, stash, loaded),
             Kind::Mcp { server, tool } => env.mcp.call(server, tool, &args, control),
+            Kind::Http(config) => tool_config::execute(config, &args),
         };
         match result {
             Ok(value) => Outcome { content: tools::envelope(stash, value), ok: true },
@@ -511,10 +516,19 @@ fn run_inner(env: &Env, run_id: u64, params: &Value, control: &TaskControl) -> R
         }
         compact(env, run_id, &mut messages, budget, &model, control);
         let defs = tools::registry(env, &stash);
+        let mut request_messages = messages.clone();
+        let aliases: Vec<String> = defs.iter().filter(|tool| tool.id != tool.name)
+            .map(|tool| format!("`{}` is exposed as `{}`.", tool.id, tool.name)).collect();
+        if !aliases.is_empty() {
+            if let Some(system) = request_messages.first_mut() {
+                let text = system["content"].as_str().unwrap_or("").to_string();
+                system["content"] = json!(format!("{text}\n\n# Configured tool names\nWhen other instructions mention an original tool ID, use its configured name from the tools field instead:\n{}", aliases.join("\n")));
+            }
+        }
         emit(env, run_id, json!({ "type": "round", "n": round, "context_chars": chars_of(&messages), "budget_chars": budget }));
         let request = ChatRequest {
             model_id: model.model_id.clone(),
-            messages: messages.clone(),
+            messages: request_messages,
             tools: defs.iter().map(ToolDef::schema).collect(),
             max_tokens: MAX_TOKENS,
             temperature: 0.2,

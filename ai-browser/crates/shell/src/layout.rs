@@ -42,7 +42,6 @@ impl Tabs {
         }
     }
 }
-pub const FIND_BAR_H: i32 = 40;
 pub const PANEL_W: i32 = 360;
 pub const AI_W: i32 = 420;
 pub const AI_MIN_W: i32 = 320;
@@ -77,7 +76,6 @@ pub const DROPDOWN_MAX_H: i32 = 480;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
     None,
-    Find,
     Downloads,
     History,
     /// The AI side pane: docked on the right, the page shrinks beside it.
@@ -133,7 +131,6 @@ pub fn compute(size: PhysicalSize<u32>, scale: f64, tabs: impl Into<Tabs>, panel
     let h = (size.height as f64 / scale).round() as i32;
     let rail = tabs.rail_w();
     let header_h = tabs.header_h();
-    let find_open = panel == Panel::Find;
     let dock_w = match panel {
         Panel::Downloads => PANEL_W,
         Panel::Ai => ai_width(),
@@ -141,7 +138,7 @@ pub fn compute(size: PhysicalSize<u32>, scale: f64, tabs: impl Into<Tabs>, panel
     };
 
     let page_x = rail;
-    let page_y = header_h + if find_open { FIND_BAR_H } else { 0 };
+    let page_y = header_h;
     let page_w = (w - rail - dock_w).max(0);
     let page_h = (h - page_y).max(0);
 
@@ -361,13 +358,6 @@ mod tests {
         assert_eq!((l.page_x, l.page_y), (0, 72));
         assert_eq!((l.page_w, l.page_h), (1280, 748));
         assert_eq!(l.header_h, 72);
-    }
-
-    #[test]
-    fn find_bar_shrinks_page_by_40() {
-        let l = compute(size(1280, 820), 1.0, false, Panel::Find, Overlay::Closed);
-        assert_eq!(l.page_y, 76);
-        assert_eq!(l.page_h, 744);
     }
 
     #[test]

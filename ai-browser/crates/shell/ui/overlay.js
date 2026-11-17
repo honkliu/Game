@@ -51,6 +51,7 @@
   };
 
   const root = document.getElementById('root');
+  const assistantName = /^zh(?:-|$)/i.test(navigator.language) ? '洛' : 'River';
 
   // ── palette ──────────────────────────────────────────────────────────
   let paletteRows = [];
@@ -90,7 +91,7 @@
     paletteRows = res.rows || [];
     paletteSel = 0;
     const mode = document.getElementById('pal-mode');
-    if (mode) mode.textContent = res.chip || '';
+    if (mode) mode.textContent = res.mode === 'ask' ? '✨ ' + assistantName : res.chip || '';
     renderPalette();
   }
 
@@ -111,7 +112,8 @@
         <span class="dropdown-text"><span class="dropdown-title"></span><span class="dropdown-sub"></span></span>
         <span class="dropdown-hint"></span>`;
       li.querySelector('.dropdown-title').textContent = r.title || r.url || '';
-      li.querySelector('.dropdown-sub').textContent = r.hint || r.url || '';
+      li.querySelector('.dropdown-sub').textContent = r.kind === 'ask'
+        ? (r.hint || '').replace(/^River(?=:|$)/, assistantName) : r.hint || r.url || '';
       li.querySelector('.dropdown-hint').textContent = r.kind === 'command' ? 'Enter' : r.kind === 'tab' ? 'switch' : '';
       li.addEventListener('mousedown', (e) => { e.preventDefault(); paletteSel = i; runPaletteRow(); });
       frag.appendChild(li);

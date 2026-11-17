@@ -296,6 +296,7 @@ impl Hub {
             let server = lock(&servers[id]);
             for t in &server.tools {
                 out.push(ToolDef {
+                    id: tool_name(id, &t.name),
                     name: tool_name(id, &t.name),
                     description: format!("[{}] {}", server.config.name, t.description),
                     parameters: t.schema.clone(),

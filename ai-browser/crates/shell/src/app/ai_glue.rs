@@ -43,9 +43,6 @@ pub const TOOLBAR_H: i32 = 40;
 pub const CARD_W: i32 = 460;
 pub const CARD_H: i32 = 340;
 
-/// Environment variable the utility reads the model key from (see `ai_provider_set`).
-const KEY_ENV: &str = "BROWSER_AI_KEY";
-
 /// Slack after a task's deadline before the shell gives up on the utility.
 const DEADLINE_GRACE_MS: i64 = 5_000;
 
@@ -109,6 +106,7 @@ impl AppState {
         self.ai.link_error = problem.map(|f| failure_message(&f));
         if config != self.ai.config {
             self.ai.config = config;
+            self.ai.provider_view = None;
             self.ai_notify(BrowserEvent::ConfigChanged);
             self.ai.models.clear();
         }
@@ -127,7 +125,7 @@ impl AppState {
         let proxy_closed = self.proxy();
         let credentials = self.ai_key_env().map_err(|error|
             Failure::unavailable("credentials.unavailable").with_detail(error))?;
-        self.ai.provider_key_saved = !credentials.is_empty();
+        self.ai.provider_view = None;
         self.ai.link_generation += 1;
         let generation = self.ai.link_generation;
         let link = Link::spawn(
@@ -1201,6 +1199,9 @@ impl AppState {
             return;
         }
         self.set_panel(Panel::Ai);
+        if let Some(sb) = self.sidebar.as_ref() {
+            let _ = sb.focus();
+        }
         self.emit_raw("sidebar", "ai.focus", json!({}));
     }
 
@@ -1227,8 +1228,7 @@ impl AppState {
         let x = l.page_x + l.page_w;
         if let Some(sb) = self.sidebar.as_ref() {
             let _ = sb.set_bounds(layout::rect(x, l.header_h, layout::ai_width(), (l.shell_h - l.header_h).max(0)));
-            let _ = sb.set_visible(true);
-            let _ = sb.focus();
+            let _ = sb.set_visible(!self.menu_open);
         }
     }
 
@@ -1258,75 +1258,78 @@ impl AppState {
     /// `ai.provider.set`: the in-browser endpoint form. The endpoint and model go to
     /// `ai.json`; the key stays in the OS vault and this engine's private memory.
     pub(super) fn ai_provider_set(&mut self, p: &Value) -> Result<Option<Value>, String> {
-        use ai_platform_contract::model::Execution;
         if !self.ai.tasks.is_empty() || self.ai.agent_run != 0 || !self.ai.agent_jobs.is_empty() {
             return Err("stop AI work before changing the provider".into());
         }
-        let text = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
-        let base_url = text("base_url");
-        let model_id = text("model_id");
-        let key = text("api_key");
-        if !(base_url.starts_with("http://") || base_url.starts_with("https://")) || base_url.len() > 300 {
-            return Err("endpoint must be an http(s) URL such as https://host/v1".into());
-        }
-        if model_id.is_empty() || model_id.len() > 120 {
-            return Err("model name is required".into());
-        }
+        let key = p.get("api_key").and_then(Value::as_str).unwrap_or("").trim();
         if key.len() > 400 {
             return Err("key too long".into());
         }
         let clear = p["clear_key"].as_bool().unwrap_or(false);
         ai_utility::secrets::migrate_provider(&self.data_dir)?;
         self.ai_reload_config();
-        let previous = self.ai.config.providers.iter().find(|provider| provider.id == "custom")
+        let mut entry = super::providers::prepare(&self.ai.config, p, false)?;
+        let secret = format!("provider.{}", entry.id);
+        let saved = ai_utility::secrets::get(&self.data_dir, &secret)?;
+        let previous = self.ai.config.providers.iter().find(|provider| provider.id == entry.id)
             .and_then(|provider| provider.base_url.as_deref()).and_then(|url| url::Url::parse(url).ok());
-        let endpoint = url::Url::parse(&base_url).map_err(|_| "invalid endpoint")?;
-        if !endpoint.username().is_empty() || endpoint.password().is_some() || endpoint.host_str().is_none() {
-            return Err("endpoint must not include credentials and must have a host".into());
-        }
-        let saved = ai_utility::secrets::get(&self.data_dir, "provider.custom")?;
+        let endpoint = url::Url::parse(entry.base_url.as_deref().unwrap()).map_err(|_| "invalid endpoint")?;
         if key.is_empty() && !clear && saved.is_some() && previous.is_some_and(|url| url.origin() != endpoint.origin()) {
             return Err("the endpoint host changed; enter its API key or remove the saved key first".into());
         }
-        if !key.is_empty() || clear {
-            ai_utility::secrets::set(&self.data_dir, "provider.custom", (!clear).then_some(key.as_str()))?;
+        if !clear && (!key.is_empty() || saved.is_some()) {
+            entry.api_key_env = Some(super::providers::key_env(&entry.id));
         }
-        self.ai.provider_key_saved = if clear { false } else { !key.is_empty() || saved.is_some() };
-        let host = host_of(&base_url).unwrap_or_default();
-        let local = host == "localhost" || host.starts_with("127.") || host == "::1" || host == "[::1]";
-        let entry = ai_platform_contract::config::ProviderEntry {
-            id: "custom".into(),
-            kind: ai_platform_contract::config::ProviderKind::OpenAiCompatible,
-            enabled: true,
-            execution: if local { Execution::Local } else { Execution::Cloud },
-            base_url: Some(base_url),
-            api_key_env: if local && !self.ai.provider_key_saved && std::env::var(KEY_ENV).is_err() {
-                None
-            } else { Some(KEY_ENV.into()) },
-            models: vec![ai_platform_contract::config::ModelEntry {
-                model_id: model_id.clone(),
-                display_name: Some(model_id),
-                aliases: vec![],
-                context_window: 32_768,
-                modalities: vec![],
-                supports_tools: true,
-            }],
-            data_policy_tags: vec![],
-        };
-        let cfg = &mut self.ai.config;
-        cfg.providers.retain(|q| q.id != "custom");
-        cfg.providers.insert(0, entry);
-        if !local {
-            cfg.flags.cloud_models_enabled = true;
+        let mut cfg = self.ai.config.clone();
+        if entry.enabled {
+            cfg.flags.ai_enabled = true;
+            if entry.execution == ai_platform_contract::model::Execution::Cloud {
+                cfg.flags.cloud_models_enabled = true;
+            }
         }
-        cfg.flags.ai_enabled = true;
-        let path = self.ai_config_path();
-        self.ai.config.save(&path).map_err(|e| e.to_string())?;
-        // The engine reads the key at start, so a new one needs a new engine.
-        if self.ai.tasks.is_empty() {
-            self.ai.link = None;
-            self.ai.pending.clear();
+        if let Some(previous) = cfg.providers.iter_mut().find(|provider| provider.id == entry.id) {
+            *previous = entry;
+        } else {
+            cfg.providers.push(entry);
         }
+        let changed_key = !key.is_empty() || clear;
+        if changed_key {
+            ai_utility::secrets::set(&self.data_dir, &secret, (!clear).then_some(key))?;
+        }
+        if let Err(error) = cfg.save(&self.ai_config_path()) {
+            if changed_key {
+                ai_utility::secrets::set(&self.data_dir, &secret, saved.as_deref())
+                    .map_err(|rollback| format!("{error}; credential rollback failed: {rollback}"))?;
+            }
+            return Err(error.to_string());
+        }
+        self.ai_provider_changed(cfg)
+    }
+
+    pub(super) fn ai_provider_delete(&mut self, p: &Value) -> Result<Option<Value>, String> {
+        if !self.ai.tasks.is_empty() || self.ai.agent_run != 0 || !self.ai.agent_jobs.is_empty() {
+            return Err("stop AI work before changing the provider".into());
+        }
+        ai_utility::secrets::migrate_provider(&self.data_dir)?;
+        self.ai_reload_config();
+        let id = p.get("id").and_then(Value::as_str).ok_or("connection ID required")?;
+        let mut cfg = self.ai.config.clone();
+        let index = cfg.providers.iter().position(|entry| entry.id == id
+            && entry.kind == ai_platform_contract::config::ProviderKind::OpenAiCompatible).ok_or("connection not found")?;
+        cfg.providers.remove(index);
+        cfg.save(&self.ai_config_path()).map_err(|e| e.to_string())?;
+        if let Err(error) = ai_utility::secrets::set(&self.data_dir, &format!("provider.{id}"), None) {
+            self.ai.config.save(&self.ai_config_path()).map_err(|rollback| format!("{error}; config rollback failed: {rollback}"))?;
+            return Err(error);
+        }
+        self.ai_provider_changed(cfg)
+    }
+
+    fn ai_provider_changed(&mut self, config: AiConfig) -> Result<Option<Value>, String> {
+        self.ai.config = config;
+        self.ai.provider_view = None;
+        self.ai.link = None;
+        self.ai.pending.clear();
         self.ai.models.clear();
         let status = self.ai_status();
         self.emit("ai.context", status.clone());
@@ -1334,21 +1337,45 @@ impl AppState {
     }
 
     /// The provider form's current values (never the key).
-    fn ai_provider_view(&self) -> Value {
+    fn ai_provider_view(&mut self) -> Value {
+        if let Some(view) = self.ai.provider_view.as_ref() {
+            return view.clone();
+        }
         let custom = self.ai.config.providers.iter().find(|q| q.id == "custom");
-        json!({
+        let connections: Vec<Value> = self.ai.config.providers.iter()
+            .filter(|entry| entry.kind == ai_platform_contract::config::ProviderKind::OpenAiCompatible)
+            .map(|entry| {
+                let saved = ai_utility::secrets::get(&self.data_dir, &format!("provider.{}", entry.id));
+                json!({
+                    "id": entry.id, "base_url": entry.base_url, "models": entry.models,
+                    "enabled": entry.enabled,
+                    "key_saved": saved.as_ref().is_ok_and(|key| key.is_some()),
+                    "key_error": saved.err(),
+                })
+            }).collect();
+        let view = json!({
             "base_url": custom.and_then(|q| q.base_url.clone()),
             "model_id": custom.and_then(|q| q.models.first().map(|m| m.model_id.clone())),
-            "key_saved": self.ai.provider_key_saved,
+            "key_saved": connections.iter().find(|entry| entry["id"] == "custom").is_some_and(|entry| entry["key_saved"] == true),
+            "connections": connections,
             "configured": self.ai.config.providers.iter().any(|q| q.enabled
                 && q.kind == ai_platform_contract::config::ProviderKind::OpenAiCompatible),
-        })
+        });
+        self.ai.provider_view = Some(view.clone());
+        view
     }
 
     fn ai_key_env(&self) -> Result<Vec<(String, String)>, String> {
         ai_utility::secrets::migrate_provider(&self.data_dir)?;
-        Ok(ai_utility::secrets::get(&self.data_dir, "provider.custom")?
-            .map(|key| vec![(KEY_ENV.to_string(), key)]).unwrap_or_default())
+        let mut credentials = Vec::new();
+        for provider in &self.ai.config.providers {
+            if let Some(env) = provider.api_key_env.as_ref() {
+                if let Some(key) = ai_utility::secrets::get(&self.data_dir, &format!("provider.{}", provider.id))? {
+                    credentials.push((env.clone(), key));
+                }
+            }
+        }
+        Ok(credentials)
     }
 
     /// A toolbar button. With the side pane open the pane owns the conversation, so it
@@ -1407,7 +1434,7 @@ impl AppState {
                 .map(|t| json!({ "tab_id": t.id.0, "title": t.display_title(), "host": host_of(&t.url).unwrap_or_default() }))
                 .collect::<Vec<_>>(),
             "max_level": self.ai.config.flags.max_action_level,
-            "busy": !self.ai.tasks.is_empty(),
+            "busy": !self.ai.tasks.is_empty() || self.ai.agent_run != 0 || !self.ai.agent_jobs.is_empty(),
             "config_path": self.ai_config_path().display().to_string(),
             "provider": self.ai_provider_view(),
         })
