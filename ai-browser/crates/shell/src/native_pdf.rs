@@ -1,6 +1,8 @@
 //! Read WebView2's native PDF accessibility provider on a non-UI COM apartment.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -22,7 +24,14 @@ use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 use wry::WebViewExtWindows;
 
 type Reply = Box<dyn FnOnce(String) + Send>;
-type Selection = Box<dyn Fn(String, Option<[f64; 4]>) + Send>;
+mod selection;
+
+pub enum SelectionUpdate {
+    Changed(Option<[f64; 4]>),
+    Clear,
+}
+
+type Selection = Box<dyn Fn(SelectionUpdate) + Send>;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static WORKER: OnceLock<mpsc::Sender<Command>> = OnceLock::new();
@@ -40,6 +49,8 @@ pub(crate) struct Session {
     pub id: u64,
     cancelled: Arc<AtomicBool>,
     sender: mpsc::Sender<Command>,
+    selection_reader: Rc<selection::Reader>,
+    selection_request: Cell<u64>,
 }
 
 impl Session {
@@ -47,7 +58,7 @@ impl Session {
         webview: &wry::WebView,
         url: String,
         title: String,
-        selection: impl Fn(u64, String, Option<[f64; 4]>) + Send + 'static,
+        selection: impl Fn(u64, SelectionUpdate) + Send + 'static,
     ) -> Result<Self, String> {
         let mut hwnd = HWND::default();
         unsafe { webview.controller().ParentWindow(&mut hwnd) }
@@ -62,6 +73,7 @@ impl Session {
             .clone();
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let cancelled = Arc::new(AtomicBool::new(false));
+        let selection_reader = selection::Reader::new(webview.webview(), cancelled.clone());
         sender
             .send(Command::Open(
                 id,
@@ -69,14 +81,32 @@ impl Session {
                 url,
                 title,
                 cancelled.clone(),
-                Box::new(move |text, rect| selection(id, text, rect)),
+                Box::new(move |update| selection(id, update)),
             ))
             .map_err(|error| error.to_string())?;
         Ok(Self {
             id,
             cancelled,
             sender,
+            selection_reader,
+            selection_request: Cell::new(0),
         })
+    }
+
+    pub fn invalidate_selection(&self) {
+        self.selection_request
+            .set(self.selection_request.get().wrapping_add(1));
+    }
+
+    pub fn selection_request(&self) -> u64 {
+        self.selection_request.get()
+    }
+
+    pub fn read_selection(&self, done: impl FnOnce(u64, Result<String, String>) + 'static) {
+        self.invalidate_selection();
+        let request = self.selection_request.get();
+        self.selection_reader
+            .read(move |result| done(request, result));
     }
 
     pub fn read(&self, reply: impl FnOnce(String) + Send + 'static) -> Result<(), String> {
@@ -291,7 +321,7 @@ impl Document {
             }
         }
         self.suppress_selection = Instant::now() + Duration::from_millis(500);
-        (self.selection)(String::new(), None);
+        (self.selection)(SelectionUpdate::Clear);
         let total = self.matches.len();
         let active = if total == 0 {
             0
@@ -355,7 +385,7 @@ impl Document {
         }
         if text != self.last_selection && !self.cancelled.load(Ordering::Relaxed) {
             self.last_selection = text.clone();
-            (self.selection)(text, rect);
+            (self.selection)(SelectionUpdate::Changed(rect));
         }
         Ok(())
     }

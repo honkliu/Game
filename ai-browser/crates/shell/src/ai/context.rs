@@ -1,7 +1,7 @@
 //! What the page says, read without touching the page.
 //!
 //! One CDP method is used: `DOMSnapshot.captureSnapshot`. It is read-only, it is
-//! the only DevTools domain this build calls, and the measured cost on this
+//! the only DevTools domain this context extractor calls, and the measured cost on this
 //! runtime is 2.2 ms for a real page (tools/wv2-probe/RESULTS.md), which is why
 //! the composer can afford to capture on every question rather than cache a
 //! guess. Nothing here mutates a page, evaluates script, or opens an execution
@@ -57,7 +57,7 @@ use windows::core::PCWSTR;
 use ai_platform_contract::failure::Failure;
 use ai_platform_contract::identity::{DocumentToken, SnapshotVersion};
 
-/// The only CDP method this crate calls.
+/// The CDP method used by the page context extractor.
 pub const SNAPSHOT_METHOD: &str = "DOMSnapshot.captureSnapshot";
 
 /// `computedStyles: []` asks for no computed styles, which is what keeps the

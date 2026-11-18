@@ -230,7 +230,9 @@ pub enum AppMessage {
     #[cfg(windows)]
     DroppedPdf(TabId, String),
     #[cfg(windows)]
-    NativePdfSelection(TabId, u64, String, Option<[f64; 4]>),
+    NativePdfSelection(TabId, u64, crate::native_pdf::SelectionUpdate),
+    #[cfg(windows)]
+    NativePdfSelectionReady(TabId, u64, u64, Result<String, String>, Option<[f64; 4]>),
     #[cfg(windows)]
     RuntimeZoom(TabId, f64),
     #[cfg(windows)]
@@ -606,8 +608,8 @@ impl AppState {
                 && live.webview.url().is_ok_and(|url| url == source)) else { return };
             let proxy = self.proxy();
             match crate::native_pdf::Session::new(&live.webview, source.to_string(), tab.display_title(),
-                move |generation, text, rect| {
-                    let _ = proxy.send_event(AppMessage::NativePdfSelection(id, generation, text, rect));
+                move |generation, update| {
+                    let _ = proxy.send_event(AppMessage::NativePdfSelection(id, generation, update));
                 }) {
                 Ok(pdf) => {
                     if let Some(live) = self.live.get_mut(&id) { live.native_pdf = Some(pdf); }
@@ -2756,9 +2758,32 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
                 }
             }
             #[cfg(windows)]
-            Event::UserEvent(AppMessage::NativePdfSelection(tab, generation, text, rect)) => {
+            Event::UserEvent(AppMessage::NativePdfSelection(tab, generation, update)) => {
                 let mut s = shared.borrow_mut();
-                if s.live.get(&tab).and_then(|live| live.native_pdf.as_ref()).is_some_and(|pdf| pdf.id == generation) {
+                if let Some(pdf) = s.live.get(&tab).and_then(|live| live.native_pdf.as_ref()).filter(|pdf| pdf.id == generation) {
+                    match update {
+                        crate::native_pdf::SelectionUpdate::Changed(rect) => {
+                            let proxy = s.proxy();
+                            pdf.read_selection(move |request, result| {
+                                let _ = proxy.send_event(AppMessage::NativePdfSelectionReady(tab, generation, request, result, rect));
+                            });
+                        }
+                        crate::native_pdf::SelectionUpdate::Clear => {
+                            pdf.invalidate_selection();
+                            s.ai_on_selection(tab, crate::ai::session::Selection { text: String::new(), rect: None });
+                        }
+                    }
+                }
+            }
+            #[cfg(windows)]
+            Event::UserEvent(AppMessage::NativePdfSelectionReady(tab, generation, request, result, rect)) => {
+                let mut s = shared.borrow_mut();
+                if s.live.get(&tab).and_then(|live| live.native_pdf.as_ref())
+                    .is_some_and(|pdf| pdf.id == generation && pdf.selection_request() == request) {
+                    let text = result.unwrap_or_else(|error| {
+                        s.note(format!("Native PDF selection: {error}"));
+                        String::new()
+                    });
                     s.ai_on_selection(tab, crate::ai::session::Selection { text, rect });
                 }
             }

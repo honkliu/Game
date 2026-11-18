@@ -19,14 +19,28 @@ pointer.
 On November 17, 2026, WebView2 157.0.4341.60 exposed all three pages of a PDF,
 including offscreen pages, through Windows UI Automation `TextPattern.DocumentRange`.
 Separate canvas cells returned separate documents, without PDF toolbar text.
-`TextPattern.GetSelection` returned the selected text and its screen rectangles.
+`TextPattern.GetSelection` returned text and screen rectangles, but subsequent
+testing with a real report and a synthetic image/multiline document exposed
+character-offset differences from the viewer's visual selection. Its text is
+therefore not an authoritative selection source.
 Accessibility initialized lazily; no special runtime flags were needed. Selection
 updates were asynchronous and had to be awaited.
 
 This is the native viewer's accessibility provider, not a WebView2 SDK
 `ExtractPdfText` method or ordinary page DOM access. The Windows browser now uses
-the native viewer and connects its accessibility provider to River, selection,
-Find and citation reveal. `e2e/suite5.mjs` covers the integrated behavior.
+the native viewer and connects its accessibility provider to document reads,
+selection-change notifications/toolbar geometry, Find and citation reveal.
+Selected text instead comes from the engine's `getSelectedText` message through
+the owning WebView's native PDF extension. The host uses WebView2's session-aware
+CDP API, not a debugging TCP port. It matches the extension by parent target ID,
+not the PDF URL, serializes uncorrelated engine replies, and rejects stale
+navigation/selection results. The extension's target metadata and controller
+endpoint are runtime-private and feature-detected; if unavailable, River clears
+the selection rather than silently using UIA's wrong text. Existing viewer
+handlers remain untouched, and temporary protocol sessions/listeners are removed.
+`e2e/suite5.mjs` compares River with an independent engine reply and covers the
+offset mismatch, multiline selections, identical-URL cells, protocol failure and
+navigation cancellation.
 macOS retains PDF.js pending a separate native PDFKit adapter.
 
 ## `wv2-probe/` — built, run, answered

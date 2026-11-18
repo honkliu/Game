@@ -1,4 +1,4 @@
-// Windows PDFs use WebView2's native renderer and accessibility text/selection.
+// Windows PDFs use WebView2's native renderer, UIA document text and engine selection.
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -7,7 +7,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { launch, listen, run, sleep, nativePdfText, startModel } from './harness.mjs';
 
-function makePdf(text) {
+function makePdf(text, { image = false } = {}) {
   const pages = Array.isArray(text) ? text : [text];
   const objs = [
     '<< /Type /Catalog /Pages 2 0 R >>',
@@ -15,12 +15,13 @@ function makePdf(text) {
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
   ];
   pages.forEach((text, i) => {
-    const stream = `BT /F1 24 Tf 72 700 Td (${text}) Tj ET`;
+    const stream = `${image ? 'q 20 0 0 20 72 735 cm /Logo Do Q\n' : ''}BT /F1 24 Tf 72 700 Td ${image ? '(Native selection report) Tj 0 -32 Td (Example authors) Tj 0 -32 Td (Abstract) Tj 0 -32 Td ' : ''}(${text}) Tj ET`;
     objs.push(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${5 + i * 2} 0 R /Resources << /Font << /F1 3 0 R >> >> >>`,
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${5 + i * 2} 0 R /Resources << /Font << /F1 3 0 R >> ${image ? `/XObject << /Logo ${4 + pages.length * 2} 0 R >>` : ''} >> >>`,
       `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
     );
   });
+  if (image) objs.push('<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length 7 >>\nstream\nFF0000>\nendstream');
   let out = '%PDF-1.4\n';
   const offsets = [];
   objs.forEach((o, i) => { offsets.push(out.length); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
@@ -72,7 +73,7 @@ const server = http.createServer((req, res) => {
     ] : req.url === '/left.pdf' ? 'LEFT-NATIVE-PDF independent financial report' :
       req.url === '/right.pdf' ? 'RIGHT-NATIVE-PDF separate canvas document' :
       'Quarterly revenue grew twelve percent';
-    res.end(makePdf(text));
+    res.end(makePdf(text, { image: req.url === '/image.pdf' }));
   } else {
     res.setHeader('content-type', 'text/html');
     res.end(`<h1>Page before a drop</h1><a id="l" href="http://127.0.0.1:${server.address().port}/doc.pdf">pdf</a>
@@ -116,6 +117,63 @@ async function dropFile(page, selector) {
 async function waitPdf(marker) {
   return nativePdfText(app.child.pid, marker);
 }
+
+async function nativePdfEvaluate(page, expression) {
+  const cdp = await app.ctx.newCDPSession(page);
+  let sessionId;
+  try {
+    const { targetInfo } = await cdp.send('Target.getTargetInfo');
+    const { targetInfos } = await cdp.send('Target.getTargets');
+    const target = targetInfos.find(target => target.parentId === targetInfo.targetId &&
+      target.url === 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/edge_pdf/index.html');
+    assert.ok(target, 'the native PDF target belongs to this page');
+    ({ sessionId } = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: false }));
+    let receive;
+    let timeout;
+    const reply = new Promise((resolve, reject) => {
+      timeout = setTimeout(() => reject(new Error('Native selection oracle timed out')), 5000);
+      receive = event => {
+        if (event.sessionId !== sessionId) return;
+        const message = JSON.parse(event.message);
+        if (message.id !== 1) return;
+        resolve(message);
+      };
+      cdp.on('Target.receivedMessageFromTarget', receive);
+    });
+    try {
+      await cdp.send('Target.sendMessageToTarget', { sessionId,
+        message: JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: {
+          expression, returnByValue: true, awaitPromise: true,
+        } }),
+      });
+      const message = await reply;
+      assert.ok(!message.error && !message.result?.exceptionDetails, JSON.stringify(message));
+      assert.equal(typeof message.result.result.value, 'string');
+      return message.result.result.value;
+    } finally {
+      clearTimeout(timeout);
+      cdp.off('Target.receivedMessageFromTarget', receive);
+    }
+  } finally {
+    if (sessionId) await cdp.send('Target.detachFromTarget', { sessionId });
+    await cdp.detach();
+  }
+}
+
+// Independent native-engine oracle: do not compare UIA-selected text with itself.
+async function engineSelection(page, { selectAll = false } = {}) {
+  return nativePdfEvaluate(page, `new Promise((resolve, reject) => {
+    const previous = viewer.handleSelectedTextReply;
+    const restore = () => { viewer.handleSelectedTextReply = previous; clearTimeout(timeout); };
+    const timeout = setTimeout(() => { restore(); reject(new Error('Native PDF reply timed out')); }, 2000);
+    viewer.handleSelectedTextReply = function(text) {
+      restore(); resolve(text); return previous.call(this, text);
+    };
+    ${selectAll ? "viewer.pluginController_.postMessage({ type: 'selectAll' });" : ''}
+    viewer.pluginController_.postMessage({ type: 'getSelectedText' });
+  })`);
+}
+
 async function preview() {
   return app.shell.evaluate(() => new Promise((resolve, reject) => {
     const req = 980001;
@@ -132,17 +190,27 @@ async function preview() {
 async function assertRiverSelection(marker) {
   await app.invoke('shortcut', { name: 'ask_ai' });
   const river = await app.pageWith(/sidebar\.html/);
-  await river.locator('#sel-card').waitFor();
-  assert.ok((await river.locator('#sel-card').textContent()).includes(marker), 'River visibly displays the native selection');
-  const before = model.calls.length;
-  await river.locator('#sel-card button').filter({ hasText: 'Explain' }).click();
-  for (let attempt = 0; attempt < 100 && model.calls.length === before; attempt++) await sleep(100);
-  assert.ok(model.calls.length > before, 'Explain sends a real model request');
-  const messages = model.calls[before].body.messages;
-  assert.ok(messages[0].content.includes(marker), 'the model receives the native selected text');
-  assert.match(JSON.stringify(messages.at(-1)), /Explain the selected text/);
-  await river.waitForFunction(() => window.__agentUi.messages.at(-1)?.content === 'Native PDF content received.');
-  await app.invoke('shortcut', { name: 'ask_ai' });
+  try {
+    await river.locator('#sel-card').waitFor();
+    const quote = marker.slice(0, 600) + (marker.length > 600 ? '\u2026' : '');
+    try {
+      await river.waitForFunction(expected =>
+        document.querySelector('#sel-card .sel-quote')?.textContent === expected, quote);
+    } catch (error) {
+      assert.equal(await river.locator('#sel-card .sel-quote').textContent(), quote, 'River visibly displays the native selection');
+      throw error;
+    }
+    const before = model.calls.length;
+    await river.locator('#sel-card button').filter({ hasText: 'Explain' }).click();
+    for (let attempt = 0; attempt < 100 && model.calls.length === before; attempt++) await sleep(100);
+    assert.ok(model.calls.length > before, 'Explain sends a real model request');
+    const messages = model.calls[before].body.messages;
+    assert.ok(messages[0].content.includes(marker), 'the model receives the native selected text');
+    assert.match(JSON.stringify(messages.at(-1)), /Explain the selected text/);
+    await river.waitForFunction(() => window.__agentUi.messages.at(-1)?.content === 'Native PDF content received.');
+  } finally {
+    await app.invoke('shortcut', { name: 'ask_ai' });
+  }
 }
 
 let failed = 0;
@@ -173,6 +241,27 @@ failed = await run([
   }],
   ['native PDF selection is visible in River and Explain sends it to the model', async () => {
     await assertRiverSelection('Quarterly revenue');
+  }],
+  ['PDF selection matches the native engine when accessibility offsets differ', async () => {
+    await app.invoke('nav.open', { url: `${base}/image.pdf`, disposition: 'current' });
+    try {
+      const page = await app.pageWith(/\/image\.pdf$/);
+      const accessibility = await nativePdfText(app.child.pid, 'Quarterly revenue', 'revenue grew');
+      const actual = await engineSelection(page);
+      assert.ok(actual.trim(), 'native selection exists');
+      assert.notEqual(actual, accessibility.selected, 'fixture reproduces the accessibility offset mismatch');
+      await app.shell.waitForFunction(async expected =>
+        (await window.__native.invoke('agent.context')).page.selection === expected, actual);
+      await assertRiverSelection(actual);
+      const multiline = await engineSelection(page, { selectAll: true });
+      assert.match(multiline, /Example authors[\r\n]+Abstract[\r\n]+Quarterly revenue/);
+      await app.shell.waitForFunction(async expected =>
+        (await window.__native.invoke('agent.context')).page.selection === expected, multiline);
+      await assertRiverSelection(multiline);
+    } finally {
+      await app.invoke('nav.open', { url: `${base}/doc.pdf`, disposition: 'current' });
+      await waitPdf('Quarterly revenue');
+    }
   }],
   ['River reads native PDF content without viewer chrome', async () => {
     const content = JSON.stringify(await preview());
@@ -413,6 +502,72 @@ failed = await run([
     await page.locator('h1').waitFor();
     assert.equal((await app.invoke('agent.context')).page.selection, null, 'navigation clears the old native selection');
     assert.match(JSON.stringify(await preview()), /Page before a drop/);
+  }],
+  ['identical PDF URLs in separate canvas cells retain distinct native selections', async () => {
+    const before = new Set(app.ctx.pages());
+    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [base + '/doc.pdf', base + '/doc.pdf'] });
+    await waitPdf('Quarterly revenue');
+    let pages = [];
+    for (let attempt = 0; attempt < 100; attempt++) {
+      pages = app.ctx.pages().filter(page => !before.has(page) && page.url() === base + '/doc.pdf');
+      if (pages.length === 2) break;
+      await sleep(100);
+    }
+    assert.equal(pages.length, 2);
+    await nativePdfText(app.child.pid, 'Quarterly revenue', 'revenue');
+    const selections = await Promise.all(pages.map(page => engineSelection(page)));
+    const selected = selections.findIndex(text => text === 'revenue');
+    assert.notEqual(selected, -1, JSON.stringify(selections));
+    const other = 1 - selected;
+    const full = await engineSelection(pages[other], { selectAll: true });
+    assert.equal(full, 'Quarterly revenue grew twelve percent');
+    assert.equal(await engineSelection(pages[selected]), 'revenue', 'the neighbor keeps its partial selection');
+    for (const [cell, expected] of [[selected, 'revenue'], [other, full], [selected, 'revenue']]) {
+      await app.invoke('canvas.focus', { cell });
+      await app.shell.waitForFunction(async text =>
+        (await window.__native.invoke('agent.context')).page.selection === text, expected);
+    }
+  }],
+  ['an unavailable native selection protocol clears River rather than using inaccurate UIA text', async () => {
+    await app.invoke('nav.open', { url: base + '/unavailable.pdf' });
+    const page = await app.pageWith(/\/unavailable\.pdf$/);
+    await nativePdfText(app.child.pid, 'Quarterly revenue', 'revenue');
+    await app.shell.waitForFunction(async () =>
+      (await window.__native.invoke('agent.context')).page.selection === 'revenue');
+    await nativePdfEvaluate(page, `globalThis.__savedPdfPort = viewer.pluginController_.messagePort_;
+      viewer.pluginController_.messagePort_ = null; 'unavailable'`);
+    try {
+      await nativePdfText(app.child.pid, 'Quarterly revenue', 'twelve percent');
+      await app.shell.waitForFunction(async () =>
+        (await window.__native.invoke('agent.context')).page.selection === null);
+    } finally {
+      await nativePdfEvaluate(page, `viewer.pluginController_.messagePort_ = globalThis.__savedPdfPort;
+        delete globalThis.__savedPdfPort; 'restored'`);
+    }
+    await nativePdfText(app.child.pid, 'Quarterly revenue', 'revenue grew');
+    await app.shell.waitForFunction(async () =>
+      (await window.__native.invoke('agent.context')).page.selection === 'revenue grew');
+  }],
+  ['a delayed native PDF selection reply cannot repopulate River after navigation', async () => {
+    const page = await app.pageWith(/\/unavailable\.pdf$/);
+    await nativePdfEvaluate(page, `(() => {
+      const controller = viewer.pluginController_;
+      const previous = controller.postMessage;
+      globalThis.__selectionReads = 0;
+      controller.postMessage = function(message) {
+        if (message.type !== 'getSelectedText') return previous.call(this, message);
+        ++globalThis.__selectionReads;
+        setTimeout(() => previous.call(this, message), 800);
+      };
+      return 'delayed';
+    })()`);
+    await nativePdfText(app.child.pid, 'Quarterly revenue', 'percent');
+    assert.equal(await nativePdfEvaluate(page, 'String(globalThis.__selectionReads)'), '1', 'a native read is in flight');
+    await app.invoke('nav.open', { url: base + '/selection-after-navigation', disposition: 'current' });
+    await page.waitForURL(base + '/selection-after-navigation');
+    await page.locator('h1').waitFor();
+    await sleep(1000);
+    assert.equal((await app.invoke('agent.context')).page.selection, null);
   }],
 ]);
 } finally {
