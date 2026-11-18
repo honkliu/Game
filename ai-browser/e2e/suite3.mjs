@@ -233,11 +233,10 @@ const cases = [
     }
   }],
 
-  ['canvas navigation replaces the focused new-tab cell without creating a hidden page', async () => {
+  ['canvas navigation fills the focused empty cell without creating a hidden page', async () => {
     await app.invoke('canvas.create', { cols: 2, rows: 1 });
     const canvas = await app.invoke('canvas.state');
     try {
-      await app.invoke('canvas.clear', { cell: 0 });
       calls.length = 0;
       const target = `${base}/other?blank-canvas=1`;
       script = messages => toolMsg(messages).length === 0
@@ -245,10 +244,11 @@ const cases = [
         : { text: 'opened in the blank cell' };
       await ask('open the other page in the current blank cell');
       const result = JSON.parse(toolMsg(calls.at(-1).messages)[0].content);
-      assert.equal(result.tab_id, canvas.cells[0].tab_id);
+      assert.ok(result.tab_id);
       const page = await app.pageWith(/\/other\?blank-canvas=1$/);
       assert.equal(await page.evaluate(() => document.visibilityState), 'visible');
       const after = await app.invoke('canvas.state');
+      assert.equal(result.tab_id, after.cells[0].tab_id);
       assert.equal(after.cells[0].url, target);
       assert.equal(after.cells[1].tab_id, null);
       const context = await app.invoke('agent.context');

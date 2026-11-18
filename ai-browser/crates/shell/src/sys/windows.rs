@@ -147,6 +147,85 @@ pub fn current_pid() -> u32 {
     unsafe { GetCurrentProcessId() }
 }
 
+pub struct WindowPlacement(windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT);
+
+pub fn monitor_details(device_name: &str) -> Option<(String, String, u32, u32)> {
+    use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW, DISPLAY_DEVICEW, ENUM_CURRENT_SETTINGS};
+    let device_name = wide(device_name);
+    let mut device = DISPLAY_DEVICEW { cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+    let mut mode = DEVMODEW { dmSize: std::mem::size_of::<DEVMODEW>() as u16, ..Default::default() };
+    // SAFETY: NUL-terminated adapter name and correctly sized out-pointers. Flag 1
+    // requests the monitor's device-interface identity, independent of desktop position.
+    unsafe {
+        if !EnumDisplayDevicesW(PCWSTR(device_name.as_ptr()), 0, &mut device, 1).as_bool() { return None; }
+        let _ = EnumDisplaySettingsW(PCWSTR(device_name.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode);
+    }
+    let text = |value: &[u16]| String::from_utf16_lossy(&value[..value.iter().position(|c| *c == 0).unwrap_or(value.len())]);
+    let id = text(&device.DeviceID);
+    if id.is_empty() { return None; }
+    Some((id, text(&device.DeviceString), mode.dmPelsWidth, mode.dmPelsHeight))
+}
+
+pub fn monitor_work_area(monitor: isize) -> Option<(i32, i32, u32, u32)> {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    // SAFETY: the monitor comes from tao; info is initialized with its required size.
+    if !unsafe { GetMonitorInfoW(HMONITOR(monitor as *mut _), &mut info) }.as_bool() { return None; }
+    let r = info.rcWork;
+    Some((r.left, r.top, (r.right - r.left) as u32, (r.bottom - r.top) as u32))
+}
+
+pub fn restore_window_placement(hwnd: isize, placement: &WindowPlacement) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::SetWindowPlacement;
+    // SAFETY: hwnd belongs to this browser; placement was captured from that window.
+    unsafe {
+        // Moving back across a DPI boundary can scale the restored normal rectangle.
+        // Reapply after the move so the saved geometry uses the destination DPI.
+        for _ in 0..2 {
+            SetWindowPlacement(HWND(hwnd as *mut _), &placement.0).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+pub fn span_window(hwnd: isize, bounds: (i32, i32, u32, u32)) -> Result<WindowPlacement, String> {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowPlacement, GetWindowRect, SetWindowPos, ShowWindow, WINDOWPLACEMENT, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE};
+    let hwnd = HWND(hwnd as *mut _);
+    let mut placement = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+    // SAFETY: hwnd is this browser's window and placement is a correctly sized out-pointer.
+    unsafe { GetWindowPlacement(hwnd, &mut placement) }.map_err(|error| error.to_string())?;
+    let saved = WindowPlacement(placement);
+    let (x, y, width, height) = bounds;
+    // SAFETY: valid browser HWND, physical screen bounds, and no Z-order/activation changes.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let resize = || -> windows::core::Result<()> {
+            // Frameless windows still have invisible resize borders. Recheck after
+            // moving because a different monitor can change their DPI-scaled size.
+            for _ in 0..2 {
+                let mut outer = RECT::default();
+                let mut client = RECT::default();
+                let mut origin = POINT::default();
+                GetWindowRect(hwnd, &mut outer)?;
+                GetClientRect(hwnd, &mut client)?;
+                ClientToScreen(hwnd, &mut origin).ok()?;
+                let border_w = outer.right - outer.left - client.right;
+                let border_h = outer.bottom - outer.top - client.bottom;
+                SetWindowPos(hwnd, None, x - (origin.x - outer.left), y - (origin.y - outer.top),
+                    width as i32 + border_w, height as i32 + border_h, SWP_NOACTIVATE | SWP_NOZORDER)?;
+            }
+            Ok(())
+        };
+        if let Err(error) = resize() {
+            let _ = restore_window_placement(hwnd.0 as isize, &saved);
+            return Err(error.to_string());
+        }
+    }
+    Ok(saved)
+}
+
 /// Upper bound on the command line we are willing to copy out of another
 /// process. A real WebView2 command line is a few hundred bytes; the bound
 /// exists so a partial or torn read of `RTL_USER_PROCESS_PARAMETERS` cannot turn

@@ -425,7 +425,7 @@ impl AppState {
     fn agent_tab(&self, args: &Value) -> Result<TabId, String> {
         let id = match args.get("tab_id").and_then(Value::as_u64) {
             Some(id) => TabId(id),
-            None => self.active.ok_or("there is no active tab")?,
+            None => self.active.or(self.canvas_shown).ok_or("there is no active tab")?,
         };
         self.tabs.get(id).map(|_| id).ok_or_else(|| format!("tab {} does not exist", id.0))
     }
@@ -642,6 +642,16 @@ impl AppState {
                     Ok(u) => u,
                     Err(e) => return self.agent_reply_err(id, e),
                 };
+                if let Ok(canvas) = self.agent_tab(&args) {
+                    if let Some(cell) = self.canvas_of(canvas).filter(|cv| cv.focused().is_none()).map(|cv| cv.focus) {
+                        match self.canvas_set(&json!({ "canvas_id": canvas.0, "cell": cell, "url": url })) {
+                            Ok(Some(result)) => self.agent_reply_ok(id, json!({ "tab_id": result["tab_id"], "navigating_to": url })),
+                            Ok(None) => self.agent_reply_err(id, "could not open the empty cell"),
+                            Err(e) => self.agent_reply_err(id, e),
+                        }
+                        return;
+                    }
+                }
                 match self.agent_page_tab(&args) {
                     Ok(tab) => {
                         self.agent_wake(tab);

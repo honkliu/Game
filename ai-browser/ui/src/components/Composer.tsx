@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'preact/hooks';
 import {
   agentOn, aiStatus, busy, candidates, extraTabs, focusTick, intent, localOnly, model, models, native, sendMessage,
-  modelFilter, modelMenu, status, stop, useSelection, type Intent,
+  modelFilter, modelMenu, promptHistory, status, stop, turns, useSelection, type Intent,
 } from '../store';
 import { ModelPicker } from './ModelPicker';
 
@@ -14,6 +14,8 @@ const QUICK: [string, { intent: Intent; selection?: boolean; question?: string }
 
 export function Composer() {
   const ref = useRef<HTMLTextAreaElement>(null);
+  const historyIndex = useRef<number | null>(null);
+  const draft = useRef('');
   const on = agentOn.value;
   const isBusy = busy.value;
   const s = aiStatus.value;
@@ -28,6 +30,7 @@ export function Composer() {
     if (!el || !el.value.trim()) return;
     const text = el.value;
     el.value = '';
+    historyIndex.current = null;
     void sendMessage(text);
   };
   // Ask mode may send with an empty box when a selection and a verb are chosen.
@@ -35,6 +38,7 @@ export function Composer() {
     const el = ref.current;
     const text = el?.value ?? '';
     if (el) el.value = '';
+    historyIndex.current = null;
     void sendMessage(text);
   };
 
@@ -53,6 +57,23 @@ export function Composer() {
         <textarea id={pre + '-input'} ref={ref} class="ask-input" rows={2} spellcheck={false} disabled={isBusy}
           placeholder={on ? 'Ask the agent to do something. It can read tabs, browse, search and use tools.' : 'Ask a question about this page'}
           onKeyDown={(e) => {
+            if (e.isComposing) return;
+            const el = e.currentTarget;
+            if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && el.selectionStart === el.selectionEnd) {
+              const up = e.key === 'ArrowUp';
+              const atEdge = up ? !el.value.slice(0, el.selectionStart).includes('\n') : !el.value.slice(el.selectionEnd).includes('\n');
+              const history = promptHistory.value.length ? promptHistory.value : turns.value.map(turn => turn.question).filter(text => !!text.trim());
+              if (atEdge && history.length && (up || historyIndex.current !== null)) {
+                e.preventDefault();
+                if (historyIndex.current === null) draft.current = el.value;
+                const next = Math.max(0, Math.min(history.length, (historyIndex.current ?? history.length) + (up ? -1 : 1)));
+                historyIndex.current = next === history.length ? null : next;
+                el.value = history[next] ?? draft.current;
+                const caret = up ? 0 : el.value.length;
+                el.setSelectionRange(caret, caret);
+                return;
+              }
+            }
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
               if (on) submit();

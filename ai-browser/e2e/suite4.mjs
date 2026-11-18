@@ -133,13 +133,14 @@ await run([
     await waitFor(async () => (await canvas()).cells[2].tab_id != null);
   }],
 
-  ['clicking an empty cell gives it a page driven by the one address bar', async () => {
+  ['clicking an empty cell only focuses it; address-bar navigation fills it', async () => {
     await app.invoke('canvas.clear', { cell: 1 });
     await waitFor(async () => app.shell.evaluate(() => document.querySelectorAll('.cv-cell.is-empty').length >= 1));
     assert.equal(await app.shell.evaluate(() => document.querySelectorAll('.cv-input').length), 0);
     const idx = (await canvas()).cells.find((c) => c.tab_id == null).index;
     await app.shell.evaluate((i) => document.querySelector(`.cv-cell[data-cell="${i}"] .cv-empty`).click(), idx);
-    await waitFor(async () => (await canvas()).cells[idx].tab_id != null && (await canvas()).focus === idx);
+    await waitFor(async () => (await canvas()).focus === idx);
+    assert.equal((await canvas()).cells[idx].tab_id, null);
     await app.invoke('nav.open', { url: pageUrl(11), disposition: 'current' });
     await waitFor(async () => livePage(11));
     assert.equal((await canvas()).cells[idx].url, pageUrl(11));
@@ -195,7 +196,7 @@ await run([
     for (let i = 1; i < 6; i++) await app.invoke('canvas.focus', { cell: i });
     await sleep(1500);
     cv = await canvas();
-    assert.equal(cv.cells.filter((c) => c.tab_id != null).length, 6);
+    assert.equal(cv.cells.filter((c) => c.tab_id != null).length, 0);
     const info = await app.shell.evaluate(() => ({ sx: window.screenX, sy: window.screenY, dpr: devicePixelRatio }));
     for (const i of [1, 4, 0, 2, 5, 3, 1]) {
       const c = cv.cells[i];

@@ -57,6 +57,7 @@ mod omnibox_worker;
 mod settings_page;
 mod providers;
 mod popups;
+mod window_controls;
 const SESSION_DEBOUNCE: Duration = Duration::from_millis(500);
 const TICK: Duration = Duration::from_millis(250);
 const NAV_COALESCE: Duration = Duration::from_millis(100);
@@ -157,6 +158,9 @@ pub struct AppState {
     sidebar: Option<WebView>,
     window: Option<Window>,
     window_id: Option<WindowId>,
+    window_displays: window_controls::DisplayCache,
+    #[cfg(windows)]
+    window_span: Option<window_controls::SpanState>,
     /// Shared WebView2 environment for every page webview. Taken during a
     /// build and put back immediately after (wry needs `&mut`).
     context: Option<WebContext>,
@@ -526,7 +530,7 @@ impl AppState {
             rail_collapsed: self.settings.rail_collapsed,
             tabs: records,
             groups,
-            active_tab_id: self.active.map(|a| a.0),
+            active_tab_id: self.active.or(self.canvas_shown).map(|a| a.0),
             closed,
             downloads: self.downloads.clone(),
         });
@@ -721,8 +725,9 @@ impl AppState {
 
     pub(super) fn open_from_page(&mut self, opener: TabId, url: &str) {
         if let Some(canvas) = self.shown_canvas_of(opener) {
-            if self.canvas_of(canvas).and_then(|c| c.first_empty()).is_some() {
-                let _ = self.canvas_set(&json!({ "canvas_id": canvas.0, "url": url }));
+            let target = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()).and_then(|cv| cv.popup_target(opener));
+            if let Some(cell) = target {
+                self.canvas_add_popup(canvas, cell, url);
                 return;
             }
         }
@@ -805,6 +810,8 @@ impl AppState {
                 id: id.0,
                 idle: live.last_used.elapsed(),
                 protected: !live.lifecycle_known || live.editing || live.playing
+                    || tab.is_some_and(|t| t.member_of.and_then(|parent| self.canvas_of(parent))
+                        .is_some_and(|cv| cv.contains(t.id) && cv.cell_of(t.id).is_none()))
                     || tab.is_some_and(|t| t.pinned || t.loading)
                     || self.download_owners.values().any(|owner| owner == id)
                     || self.ai.agent_run != 0
@@ -873,7 +880,7 @@ impl AppState {
     }
 
     fn step_tab(&mut self, delta: isize) {
-        if let Some(cur) = self.active {
+        if let Some(cur) = self.active.or(self.canvas_shown) {
             if let Some(next) = self.tabs.step(cur, delta) {
                 self.activate(next);
             }
@@ -1118,6 +1125,7 @@ impl AppState {
                 self.emit("state.settings", self.settings_payload());
                 self.emit("state.downloads", json!({ "downloads": self.downloads }));
                 self.emit("app.ready", json!({}));
+                self.emit_window_state();
                 self.apply_layout();
                 // The shell is painted, so the rail is already on screen (W1).
                 // Now create the active tab's webview and load its URL: this is
@@ -1197,6 +1205,9 @@ impl AppState {
                             // new-tab tile, a recent/history row, a menu item.
                             // It outranks a followed link in `history::score`.
                             self.navigate(id, &url, true);
+                        } else if let Some(canvas) = self.canvas_shown {
+                            let cell = self.canvas_of(canvas).map(|cv| cv.focus).unwrap_or(0);
+                            self.canvas_set(&json!({ "canvas_id": canvas.0, "cell": cell, "url": url }))?;
                         }
                     }
                 };
@@ -1242,7 +1253,7 @@ impl AppState {
                 Ok(None)
             }
             "tab.close" => {
-                if let Some(id) = id_arg() {
+                if let Some(id) = id_arg().or(self.canvas_shown) {
                     self.close_tab(id);
                 }
                 Ok(None)
@@ -1706,12 +1717,17 @@ impl AppState {
                 Ok(None)
             }
             "window.toggle_maximize" => {
-                if let Some(w) = self.window.as_ref() {
-                    w.set_maximized(!w.is_maximized());
-                }
+                self.toggle_window_maximize()?;
                 Ok(None)
             }
+            "window.toggle_span" => self.toggle_window_span(),
+            "window.span_select" => self.select_span_monitors(p),
+            "window.state" => {
+                self.refresh_window_displays(true);
+                Ok(Some(self.window_payload()))
+            }
             "window.drag" => {
+                self.restore_spanned_window()?;
                 if let Some(w) = self.window.as_ref() {
                     let _ = w.drag_window();
                 }
@@ -1730,6 +1746,7 @@ impl AppState {
                     "sw" => D::SouthWest,
                     _ => return Ok(None),
                 };
+                self.restore_spanned_window()?;
                 if let Some(w) = self.window.as_ref() {
                     if !w.is_maximized() {
                         let _ = w.drag_resize_window(dir);
@@ -1767,6 +1784,9 @@ impl AppState {
             _ => {
                 if let Some(id) = self.active {
                     self.navigate(id, &url, true);
+                } else if let Some(canvas) = self.canvas_shown {
+                    let cell = self.canvas_of(canvas).map(|cv| cv.focus).unwrap_or(0);
+                    let _ = self.canvas_set(&json!({ "canvas_id": canvas.0, "cell": cell, "url": url }));
                 }
             }
         }
@@ -1837,7 +1857,7 @@ impl AppState {
                 self.create_tab(tabs::NEWTAB_URL, self.active, true);
             }
             "close_tab" => {
-                if let Some(id) = self.active {
+                if let Some(id) = self.active.or(self.canvas_shown) {
                     self.close_tab(id);
                 }
             }
@@ -2580,6 +2600,9 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
         sidebar: None,
         window: None,
         window_id: None,
+        window_displays: window_controls::DisplayCache::default(),
+        #[cfg(windows)]
+        window_span: None,
         environment: None,
         context: None,
         panel: Panel::None,
@@ -3030,6 +3053,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
                 let mut s = shared.borrow_mut();
                 s.ai_tick();
                 s.lifecycle_tick();
+                s.refresh_window_displays(false);
                 if matches!(s.session_dirty_at, Some(t) if Instant::now() >= t) {
                     s.flush_session();
                 }
@@ -3221,10 +3245,13 @@ fn handle_window_event(shared: &Shared, event: WindowEvent, control_flow: &mut C
             let mut s = shared.borrow_mut();
             s.dpi_scale = s.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
             s.apply_layout();
+            s.window_geometry_changed();
         }
+        WindowEvent::Moved(_) => shared.borrow_mut().window_geometry_changed(),
         WindowEvent::Focused(true) => {
             let mut s = shared.borrow_mut();
             s.note("window focused");
+            s.refresh_window_displays(true);
         }
         _ => {}
     }

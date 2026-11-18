@@ -161,9 +161,9 @@ export async function startFixtures() {
   return { port, close: () => server.close() };
 }
 
-export async function launch({ modelPort, debugPort = 9444, withProvider = true } = {}) {
+export async function launch({ modelPort, debugPort = 9444, withProvider = true, profilePath } = {}) {
   const exe = process.env.BROWSER_EXE || path.join(os.tmpdir(), 'ai-target', 'debug', 'browser.exe');
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-e2e-'));
+  const profile = profilePath || fs.mkdtempSync(path.join(os.tmpdir(), 'ai-e2e-'));
   const data = path.join(profile, 'native-browser');
   fs.mkdirSync(data, { recursive: true });
   if (withProvider && modelPort) {

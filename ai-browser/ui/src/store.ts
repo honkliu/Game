@@ -44,6 +44,14 @@ export const models = signal<ModelInfo[]>([]);
 export const candidates = signal<Candidate[]>([]);
 export const agentState = signal<AgentState | null>(null);
 export const focusTick = signal(0);
+export const promptHistory = signal<string[]>((() => {
+  try {
+    const saved: unknown = JSON.parse(store()?.getItem('promptHistory') ?? '[]');
+    return Array.isArray(saved) ? saved.filter((text): text is string => typeof text === 'string' && !!text.trim()).slice(-MAX_TURNS) : [];
+  } catch {
+    return [];
+  }
+})());
 
 export const intent = signal<Intent>('ask');
 export const model = signal(store()?.getItem('model') ?? '');
@@ -230,6 +238,10 @@ export const NAV_INTENT = /^\s*(open|go to|goto|visit|navigate to|take me to|打
 
 export async function sendMessage(text: string, over?: { intent: Intent; selection?: boolean; question?: string }) {
   if (busy.value) return;
+  if (text.trim() && promptHistory.value.at(-1) !== text) {
+    promptHistory.value = [...promptHistory.value, text].slice(-MAX_TURNS);
+    try { store()?.setItem('promptHistory', JSON.stringify(promptHistory.value)); } catch { /* History is optional when storage is full. */ }
+  }
   const command = modelCommand(text, models.value, agentOn.value);
   if (command) {
     if (command.kind === 'select') {

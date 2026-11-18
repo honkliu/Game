@@ -14,6 +14,83 @@ import { modelCommand } from '../src/model_commands';
 import type { ModelInfo } from '../src/types';
 import { ContextBar } from '../src/components/ContextBar';
 import { ctx as liveContext } from '../src/store';
+import { agentOn, promptHistory, sendMessage, turns } from '../src/store';
+import { Composer } from '../src/components/Composer';
+
+describe('composer input history', () => {
+  it('recalls both chat modes with arrows, clamps at the oldest and restores the draft', () => {
+    turns.value = [];
+    promptHistory.value = ['first question', 'second question'];
+    const host = document.createElement('div');
+    act(() => render(<Composer />, host));
+    const input = host.querySelector('textarea')!;
+    input.value = 'unfinished draft';
+    const key = (key: string) => act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })); });
+    key('ArrowUp');
+    expect(input.value).toBe('second question');
+    act(() => { agentOn.value = !agentOn.value; });
+    key('ArrowUp');
+    expect(input.value).toBe('first question');
+    key('ArrowUp');
+    expect(input.value).toBe('first question');
+    key('ArrowDown');
+    expect(input.value).toBe('second question');
+    key('ArrowDown');
+    expect(input.value).toBe('unfinished draft');
+    key('ArrowDown');
+    expect(input.value).toBe('unfinished draft');
+    render(null, host);
+    promptHistory.value = [];
+  });
+
+  it('preserves multiline editing, modified arrows, selections and IME input', () => {
+    promptHistory.value = ['previous'];
+    const host = document.createElement('div');
+    act(() => render(<Composer />, host));
+    const input = host.querySelector('textarea')!;
+    input.value = 'first\nsecond\nthird';
+    input.setSelectionRange(8, 8);
+    for (const options of [{ key: 'ArrowUp' }, { key: 'ArrowDown' }, { key: 'ArrowUp', ctrlKey: true }, { key: 'ArrowUp', shiftKey: true }, { key: 'ArrowUp', isComposing: true }]) {
+      const event = new KeyboardEvent('keydown', { ...options, bubbles: true, cancelable: true });
+      act(() => { input.dispatchEvent(event); });
+      expect(event.defaultPrevented).toBe(false);
+      expect(input.value).toBe('first\nsecond\nthird');
+    }
+    input.setSelectionRange(0, 5);
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })); });
+    expect(input.value).toBe('first\nsecond\nthird');
+    input.setSelectionRange(0, 0);
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })); });
+    expect(input.value).toBe('previous');
+    render(null, host);
+    promptHistory.value = [];
+  });
+
+  it('records local commands once and persists input history without adding chat turns', async () => {
+    promptHistory.value = [];
+    turns.value = [];
+    await sendMessage('/model default');
+    await sendMessage('/model default');
+    await sendMessage('  ');
+    expect(promptHistory.value).toEqual(['/model default']);
+    expect(JSON.parse(localStorage.getItem('promptHistory')!)).toEqual(['/model default']);
+    expect(turns.value).toEqual([]);
+    promptHistory.value = [];
+    localStorage.removeItem('promptHistory');
+  });
+
+  it('can recall an existing conversation before any input history has been recorded', () => {
+    promptHistory.value = [];
+    turns.value = [{ ...newAgentTurn(1, 'restored question'), status: 'done' }];
+    const host = document.createElement('div');
+    act(() => render(<Composer />, host));
+    const input = host.querySelector('textarea')!;
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })); });
+    expect(input.value).toBe('restored question');
+    render(null, host);
+    turns.value = [];
+  });
+});
 
 describe('/model command', () => {
   const entries = [

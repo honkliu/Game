@@ -101,10 +101,14 @@
         <span class="rail-new-label">New canvas</span>
       </button>
       <div class="rail-pinned-grid" id="rail-pinned-grid" hidden></div>
-      <div class="win-drag" id="win-drag" aria-hidden="true"></div>
+      <div class="win-drag" id="win-drag" title="Drag to move window; double-click to maximize" aria-label="Drag to move window"></div>
       <div class="win-ctl" id="win-ctl">
         <button id="win-min" aria-label="Minimize"><svg viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor"/></svg></button>
         <button id="win-max" aria-label="Maximize"><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" fill="none" stroke="currentColor"/></svg></button>
+        <div id="win-span-group" class="win-span-group">
+          <button id="win-span" aria-label="Span monitors" title="Choose monitors to span" aria-pressed="false" disabled><svg viewBox="0 0 18 12" aria-hidden="true"><path d="M.5 1.5h8v8h-8zM9.5 1.5h8v8h-8zM4.5 9.5v2m9-2v2" fill="none" stroke="currentColor"/></svg></button>
+          <button id="win-span-menu" aria-label="Choose monitors" title="Choose monitors" aria-haspopup="dialog" aria-controls="monitor-picker" aria-expanded="false"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="m2 4 3 3 3-3" fill="none" stroke="currentColor"/></svg></button>
+        </div>
         <button id="win-close" aria-label="Close"><svg viewBox="0 0 10 10"><path d="m0 0 10 10M10 0 0 10" stroke="currentColor"/></svg></button>
       </div>
     </aside>
@@ -140,6 +144,15 @@
 
   <!-- Row context menu (§3.5 Space / Shift+F10): max 8 items, one level. -->
   <div id="item-menu" class="menu" role="menu" hidden></div>
+  <div id="monitor-picker-backdrop" class="monitor-picker-backdrop" hidden></div>
+  <section id="monitor-picker" class="monitor-picker" role="dialog" aria-modal="true" aria-labelledby="monitor-picker-title" hidden>
+    <h2 id="monitor-picker-title">Choose monitors</h2>
+    <label class="monitor-layout-label">Layout <select id="monitor-layout" aria-label="Monitor layout"><option value="2x1">2 screens side by side</option><option value="1x2">2 screens stacked</option><option value="2x2">4 screens (2 by 2)</option></select></label>
+    <div id="monitor-slots" class="monitor-slots"></div>
+    <p class="monitor-picker-hint">Assign monitor numbers to match your physical arrangement. Your order is saved exactly; Windows display settings are not changed.</p>
+    <p id="monitor-picker-error" class="monitor-picker-error" role="alert"></p>
+    <div class="monitor-picker-actions"><button id="monitor-picker-cancel" type="button" class="text-btn">Cancel</button><button id="monitor-picker-apply" type="button" class="text-btn">Save and span</button></div>
+  </section>
 </div>
 <script src="app.js"></script>
 </body>

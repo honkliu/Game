@@ -14,6 +14,13 @@ pub const DEFAULT_SEARCH_TEMPLATE: &str = "https://html.duckduckgo.com/html/?q=%
 pub const DEFAULT_HISTORY_CAP: u32 = 100_000;
 pub const DEFAULT_SLEEP_MINUTES: u32 = 5;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpanLayout {
+    pub cols: usize,
+    pub rows: usize,
+    pub display_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Theme {
@@ -54,6 +61,8 @@ pub struct Settings {
     pub history_cap: u32,
     pub sleep_after_minutes: u32,
     pub download_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_layout: Option<SpanLayout>,
 }
 
 impl Default for Settings {
@@ -72,6 +81,7 @@ impl Default for Settings {
             history_cap: DEFAULT_HISTORY_CAP,
             sleep_after_minutes: DEFAULT_SLEEP_MINUTES,
             download_dir: String::new(),
+            span_layout: None,
         }
     }
 }
@@ -280,6 +290,7 @@ mod tests {
             theme: Theme::Dark,
             history_cap: 4_242,
             rail_collapsed: true,
+            span_layout: Some(SpanLayout { cols: 2, rows: 1, display_ids: vec!["monitor-3".into(), "monitor-1".into()] }),
             ..Default::default()
         };
         save(&path, &s).unwrap();

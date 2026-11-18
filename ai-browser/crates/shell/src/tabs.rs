@@ -5,7 +5,7 @@
 //! so `state.tabs` is exactly one source of truth.
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 /// Maximum closed-tab history (§3.5 `Ctrl+Shift+T`: "stack of 25").
 pub const CLOSED_STACK_LEN: usize = 25;
@@ -81,13 +81,18 @@ pub struct Canvas {
     pub col_ws: Vec<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub row_h: Vec<f64>,
+    /// Covered pages, oldest first, for each cell. Only `cells` are visible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<Vec<TabId>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub popup_next: BTreeMap<TabId, usize>,
 }
 
 impl Canvas {
     pub fn new(cols: usize, rows: usize) -> Self {
         let cols = cols.clamp(1, CANVAS_MAX_COLS);
         let rows = rows.clamp(1, CANVAS_MAX_ROWS);
-        Self { cols, rows, cells: vec![None; cols * rows], focus: 0, zoomed: false, col_ws: Vec::new(), row_h: Vec::new() }
+        Self { cols, rows, cells: vec![None; cols * rows], focus: 0, zoomed: false, col_ws: Vec::new(), row_h: Vec::new(), layers: Vec::new(), popup_next: BTreeMap::new() }
     }
 
     pub fn capacity(&self) -> usize {
@@ -106,6 +111,40 @@ impl Canvas {
         self.cells.iter().position(|c| *c == Some(id))
     }
 
+    pub fn all_members(&self) -> Vec<TabId> {
+        self.members().into_iter().chain(self.layers.iter().flatten().copied()).collect()
+    }
+
+    pub fn contains(&self, id: TabId) -> bool {
+        self.cell_of(id).is_some() || self.layers.iter().any(|stack| stack.contains(&id))
+    }
+
+    /// Empty cells win; otherwise cycle row-major, always excluding the opener.
+    pub fn popup_target(&mut self, opener: TabId) -> Option<usize> {
+        let source = self.cell_of(opener)?;
+        let next = *self.popup_next.get(&opener).unwrap_or(&0);
+        let target = self.cells.iter().enumerate().find(|(i, cell)| *i != source && cell.is_none()).map(|(i, _)| i)
+            .or_else(|| (0..self.capacity()).map(|offset| (next + offset) % self.capacity()).find(|i| *i != source))?;
+        self.popup_next.insert(opener, (target + 1) % self.capacity());
+        Some(target)
+    }
+
+    pub fn cover(&mut self, cell: usize, page: TabId) {
+        self.layers.resize_with(self.capacity(), Vec::new);
+        if let Some(previous) = self.cells[cell].replace(page) {
+            self.layers[cell].push(previous);
+        }
+    }
+
+    pub fn uncover(&mut self, cell: usize) -> Option<TabId> {
+        let closed = self.cells[cell].take();
+        self.cells[cell] = self.layers.get_mut(cell).and_then(Vec::pop);
+        if let Some(closed) = closed {
+            self.popup_next.remove(&closed);
+        }
+        closed
+    }
+
     pub fn focused(&self) -> Option<TabId> {
         self.cells.get(self.focus).copied().flatten()
     }
@@ -116,19 +155,25 @@ impl Canvas {
         let cols = cols.clamp(1, CANVAS_MAX_COLS);
         let rows = rows.clamp(1, CANVAS_MAX_ROWS);
         let focused = self.focused();
-        let pages = self.members();
+        let mut stacks = std::mem::take(&mut self.layers);
+        stacks.resize_with(self.capacity(), Vec::new);
+        let pages: Vec<_> = self.cells.iter().copied().zip(stacks).filter_map(|(page, stack)| page.map(|id| (id, stack))).collect();
         let cap = cols * rows;
         let (keep, dropped) = pages.split_at(pages.len().min(cap));
+        let dropped: Vec<_> = dropped.iter().flat_map(|(id, stack)| std::iter::once(*id).chain(stack.iter().copied())).collect();
         self.cols = cols;
         self.rows = rows;
         self.col_ws.clear();
         self.row_h.clear();
         self.cells = vec![None; cap];
-        for (i, id) in keep.iter().enumerate() {
+        self.layers = vec![Vec::new(); cap];
+        for (i, (id, stack)) in keep.iter().enumerate() {
             self.cells[i] = Some(*id);
+            self.layers[i] = stack.clone();
         }
+        self.popup_next.clear();
         self.focus = focused.and_then(|f| self.cell_of(f)).unwrap_or(0);
-        dropped.to_vec()
+        dropped
     }
 
     /// First empty cell, if any.
@@ -467,6 +512,53 @@ mod tests {
         s.close(m).unwrap();
         s.close(cv).unwrap();
         assert_eq!(s.closed_len(), 0);
+    }
+
+    #[test]
+    fn canvas_popups_use_empty_cells_then_cycle_without_covering_the_opener() {
+        let mut c = Canvas::new(2, 2);
+        c.cover(0, TabId(1));
+        assert_eq!(c.popup_target(TabId(1)), Some(1));
+        c.cover(1, TabId(2));
+        assert_eq!(c.popup_target(TabId(1)), Some(2));
+        c.cover(2, TabId(3));
+        assert_eq!(c.popup_target(TabId(1)), Some(3));
+        c.cover(3, TabId(4));
+        for expected in [1, 2, 3, 1] {
+            assert_eq!(c.popup_target(TabId(1)), Some(expected));
+        }
+        for expected in [0, 1, 2, 0] {
+            assert_eq!(c.popup_target(TabId(4)), Some(expected));
+        }
+        c.cells[2] = None;
+        assert_eq!(c.popup_target(TabId(1)), Some(2), "empty cells take priority over the cursor");
+        let mut single = Canvas::new(1, 1);
+        single.cover(0, TabId(1));
+        assert_eq!(single.popup_target(TabId(1)), None);
+    }
+
+    #[test]
+    fn canvas_layers_restore_in_order_survive_serialization_and_follow_reshape() {
+        let mut c = Canvas::new(2, 2);
+        c.cover(0, TabId(1));
+        c.cover(0, TabId(2));
+        c.cover(0, TabId(3));
+        c.cover(3, TabId(4));
+        c.cover(3, TabId(5));
+        c.popup_target(TabId(3));
+        let mut c: Canvas = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert!(c.contains(TabId(1)));
+        assert_eq!(c.occupied(), 2);
+        assert_eq!(c.uncover(0), Some(TabId(3)));
+        assert_eq!(c.cells[0], Some(TabId(2)));
+        assert_eq!(c.uncover(0), Some(TabId(2)));
+        assert_eq!(c.cells[0], Some(TabId(1)));
+        assert!(c.reshape(2, 1).is_empty());
+        assert_eq!(c.cells[1], Some(TabId(5)));
+        assert_eq!(c.reshape(1, 1), vec![TabId(5), TabId(4)]);
+        assert_eq!(c.uncover(0), Some(TabId(1)));
+        assert_eq!(c.occupied(), 0);
+        assert!(c.all_members().is_empty());
     }
 
     #[test]

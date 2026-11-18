@@ -80,6 +80,7 @@
     railFocus: null,
     canvas: null,
     focusedInput: false,
+    window: null,
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -319,7 +320,34 @@
     row.innerHTML = `${iconFor(t)}<span class="tab-title"></span>
       <button class="tab-close" tabindex="-1" aria-label="Close tab">${svg('m4 4 8 8m0-8-8 8', 12)}</button>`;
     row.querySelector('.tab-title').textContent = t.title || t.url || 'New tab';
+    let dragged = false;
+    row.addEventListener('pointerdown', e => {
+      dragged = false;
+      if (e.button !== 0 || e.target.closest('button') || e.ctrlKey || e.shiftKey || e.altKey || e.metaKey || document.documentElement.dataset.tabs !== 'horizontal') return;
+      const { clientX: x, clientY: y, pointerId } = e;
+      const cleanup = () => {
+        window.removeEventListener('pointermove', move, true);
+        window.removeEventListener('pointerup', cleanup, true);
+        window.removeEventListener('pointercancel', cleanup, true);
+        window.removeEventListener('blur', cleanup);
+      };
+      const move = event => {
+        if (event.pointerId !== pointerId) return;
+        if (!(event.buttons & 1)) { cleanup(); return; }
+        if (Math.hypot(event.clientX - x, event.clientY - y) < 5) return;
+        cleanup();
+        dragged = true;
+        event.preventDefault();
+        invoke('window.drag', {});
+      };
+      window.addEventListener('pointermove', move, true);
+      window.addEventListener('pointerup', cleanup, true);
+      window.addEventListener('pointercancel', cleanup, true);
+      window.addEventListener('blur', cleanup);
+    });
+    row.addEventListener('dragstart', e => e.preventDefault());
     row.addEventListener('click', (e) => {
+      if (dragged) { e.preventDefault(); return; }
       if (e.target.closest('.tab-close')) {
         e.stopPropagation();
         invoke('tab.close', { tab_id: t.id });
@@ -592,6 +620,7 @@
 
   const GRIDS = [[2, 1], [1, 2], [2, 2], [3, 1], [3, 2], [4, 1], [4, 2], [4, 3]];
   function openItemMenu(t, x, y, custom) {
+    closeMonitorPicker();
     const isCanvas = !!(t && t.canvas);
     const items = custom || (isCanvas ? [
       { label: 'Zoom focused page', run: () => invoke('canvas.zoom', { canvas_id: t.id }) },
@@ -650,6 +679,107 @@
   });
   document.addEventListener('mousedown', (e) => {
     if (!el.itemMenu.hidden && !e.target.closest('#item-menu')) closeItemMenu();
+  });
+
+  // Monitor slots are explicit user assignments, not inferred desktop ordering.
+  let monitorDraft = null;
+  let monitorSaving = false;
+  let monitorTopology = '';
+  const monitorPicker = $('#monitor-picker');
+  function renderMonitorPicker() {
+    if (!monitorDraft || monitorPicker.hidden) return;
+    const displays = state.window?.displays || [];
+    const { cols, rows, display_ids: ids } = monitorDraft;
+    $('#monitor-layout').value = `${cols}x${rows}`;
+    const grid = $('#monitor-slots');
+    const focusedSlot = document.activeElement?.id;
+    grid.replaceChildren();
+    grid.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+    const labels = rows === 1 ? ['Left', 'Right'] : cols === 1 ? ['Top', 'Bottom'] : ['Top left', 'Top right', 'Bottom left', 'Bottom right'];
+    for (let i = 0; i < cols * rows; i++) {
+      const label = document.createElement('label');
+      label.className = 'monitor-slot' + (ids[i] ? ' is-assigned' : '');
+      const title = document.createElement('span');
+      title.textContent = labels[i];
+      const select = document.createElement('select');
+      select.id = `monitor-slot-${i}`;
+      select.setAttribute('aria-label', `${labels[i]} monitor`);
+      select.appendChild(new Option('Choose monitor', ''));
+      for (const display of displays) {
+        if (!display.id) continue;
+        const option = new Option(`Monitor ${display.number} - ${display.resolution.join(' x ')} (${Math.round(display.scale * 100)}%)`, display.id);
+        option.title = display.name;
+        select.appendChild(option);
+      }
+      if (ids[i] && !displays.some(display => display.id === ids[i])) {
+        select.appendChild(new Option('Disconnected monitor', ids[i]));
+      }
+      select.value = ids[i] || '';
+      select.disabled = monitorSaving;
+      select.addEventListener('change', () => { monitorDraft.display_ids[i] = select.value; renderMonitorPicker(); });
+      label.append(title, select);
+      grid.appendChild(label);
+    }
+    const complete = ids.length === cols * rows && ids.every(id => id && displays.some(display => display.id === id));
+    const unique = new Set(ids).size === ids.length;
+    $('#monitor-picker-error').textContent = !complete ? 'Choose a connected monitor for every slot.' : !unique ? 'Choose a different monitor for each slot.' : '';
+    $('#monitor-picker-apply').disabled = !complete || !unique || monitorSaving;
+    $('#monitor-layout').disabled = monitorSaving;
+    if (focusedSlot?.startsWith('monitor-slot-')) document.getElementById(focusedSlot)?.focus();
+  }
+
+  async function openMonitorPicker() {
+    if (!monitorPicker.hidden) return;
+    closeItemMenu();
+    state.window = await invoke('window.state', {});
+    const saved = state.window.selected_layout;
+    monitorDraft = saved ? { ...saved, display_ids: [...saved.display_ids] } : { cols: 2, rows: 1, display_ids: ['', ''] };
+    monitorSaving = false;
+    await invoke('shell.menu', { open: true });
+    monitorPicker.hidden = false;
+    $('#monitor-picker-backdrop').hidden = false;
+    $('#win-span-menu').setAttribute('aria-expanded', 'true');
+    monitorTopology = JSON.stringify(state.window.displays);
+    renderMonitorPicker();
+    $('#monitor-slot-0').focus();
+  }
+
+  function closeMonitorPicker() {
+    if (monitorPicker.hidden || monitorSaving) return;
+    monitorPicker.hidden = true;
+    $('#monitor-picker-backdrop').hidden = true;
+    $('#win-span-menu').setAttribute('aria-expanded', 'false');
+    invoke('shell.menu', { open: false });
+    $('#win-span-menu').focus();
+  }
+
+  $('#monitor-layout').addEventListener('change', e => {
+    const [cols, rows] = e.target.value.split('x').map(Number);
+    monitorDraft = { cols, rows, display_ids: Array.from({ length: cols * rows }, (_, i) => monitorDraft.display_ids[i] || '') };
+    renderMonitorPicker();
+  });
+  $('#monitor-picker-cancel').addEventListener('click', closeMonitorPicker);
+  $('#monitor-picker-backdrop').addEventListener('click', closeMonitorPicker);
+  $('#monitor-picker-apply').addEventListener('click', async () => {
+    monitorSaving = true;
+    renderMonitorPicker();
+    try {
+      await invoke('window.span_select', monitorDraft);
+      monitorSaving = false;
+      closeMonitorPicker();
+    } catch (error) {
+      monitorSaving = false;
+      renderMonitorPicker();
+      $('#monitor-picker-error').textContent = error.message || String(error);
+    }
+  });
+  monitorPicker.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); closeMonitorPicker(); }
+    if (e.key === 'Tab') {
+      const controls = [...monitorPicker.querySelectorAll('select:not(:disabled),button:not(:disabled)')];
+      const next = e.shiftKey ? controls.at(-1) : controls[0];
+      if (document.activeElement === (e.shiftKey ? controls[0] : controls.at(-1))) { e.preventDefault(); next?.focus(); }
+    }
   });
 
   // ── inline page search ──────────────────────────────────────────────
@@ -825,6 +955,13 @@
   el.railToggle.addEventListener('click', () => invoke('shell.toggle_rail', {}));
   $('#win-min').addEventListener('click', () => invoke('window.minimize', {}));
   $('#win-max').addEventListener('click', () => invoke('window.toggle_maximize', {}));
+  $('#win-span').addEventListener('click', async () => {
+    try {
+      const result = await invoke('window.toggle_span', {});
+      if (result?.needs_selection) await openMonitorPicker();
+    } catch (error) { toast(error.message || String(error)); }
+  });
+  $('#win-span-menu').addEventListener('click', () => openMonitorPicker().catch(error => toast(error.message || String(error))));
   $('#win-close').addEventListener('click', () => invoke('window.close', {}));
   const dragArea = $('#win-drag');
   dragArea.addEventListener('mousedown', (e) => { if (e.button === 0 && e.detail < 2) invoke('window.drag', {}); });
@@ -870,6 +1007,21 @@
   });
 
   // ── host events ──────────────────────────────────────────────────────
+  on('state.window', (p) => {
+    if (!p) return;
+    state.window = p;
+    document.documentElement.style.setProperty('--caption-controls-width', p.span_supported ? '206px' : '140px');
+    const span = $('#win-span');
+    $('#win-span-group').hidden = !p.span_supported;
+    span.disabled = !p.can_span && !p.spanning;
+    span.setAttribute('aria-pressed', String(!!p.spanning));
+    span.title = p.spanning ? 'Restore previous window' : !p.can_span ? 'Connect a second display to span monitors' : p.needs_selection ? 'Choose monitors to span' : 'Span selected monitors';
+    span.setAttribute('aria-label', p.spanning ? 'Restore previous window' : 'Span monitors');
+    $('#win-max').setAttribute('aria-label', p.maximized ? 'Restore' : 'Maximize');
+    $('#win-max').title = p.maximized ? 'Restore' : 'Maximize';
+    const topology = JSON.stringify(p.displays);
+    if (!monitorPicker.hidden && topology !== monitorTopology) { monitorTopology = topology; renderMonitorPicker(); }
+  });
   on('app.ready', () => {
     invoke('diagnostics.self_test', {}).catch(() => {});
   });
@@ -950,6 +1102,7 @@
     if (!p) return;
     switch (p.name) {
       case 'escape':
+        if (!monitorPicker.hidden) { closeMonitorPicker(); return; }
         if (!el.itemMenu.hidden) { closeItemMenu(); return; }
         if (el.findInput.value) { closeFind(); return; }
         break;
@@ -986,6 +1139,7 @@
     if (p && p.text) navigator.clipboard.writeText(p.text).then(() => toast('URL copied')).catch(() => toast('Copy failed'));
   });
   on('shell.escape', () => {
+    if (!monitorPicker.hidden) { closeMonitorPicker(); return; }
     if (!el.itemMenu.hidden) { closeItemMenu(); return; }
     if (el.findInput.value) { closeFind(); return; }
     if (state.omnibox.open) { closeDropdown(); return; }

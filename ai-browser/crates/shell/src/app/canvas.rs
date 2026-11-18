@@ -183,12 +183,8 @@ impl AppState {
                 cv.focus = i;
             }
         }
-        // A canvas always has a page to focus.
-        if self.canvas_of(canvas).is_some_and(|cv| cv.occupied() == 0) {
-            self.canvas_add_page(canvas, 0, tabs::NEWTAB_URL);
-        }
         let Some(cv) = self.canvas_of(canvas).cloned() else { return };
-        let focused = cv.focused().or_else(|| cv.members().first().copied());
+        let focused = cv.focused();
         self.canvas_shown = Some(canvas);
         self.active = focused;
         let members = cv.members();
@@ -202,7 +198,7 @@ impl AppState {
             }
         }
         self.apply_layout();
-        self.sleep_background_tabs(&members);
+        self.sleep_background_tabs(&cv.all_members());
         if let Some(f) = focused {
             if let Some(live) = self.live.get(&f) {
                 let _ = live.webview.focus();
@@ -213,8 +209,15 @@ impl AppState {
         self.emit_tabs();
         if let Some(f) = focused {
             self.ai_on_activated(f);
-            self.agent_context_changed();
+        } else {
+            if let Some(shell) = self.shell.as_ref() {
+                let _ = shell.focus();
+            }
+            self.ai_hide_toolbar();
+            let status = self.ai_status();
+            self.emit("ai.context", status);
         }
+        self.agent_context_changed();
     }
 
     /// Re-tile and refresh after the cell set changed.
@@ -240,9 +243,17 @@ impl AppState {
             .unwrap_or(canvas);
         self.tabs.insert_after(Some(after), page);
         if let Some(cv) = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()) {
-            cv.cells[cell] = Some(id);
+            cv.cover(cell, id);
         }
         id
+    }
+
+    pub(super) fn canvas_add_popup(&mut self, canvas: TabId, cell: usize, url: &str) {
+        self.canvas_add_page(canvas, cell, url);
+        if let Some(cv) = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()) {
+            cv.focus = cell;
+        }
+        self.canvas_refresh(canvas);
     }
 
     /// Forget a page: its webview, AI state and tab entry.
@@ -256,7 +267,7 @@ impl AppState {
     }
 
     pub(super) fn canvas_close(&mut self, canvas: TabId) {
-        let members = self.canvas_of(canvas).map(Canvas::members).unwrap_or_default();
+        let members = self.canvas_of(canvas).map(Canvas::all_members).unwrap_or_default();
         for m in members {
             self.canvas_drop_page(m);
         }
@@ -308,8 +319,7 @@ impl AppState {
         tab.canvas = Some(Canvas::new(cols, rows));
         let anchor = self.active.map(|a| self.tabs.get(a).and_then(|t| t.member_of).unwrap_or(a));
         self.tabs.insert_after(anchor, tab);
-        let first = if urls.is_empty() { vec![tabs::NEWTAB_URL.to_string()] } else { urls };
-        for (i, u) in first.iter().enumerate() {
+        for (i, u) in urls.iter().enumerate() {
             self.canvas_add_page(id, i, u);
         }
         self.canvas_retitle(id);
@@ -397,28 +407,25 @@ impl AppState {
         if self.canvas_shown != Some(canvas) {
             self.show_canvas(canvas, None);
         }
-        // Focusing an empty cell gives it a new tab page, so the one address bar
-        // on top drives every cell.
+        if let Some(step) = p.get("step").and_then(Value::as_i64) {
+            let cv = self.canvas_of(canvas).ok_or("no canvas")?;
+            let cell = (cv.focus as i64 + step).rem_euclid(cv.capacity() as i64) as usize;
+            return self.canvas_focus(&json!({ "canvas_id": canvas.0, "cell": cell }));
+        }
         if let Some(c) = self.cell_arg(canvas, p) {
             let empty = self.canvas_of(canvas).is_some_and(|cv| c < cv.cells.len() && cv.cells[c].is_none());
             if empty {
-                self.canvas_add_page(canvas, c, tabs::NEWTAB_URL);
                 if let Some(cv) = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()) {
                     cv.focus = c;
                 }
                 self.canvas_refresh(canvas);
+                return Ok(Some(json!({ "tab_id": null })));
             }
         }
         let cv = self.canvas_of(canvas).ok_or("no canvas")?;
-        let target = if let Some(step) = p.get("step").and_then(Value::as_i64) {
-            let order: Vec<TabId> = cv.members();
-            let cur = cv.focused().and_then(|f| order.iter().position(|m| *m == f)).unwrap_or(0) as i64;
-            order.get((cur + step).rem_euclid(order.len().max(1) as i64) as usize).copied()
-        } else {
-            match self.cell_arg(canvas, p) {
-                Some(c) => cv.cells.get(c).copied().flatten(),
-                None => None,
-            }
+        let target = match self.cell_arg(canvas, p) {
+            Some(c) => cv.cells.get(c).copied().flatten(),
+            None => None,
         };
         let id = target.ok_or("that cell has no page")?;
         self.canvas_focus_tab(id);
@@ -463,22 +470,14 @@ impl AppState {
         Ok(Some(json!({ "cols": cols, "rows": rows, "closed": dropped.len() })))
     }
 
-    /// `canvas.clear {cell | tab_id}` — close one page. The last page is blanked instead,
-    /// so a canvas never has nothing to focus; closing the canvas is `tab.close`.
+    /// Close the top page, revealing its predecessor or leaving the cell empty.
     pub(super) fn canvas_clear(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let canvas = self.canvas_arg(p)?;
         let cell = self.cell_arg(canvas, p).ok_or("canvas.clear: say which cell")?;
         let cv = self.canvas_of(canvas).ok_or("no canvas")?;
         let page = cv.cells.get(cell).copied().flatten().ok_or("that cell is already empty")?;
-        if cv.occupied() == 1 {
-            self.navigate(page, tabs::NEWTAB_URL, false);
-            return Ok(Some(json!({ "blanked": true })));
-        }
         if let Some(cv) = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()) {
-            cv.cells[cell] = None;
-            if cv.focus == cell {
-                cv.focus = cv.cells.iter().position(Option::is_some).unwrap_or(0);
-            }
+            cv.uncover(cell);
         }
         self.canvas_drop_page(page);
         self.canvas_refresh(canvas);
@@ -490,6 +489,13 @@ impl AppState {
         let cell = self.canvas_of(canvas).and_then(|cv| cv.cell_of(page));
         if let Some(cell) = cell {
             let _ = self.canvas_clear(&json!({ "canvas_id": canvas.0, "cell": cell }));
+        } else if let Some(cv) = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()) {
+            for stack in &mut cv.layers {
+                stack.retain(|id| *id != page);
+            }
+            cv.popup_next.remove(&page);
+            self.canvas_drop_page(page);
+            self.canvas_refresh(canvas);
         }
     }
 
@@ -497,17 +503,22 @@ impl AppState {
     pub(super) fn canvas_sanitize(&mut self) {
         let canvases: Vec<TabId> = self.tabs.tabs().iter().filter(|t| t.canvas.is_some()).map(|t| t.id).collect();
         for c in canvases {
-            let valid: Vec<Option<TabId>> = match self.canvas_of(c) {
-                Some(cv) => cv
-                    .cells
-                    .iter()
-                    .map(|cell| cell.filter(|m| self.tabs.get(*m).is_some_and(|t| t.member_of == Some(c))))
-                    .collect(),
-                None => continue,
-            };
+            let Some(cv) = self.canvas_of(c) else { continue };
+            let mut cells = Vec::with_capacity(cv.capacity());
+            let mut layers = Vec::with_capacity(cv.capacity());
+            // Older sessions allocated New Tab pages merely to focus empty cells.
+            for i in 0..cv.capacity() {
+                let mut stack: Vec<TabId> = cv.layers.get(i).into_iter().flatten().copied()
+                    .chain(cv.cells.get(i).copied().flatten())
+                    .filter(|id| self.tabs.get(*id).is_some_and(|t| t.member_of == Some(c) && t.url != tabs::NEWTAB_URL))
+                    .collect();
+                cells.push(stack.pop());
+                layers.push(stack);
+            }
             if let Some(cv) = self.tabs.get_mut(c).and_then(|t| t.canvas.as_mut()) {
-                cv.cells = valid;
-                cv.cells.resize(cv.cols * cv.rows, None);
+                cv.cells = cells;
+                cv.layers = layers;
+                cv.focus = cv.focus.min(cv.capacity().saturating_sub(1));
             }
             self.canvas_retitle(c);
         }
@@ -516,7 +527,7 @@ impl AppState {
             .tabs
             .tabs()
             .iter()
-            .filter(|t| t.member_of.is_some_and(|c| self.canvas_of(c).is_none_or(|cv| cv.cell_of(t.id).is_none())))
+            .filter(|t| t.member_of.is_some_and(|c| self.canvas_of(c).is_none_or(|cv| !cv.contains(t.id))))
             .map(|t| t.id)
             .collect();
         for o in orphans {
@@ -528,7 +539,7 @@ impl AppState {
         self.canvas_shown = self
             .active
             .and_then(|a| self.tabs.get(a))
-            .and_then(|t| t.member_of)
+            .and_then(|t| t.member_of.or_else(|| t.canvas.as_ref().map(|_| t.id)))
             .filter(|c| self.canvas_of(*c).is_some());
     }
 

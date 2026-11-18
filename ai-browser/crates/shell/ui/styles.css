@@ -781,11 +781,20 @@ html[data-tabs="horizontal"] #new-canvas { width: auto; padding: 0 10px 0 8px; g
 html[data-tabs="horizontal"] #new-canvas .rail-new-label { display: inline; font-size: 12px; }
 
 /* ── frameless window: the tab strip is the title bar (Chrome) ───────── */
-.win-drag { flex: 1 1 24px; align-self: stretch; min-width: 24px; -webkit-app-region: drag; }
+.win-drag { flex: 1 0 48px; align-self: stretch; min-width: 48px; display: flex; align-items: center; justify-content: center; cursor: grab; -webkit-app-region: drag; }
+.win-drag::after { content: ''; width: 14px; height: 12px; background: radial-gradient(circle, currentColor 1px, transparent 1.5px) 0 0 / 5px 5px; opacity: .4; pointer-events: none; }
+.win-drag:hover { background: var(--bg-surface-active); }
 .win-ctl { display: flex; align-self: stretch; flex: none; margin-right: calc(-1 * var(--space-2)); }
 .win-ctl button { width: 46px; display: inline-flex; align-items: center; justify-content: center; color: var(--fg-primary); }
 .win-ctl button svg { width: 10px; height: 10px; }
 .win-ctl button:hover { background: var(--bg-surface-active); }
+.win-ctl #win-span svg { width: 18px; height: 12px; }
+.win-span-group { display: flex; }
+.win-span-group[hidden] { display: none; }
+.win-ctl #win-span-menu { width: 20px; }
+.win-ctl button:disabled { opacity: .4; cursor: default; }
+.win-ctl button:disabled:hover { background: transparent; }
+.win-ctl button[aria-pressed="true"] { background: var(--bg-surface-active); color: var(--accent); }
 .win-ctl #win-close:hover { background: #e81123; color: #fff; }
 .win-edge { position: fixed; z-index: 50; }
 .win-edge[data-dir="n"] { top: 0; left: 8px; right: 8px; height: 4px; cursor: ns-resize; }
@@ -794,9 +803,24 @@ html[data-tabs="horizontal"] #new-canvas .rail-new-label { display: inline; font
 .win-edge[data-dir="nw"] { top: 0; left: 0; width: 8px; height: 8px; cursor: nwse-resize; }
 .win-edge[data-dir="ne"] { top: 0; right: 0; width: 8px; height: 8px; cursor: nesw-resize; }
 html[data-tabs="vertical"] .win-ctl { position: fixed; top: 0; right: 0; height: var(--header-h); z-index: 60; margin: 0; background: var(--bg-surface); }
-html[data-tabs="vertical"] .header { padding-right: 140px; }
-html[data-tabs="vertical"] .win-drag { display: none; }
+html[data-tabs="vertical"] .header { padding-right: calc(var(--caption-controls-width, 206px) + 48px); }
+html[data-tabs="vertical"] .win-drag { position: fixed; top: 0; right: var(--caption-controls-width, 206px); width: 48px; height: var(--header-h); z-index: 60; background: var(--bg-surface); }
 html[data-tabs="vertical"] .win-edge { display: none; }
+
+.monitor-picker-backdrop { position: fixed; inset: 0; z-index: 100; background: #0004; }
+.monitor-picker { position: fixed; z-index: 101; top: 44px; right: 12px; width: min(500px, calc(100vw - 24px)); max-height: calc(100vh - 56px); overflow: auto; padding: 18px; box-sizing: border-box; border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--bg-surface); color: var(--fg-primary); box-shadow: 0 8px 32px #0005; }
+.monitor-picker[hidden], .monitor-picker-backdrop[hidden] { display: none; }
+.monitor-picker h2 { margin: 0 0 14px; font-size: 16px; }
+.monitor-layout-label { display: flex; align-items: center; gap: 12px; }
+.monitor-layout-label select { flex: 1; min-width: 0; }
+.monitor-slots { display: grid; gap: 8px; margin: 16px 0 10px; }
+.monitor-slot { display: flex; flex-direction: column; justify-content: center; gap: 10px; min-width: 0; min-height: 100px; padding: 12px; border: 2px solid var(--border-subtle); border-radius: 6px; background: var(--bg-surface-active); }
+.monitor-slot select { width: 100%; min-width: 0; }
+.monitor-slot.is-assigned { border-color: var(--accent); }
+.monitor-picker-hint { font-size: 12px; line-height: 1.5; color: var(--fg-subtle); }
+.monitor-picker-error { min-height: 18px; font-size: 12px; }
+.monitor-picker-actions { display: flex; justify-content: flex-end; gap: 12px; }
+.monitor-picker-actions button { padding: 8px 12px; }
 
 /* Split-view look: rounded panes, a ring only on the active one, draggable dividers. */
 .cv-cell { border-radius: 8px; }
