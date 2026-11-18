@@ -119,9 +119,10 @@ fn browser_context(store: &Store, params: &Value) -> String {
     let page = params.get("page").cloned().unwrap_or(Value::Null);
     let active = match page.get("tab_id").and_then(Value::as_u64) {
         Some(id) => format!(
-            "tab {id}: \"{}\" ({})",
+            "tab {id}: \"{}\" ({}){}",
             one_line(page.get("title").and_then(Value::as_str).unwrap_or(""), 160),
-            one_line(page.get("url").and_then(Value::as_str).unwrap_or(""), 300)
+            one_line(page.get("url").and_then(Value::as_str).unwrap_or(""), 300),
+            canvas_location(&page),
         ),
         None => "none (the user has no readable page open)".to_string(),
     };
@@ -133,10 +134,11 @@ fn browser_context(store: &Store, params: &Value) -> String {
                 .take(40)
                 .map(|t| {
                     format!(
-                        "{} | {} | {}{}",
+                        "{} | {} | {}{}{}",
                         t.get("tab_id").and_then(Value::as_u64).unwrap_or(0),
                         one_line(t.get("title").and_then(Value::as_str).unwrap_or(""), 120),
                         one_line(t.get("url").and_then(Value::as_str).unwrap_or(""), 200),
+                        canvas_location(t),
                         if t.get("active").and_then(Value::as_bool).unwrap_or(false) { " (active)" } else { "" }
                     )
                 })
@@ -157,6 +159,19 @@ fn browser_context(store: &Store, params: &Value) -> String {
         &template,
         &[("active_tab", active), ("tabs", tabs), ("selection", selection), ("page_content", content)],
     )
+}
+
+fn canvas_location(tab: &Value) -> String {
+    if tab["kind"] == "canvas" {
+        return match tab["focused_tab_id"].as_u64() {
+            Some(id) => format!(" [canvas container; focused page: tab {id}]"),
+            None => " [canvas container; no focused page]".into(),
+        };
+    }
+    match (tab["canvas_id"].as_u64(), tab["cell"].as_u64()) {
+        (Some(canvas), Some(cell)) => format!(" [canvas {canvas}, cell {cell}]"),
+        _ => String::new(),
+    }
 }
 
 /// The active page's readable text as the shell captured it. It is data from the web,
@@ -256,7 +271,7 @@ pub fn system_prompt(store: &Store, params: &Value, loaded: &[String]) -> String
 
 const MARKDOWN_INSTRUCTIONS: &str = "\n\n# Formatting\nWrite every reply in Markdown: short paragraphs, lists, tables, **bold**, `code` and fenced code blocks where they help. Write links as [label](https://full-url); the user can click them to open the page in a new tab. Always use the complete http(s) URL.\n";
 
-const CANVAS_INSTRUCTIONS: &str = "\n\n# Canvas\nA canvas tab shows a grid of live pages (default 3 columns × 2 rows). A position written \"(r, c)\" or \"at row r, column c\" is 0-based row then column. When the user asks to open a site at such a position, or in a numbered cell, call `navigate` with `url` and `row`/`col` (or `cell`), in either navigation mode: that explicit request means load it there, whatever the mode. Tabs in the browser context with a `canvas_id` are the cells of a canvas.\n";
+const CANVAS_INSTRUCTIONS: &str = "\n\n# Canvas\nA canvas tab shows a grid of live pages (default 3 columns × 2 rows). The active page is the focused canvas cell, not the canvas container. For \"current cell\" or \"current tab\", call `navigate` without tab_id/cell/row/col to target that active page; do not guess an id from previous turns. A canvas container is not a web page; its focused_tab_id identifies the page targeted by page tools. Tabs with a canvas_id and cell identify the individual cells, and cell indices are 0-based. A position written \"(r, c)\" or \"at row r, column c\" is 0-based row then column. When the user asks to open a site at such a position, or in a numbered cell, call `navigate` with `url` and `row`/`col` (or `cell`), in either navigation mode: that explicit request means load it there, whatever the mode.\n";
 
 /// How the pane wants "open this site" handled: `auto` navigates the page itself,
 /// `manual` only offers a link. Absent means the caller predates the switch.
@@ -605,6 +620,23 @@ mod tests {
         let text = "Long selected text\n\u{1f4d6} ".repeat(1000);
         let out = browser_context(&store, &json!({ "page": { "selection": &text } }));
         assert!(out.contains(&text));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn browser_context_distinguishes_canvas_containers_from_focused_cells() {
+        let dir = std::env::temp_dir().join(format!("ctx-canvas-{}", std::process::id()));
+        let store = Store::new(&dir);
+        let out = browser_context(&store, &json!({
+            "page": { "tab_id": 86, "title": "New tab", "url": "native://newtab", "canvas_id": 84, "cell": 1 },
+            "tabs": [
+                { "tab_id": 84, "kind": "canvas", "title": "Canvas", "url": "native://canvas", "focused_tab_id": 86 },
+                { "tab_id": 86, "kind": "page", "title": "New tab", "url": "native://newtab", "canvas_id": 84, "cell": 1, "active": true },
+            ],
+        }));
+        assert!(out.contains("tab 86: \"New tab\" (native://newtab) [canvas 84, cell 1]"));
+        assert!(out.contains("[canvas container; focused page: tab 86]"));
+        assert!(out.contains("[canvas 84, cell 1] (active)"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -40,10 +40,20 @@ impl Reader {
             *self.pending.borrow_mut() = Some(done);
             return;
         }
+        self.evaluate(include_str!("selection.js"), done);
+    }
+
+    pub fn fit_width(self: &Rc<Self>, done: impl FnOnce(Result<String, String>) + 'static) {
+        Self::new(self.core.clone(), self.cancelled.clone())
+            .evaluate(include_str!("fit_width.js"), Box::new(done));
+    }
+
+    fn evaluate(self: &Rc<Self>, script: &'static str, done: Reply) {
         Read {
             reader: self.clone(),
             done,
             session: None,
+            script,
         }
         .call(
             "Target.getTargetInfo",
@@ -64,10 +74,11 @@ impl Reader {
                                         return;
                                     };
                                     read.session = Some(session.to_string());
+                                    let script = read.script;
                                     read.call(
                                         "Runtime.evaluate",
                                         json!({
-                                            "expression": include_str!("selection.js"),
+                                            "expression": script,
                                             "returnByValue": true,
                                             "awaitPromise": true,
                                         }),
@@ -89,6 +100,7 @@ struct Read {
     reader: Rc<Reader>,
     done: Reply,
     session: Option<String>,
+    script: &'static str,
 }
 
 impl Read {

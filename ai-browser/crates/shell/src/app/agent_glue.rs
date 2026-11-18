@@ -18,7 +18,7 @@ use super::ai_glue::is_readable_url;
 use super::{AppMessage, AppState};
 use crate::ai::answer::failure_message;
 use crate::ai::session::{AgentEval, Pending};
-use crate::tabs::TabId;
+use crate::tabs::{Tab, TabId};
 
 /// How long a freshly woken tab gets before its first read, and between retries.
 const WAKE_MS: u64 = 1_500;
@@ -186,21 +186,32 @@ impl AppState {
         let page = active.and_then(|id| self.tabs.get(id)).map(|t| {
             let selection = self.ai.selections.get(&t.id.0).map(|s| s.text.clone()).filter(|s| !s.trim().is_empty());
             json!({ "tab_id": t.id.0, "title": t.display_title(), "url": t.url, "selection": selection,
+                "canvas_id": t.member_of.map(|c| c.0),
+                "cell": t.member_of.and_then(|c| self.canvas_of(c)).and_then(|c| c.cell_of(t.id)),
                 "document_token": self.ai.identity.current(t.id.0).map(|key| key.document_token().0) })
         });
         let tabs: Vec<Value> = self
             .tabs
             .tabs()
             .iter()
-            .map(|t| json!({ "tab_id": t.id.0, "title": t.display_title(), "url": t.url, "active": Some(t.id) == active,
-                             "canvas_id": t.member_of.map(|c| c.0),
-                             "cell": t.member_of.and_then(|c| self.canvas_of(c)).and_then(|c| c.cell_of(t.id)) }))
+            .map(|t| self.agent_tab_info(t))
             .collect();
         let content = active.and_then(|id| self.ai.page_snaps.get(&id.0)).filter(|s| s.rev > 0).map(|s| {
             json!({ "rev": s.rev, "chars": s.chars, "headings": s.headings, "fields": s.fields,
                     "filled": s.filled, "preview": s.preview, "at": s.at_ms })
         });
         json!({ "page": page, "tabs": tabs, "content": content })
+    }
+
+    fn agent_tab_info(&self, tab: &Tab) -> Value {
+        json!({
+            "tab_id": tab.id.0, "title": tab.display_title(), "url": tab.url,
+            "active": self.active == Some(tab.id), "opened_by_agent": self.ai.ai_tabs.contains(&tab.id.0),
+            "kind": if tab.canvas.is_some() { "canvas" } else { "page" },
+            "canvas_id": tab.member_of.map(|c| c.0),
+            "cell": tab.member_of.and_then(|c| self.canvas_of(c)).and_then(|c| c.cell_of(tab.id)),
+            "focused_tab_id": tab.canvas.as_ref().and_then(|c| c.focused()).map(|id| id.0),
+        })
     }
 
     /// Tell the pane what the model would be given changed (selection, active page).
@@ -418,6 +429,15 @@ impl AppState {
         self.tabs.get(id).map(|_| id).ok_or_else(|| format!("tab {} does not exist", id.0))
     }
 
+    fn agent_page_tab(&self, args: &Value) -> Result<TabId, String> {
+        let id = self.agent_tab(args)?;
+        let tab = self.tabs.get(id).ok_or_else(|| format!("tab {} does not exist", id.0))?;
+        let Some(canvas) = tab.canvas.as_ref() else { return Ok(id) };
+        canvas.focused()
+            .filter(|child| self.tabs.get(*child).is_some_and(|tab| tab.member_of == Some(id)))
+            .ok_or_else(|| format!("canvas {} has no focused page; choose a cell with the canvas tool", id.0))
+    }
+
     /// Give a background tab a hidden webview so it can load and be read.
     pub(super) fn agent_wake(&mut self, tab: TabId) {
         if self.live.contains_key(&tab) {
@@ -548,10 +568,7 @@ impl AppState {
                     .tabs
                     .tabs()
                     .iter()
-                    .map(|t| {
-                        json!({ "tab_id": t.id.0, "title": t.display_title(), "url": t.url,
-                                "active": self.active == Some(t.id), "opened_by_agent": self.ai.ai_tabs.contains(&t.id.0) })
-                    })
+                    .map(|t| self.agent_tab_info(t))
                     .collect();
                 self.agent_reply_ok(id, json!({ "tabs": rows }));
             }
@@ -603,7 +620,7 @@ impl AppState {
                     Ok(u) => u,
                     Err(e) => return self.agent_reply_err(id, e),
                 };
-                match self.agent_tab(&args) {
+                match self.agent_page_tab(&args) {
                     Ok(tab) => {
                         self.agent_wake(tab);
                         self.navigate(tab, &url, false);
@@ -632,7 +649,7 @@ impl AppState {
                 Err(e) => self.agent_reply_err(id, e),
             },
             "read_page" | "click" | "fill" => {
-                let tab = match self.agent_tab(&args) {
+                let tab = match self.agent_page_tab(&args) {
                     Ok(t) => t,
                     Err(e) => return self.agent_reply_err(id, e),
                 };

@@ -61,6 +61,21 @@ const server = http.createServer((req, res) => {
     res.end(`<pre id="long-selection">${'Selected browser text preserves spaces and line breaks.\n'.repeat(150)}END OF WEB SELECTION</pre>`);
     return;
   }
+  if (req.url === '/wide-html') {
+    res.setHeader('content-type', 'text/html');
+    res.end('<!doctype html><body style="margin:0"><main style="width:1200px;height:1200px"><h1>Wide page for fit-to-width</h1></main></body>');
+    return;
+  }
+  if (req.url === '/reflow-fit') {
+    res.setHeader('content-type', 'text/html');
+    res.end('<!doctype html><style>body{margin:0}main{width:1200px;height:4000px}@media(min-width:1000px){main{width:1800px}}</style><main><h1>Page widens after zoom changes its layout</h1></main>');
+    return;
+  }
+  if (req.url.startsWith('/scope-fit')) {
+    res.setHeader('content-type', 'text/html');
+    res.end(`<!doctype html><body style="margin:0"><main style="width:${req.url === '/scope-fit?wide' ? 3600 : 900}px;height:4000px"><h1>Fit the current page area</h1></main></body>`);
+    return;
+  }
   if (req.url === '/authenticated.pdf') {
     authenticatedCookie = req.headers.cookie || '';
     if (!authenticatedCookie.includes('pdf_session=allowed')) {
@@ -81,7 +96,7 @@ const server = http.createServer((req, res) => {
       req.url === '/right.pdf' ? 'RIGHT-NATIVE-PDF separate canvas document' :
       'Quarterly revenue grew twelve percent';
     res.end(makePdf(text, { image: req.url === '/image.pdf',
-      fontSize: req.url === '/long.pdf' ? 1 : 24, pageWidth: req.url === '/long.pdf' ? 3600 : 612 }));
+      fontSize: req.url === '/long.pdf' ? 1 : 24, pageWidth: ['/long.pdf', '/wide.pdf'].includes(req.url) ? 3600 : 612 }));
   } else {
     res.setHeader('content-type', 'text/html');
     res.end(`<h1>Page before a drop</h1><a id="l" href="http://127.0.0.1:${server.address().port}/doc.pdf">pdf</a>
@@ -402,6 +417,193 @@ failed = await run([
     await app.shell.waitForFunction(() => window.__pdfFindResults.at(-1)?.active === 3);
     assert.equal((await app.invoke('agent.context')).page.selection, null, 'find matches do not become River selections');
     await app.invoke('find.stop');
+  }],
+  ['fit to page width uses native PDF fitting in only the focused canvas cell', async () => {
+    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [base + '/left.pdf', base + '/wide.pdf'] });
+    const canvas = await app.invoke('canvas.state');
+    try {
+      await app.invoke('canvas.focus', { cell: 1 });
+      await waitPdf('Quarterly revenue');
+      const left = await app.pageWith(/\/left\.pdf$/);
+      const right = await app.pageWith(/\/wide\.pdf$/);
+      await app.invoke('tab.zoom_set', { tab_id: canvas.cells[0].tab_id, factor: 1.4 });
+      await app.invoke('tab.zoom_set', { tab_id: canvas.cells[1].tab_id, factor: 1.7 });
+      await app.shell.locator('#zoom-fit').click();
+      let fit;
+      for (let attempt = 0; attempt < 50; attempt++) {
+        fit = JSON.parse(await nativePdfEvaluate(right,
+          'JSON.stringify({type:viewer.viewport_.fittingType,zoom:viewer.viewport_.getZoom(),width:viewer.viewport_.getZoomedDocumentDimensions_(viewer.viewport_.getZoom()).width,available:innerWidth})'));
+        if (fit.type === 1) break;
+        await sleep(100);
+      }
+      assert.equal(fit.type, 1, 'the native PDF viewer is in fit-to-width mode');
+      assert.ok(fit.width <= fit.available && fit.width > fit.available * 0.8, JSON.stringify(fit));
+      assert.ok(fit.zoom < 0.25, 'native PDF fitting is not limited to 25%');
+      const other = JSON.parse(await nativePdfEvaluate(left, 'JSON.stringify(viewer.viewport_.getZoom())'));
+      assert.ok(Math.abs(other - 1.4) < 0.01, 'the other PDF cell keeps its zoom');
+      await app.shell.waitForFunction(expected => document.querySelector('#zoom-label').textContent === expected,
+        `${Math.round(fit.zoom * 100)}%`);
+      assert.equal((await app.invoke('agent.context')).page.tab_id, canvas.cells[1].tab_id);
+    } finally {
+      await app.invoke('tab.close', { tab_id: canvas.id });
+    }
+  }],
+  ['fit to page width fits wide webpages from either zoom direction and resets responsive pages', async () => {
+    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [base + '/before-fit', base + '/wide-html'] });
+    const canvas = await app.invoke('canvas.state');
+    try {
+      await app.invoke('canvas.focus', { cell: 1 });
+      const page = await app.pageWith(/\/wide-html$/);
+      await page.locator('main').waitFor();
+      await app.invoke('tab.zoom_reset');
+      const baseline = await page.evaluate(() => ({
+        available: document.documentElement.clientWidth, width: document.documentElement.scrollWidth,
+        dpr: devicePixelRatio,
+      }));
+      const expected = baseline.available / baseline.width;
+      assert.ok(expected < 1 && expected > 0.25);
+      for (const factor of [2, 0.25]) {
+        await app.invoke('tab.zoom_set', { factor });
+        await app.shell.locator('#zoom-fit').click();
+        await page.waitForFunction(dpr => Math.abs(devicePixelRatio / dpr - 1) < 0.01,
+          baseline.dpr * expected);
+        const fitted = await page.evaluate(() => ({
+          available: document.documentElement.clientWidth, width: document.documentElement.scrollWidth,
+        }));
+        assert.ok(fitted.width <= fitted.available, JSON.stringify(fitted));
+        await app.shell.waitForFunction(percent => Math.abs(parseInt(document.querySelector('#zoom-label').textContent) - percent) <= 1,
+          expected * 100);
+      }
+      await page.evaluate(() => {
+        window.__fitFrames = [];
+        window.__fitRaf = window.requestAnimationFrame;
+        window.requestAnimationFrame = callback => window.__fitFrames.push(callback);
+      });
+      try {
+        await app.shell.locator('#zoom-fit').click();
+        await page.waitForFunction(() => window.__fitFrames.length > 0);
+        await app.invoke('tab.zoom_set', { factor: 1.3 });
+        await page.evaluate(() => {
+          while (window.__fitFrames.length) window.__fitFrames.shift()(performance.now());
+        });
+        await sleep(200);
+        const ratio = await page.evaluate(() => devicePixelRatio);
+        assert.ok(Math.abs(ratio / baseline.dpr - 1.3) < 0.01, 'a pending fit cannot overwrite a newer manual zoom');
+      } finally {
+        await page.evaluate(() => {
+          window.requestAnimationFrame = window.__fitRaf;
+          delete window.__fitRaf;
+          delete window.__fitFrames;
+        });
+      }
+      const context = await app.invoke('agent.context');
+      assert.equal(context.page.tab_id, canvas.cells[1].tab_id);
+      assert.equal(context.tabs.find(tab => tab.tab_id === canvas.cells[0].tab_id).url, base + '/before-fit');
+      await app.invoke('nav.open', { url: base + '/responsive-fit', disposition: 'current' });
+      const responsive = await app.pageWith(/\/responsive-fit$/);
+      await responsive.locator('h1').waitFor();
+      await app.shell.locator('#zoom-fit').click();
+      await responsive.waitForFunction(dpr => Math.abs(devicePixelRatio - dpr) < 0.01, baseline.dpr);
+      await app.shell.waitForFunction(() => document.querySelector('#zoom-label').textContent === '100%');
+    } finally {
+      await app.invoke('tab.close', { tab_id: canvas.id });
+    }
+  }],
+  ['fit to width removes horizontal scrolling after the page changes layout', async () => {
+    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [base + '/before-fit', base + '/reflow-fit'] });
+    const canvas = await app.invoke('canvas.state');
+    try {
+      await app.invoke('canvas.focus', { cell: 1 });
+      const page = await app.pageWith(/\/reflow-fit$/);
+      await page.locator('main').waitFor();
+      const before = await page.evaluate(() => ({
+        viewport: document.documentElement.clientWidth, content: document.documentElement.scrollWidth,
+      }));
+      assert.ok(before.viewport < 1000 && before.content === 1200, JSON.stringify(before));
+      await app.shell.locator('#zoom-fit').click();
+      await page.waitForFunction(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
+      const fitted = await page.evaluate(() => ({
+        viewport: document.documentElement.clientWidth, content: document.documentElement.scrollWidth,
+        overflow: getComputedStyle(document.documentElement).overflowX,
+        elementWidth: document.querySelector('main').getBoundingClientRect().width,
+        verticalScrolling: document.documentElement.scrollHeight > document.documentElement.clientHeight,
+      }));
+      assert.ok(Math.abs(fitted.elementWidth - 1800) < 1, 'fitting accounts for the new responsive layout');
+      assert.ok(fitted.content <= fitted.viewport, JSON.stringify(fitted));
+      assert.ok(!['hidden', 'clip'].includes(fitted.overflow), 'content is fitted, not hidden');
+      assert.equal(fitted.verticalScrolling, true, 'vertical scrolling remains available');
+    } finally {
+      await app.invoke('tab.close', { tab_id: canvas.id });
+    }
+  }],
+  ['fit to width uses the actual page area in standalone, 2x2, sidebar and resized-cell layouts', async () => {
+    await app.invoke('nav.open', { url: base + '/scope-fit?standalone', disposition: 'new_tab' });
+    const standaloneId = (await app.invoke('agent.context')).page.tab_id;
+    const standalone = await app.pageWith(/\/scope-fit\?standalone$/);
+    await standalone.locator('main').waitFor();
+    await app.shell.locator('#zoom-fit').click();
+    await standalone.waitForFunction(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
+    await app.invoke('canvas.create', { cols: 2, rows: 2, urls: [0, 1, 2, 3].map(cell => `${base}/scope-fit?cell=${cell}`) });
+    const canvas = await app.invoke('canvas.state');
+    let riverOpen = false;
+    try {
+      await app.invoke('canvas.focus', { cell: 2 });
+      const page = await app.pageWith(/\/scope-fit\?cell=2$/);
+      await page.locator('main').waitFor();
+      const dpr = await page.evaluate(() => devicePixelRatio);
+      const fitCurrentArea = async () => {
+        await app.invoke('tab.zoom_reset');
+        await page.waitForFunction(expected => Math.abs(devicePixelRatio - expected) < 0.001, dpr);
+        const expected = await page.evaluate(() =>
+          Math.min(1, (document.documentElement.clientWidth - 1) / document.documentElement.scrollWidth));
+        await app.shell.locator('#zoom-fit').click();
+        await page.waitForFunction(({ dpr, expected }) =>
+          Math.abs(devicePixelRatio / dpr - expected) < 0.01 &&
+          document.documentElement.scrollWidth <= document.documentElement.clientWidth, { dpr, expected });
+        return expected;
+      };
+      const gridZoom = await fitCurrentArea();
+      await app.invoke('shortcut', { name: 'ask_ai' });
+      riverOpen = true;
+      await (await app.pageWith(/sidebar\.html/)).locator('#ag-input').waitFor();
+      const withRiver = await fitCurrentArea();
+      assert.ok(withRiver < gridZoom, 'River reduces the width available to the cell');
+      const layout = await app.invoke('canvas.state');
+      const divider = layout.dividers.find(divider => divider.vertical && divider.row === 1);
+      await app.invoke('canvas.resize', { vertical: true, row: 1, index: 0, pos: divider.rect.x - 50 });
+      const resized = await fitCurrentArea();
+      assert.ok(resized < withRiver, 'a narrower cell gets a smaller fitted zoom');
+      await app.invoke('canvas.zoom', { zoomed: true });
+      const expanded = await fitCurrentArea();
+      assert.ok(expanded > resized, 'expanding the cell uses its larger page area');
+      await app.invoke('canvas.zoom', { zoomed: false });
+      await app.invoke('nav.open', { url: base + '/scope-fit?wide', disposition: 'current' });
+      await page.waitForURL(/\/scope-fit\?wide$/);
+      const requested = await app.invoke('tab.zoom_set', { factor: 0.1 });
+      assert.equal(requested.factor, 0.1, 'the app does not clamp the requested zoom to 25%');
+      await page.waitForFunction(baseline => devicePixelRatio < baseline * 0.5, dpr);
+      let actual = await page.evaluate(baseline => devicePixelRatio / baseline, dpr);
+      await app.shell.waitForFunction(expected => document.querySelector('#zoom-label').textContent === expected,
+        `${Math.round(actual * 100)}%`);
+      await app.shell.locator('#zoom-fit').click();
+      let fits = false, limited = false;
+      for (let attempt = 0; attempt < 50; attempt++) {
+        fits = await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
+        limited = await app.shell.locator('#toast').isVisible() &&
+          (await app.shell.locator('#toast').textContent()).includes('native browser');
+        if (fits || limited) break;
+        await sleep(100);
+      }
+      assert.ok(fits || limited, 'fitting finishes or explicitly reports the native zoom limit');
+      actual = await page.evaluate(baseline => devicePixelRatio / baseline, dpr);
+      await app.shell.waitForFunction(expected => document.querySelector('#zoom-label').textContent === expected,
+        `${Math.round(actual * 100)}%`);
+      assert.equal((await app.invoke('agent.context')).page.tab_id, canvas.cells[2].tab_id);
+    } finally {
+      if (riverOpen) await app.invoke('shortcut', { name: 'ask_ai' });
+      await app.invoke('tab.close', { tab_id: canvas.id });
+      await app.invoke('tab.close', { tab_id: standaloneId });
+    }
   }],
   ['browser zoom changes native PDF text geometry without raster canvases', async () => {
     await app.invoke('nav.open', { url: `${base}/doc.pdf` });

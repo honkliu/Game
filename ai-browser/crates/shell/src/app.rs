@@ -136,6 +136,7 @@ pub struct AppState {
     tabs: TabSet,
     groups: Vec<Group>,
     active: Option<TabId>,
+    zoom_request: u64,
     live: HashMap<TabId, LiveTab>,
     /// The canvas tab on screen, if any. While it is set, `active` is that canvas's
     /// focused cell (see `app::canvas`).
@@ -233,6 +234,8 @@ pub enum AppMessage {
     NativePdfSelection(TabId, u64, crate::native_pdf::SelectionUpdate),
     #[cfg(windows)]
     NativePdfSelectionReady(TabId, u64, u64, Result<String, String>, Option<[f64; 4]>),
+    #[cfg(windows)]
+    NativePdfFitWidthDone(TabId, u64, Result<String, String>),
     #[cfg(windows)]
     RuntimeZoom(TabId, f64),
     #[cfg(windows)]
@@ -570,13 +573,14 @@ impl AppState {
     /// fills the next empty cell (the canvas stays whole); otherwise it is a tab.
     /// Steps (or resets) one tab's page zoom; the chrome scales with it (§8, clamped 0.8–2.0).
     pub(super) fn zoom_tab(&mut self, id: TabId, name: &str) {
+        self.zoom_request = self.zoom_request.wrapping_add(1);
         let cur = self.tabs.get(id).map(|t| t.zoom).unwrap_or(1.0);
         let factor = match name {
             "zoom_in" => cur * 1.1,
             "zoom_out" => cur / 1.1,
             _ => 1.0,
-        }
-        .clamp(0.25, 5.0);
+        };
+        if !factor.is_finite() || factor <= 0.0 { return; }
             self.apply_zoom(id, factor);
             if let Some(t) = self.tabs.get_mut(id) {
                 t.zoom = factor;
@@ -584,6 +588,79 @@ impl AppState {
             self.emit("tab.zoom_changed", json!({ "tab_id": id.0, "factor": factor }));
             self.emit("shell.ui_scale", json!({ "scale": factor.clamp(0.8, 2.0) }));
         }
+
+    fn fit_page_width(&mut self, id: TabId) -> Result<(), String> {
+        self.zoom_request = self.zoom_request.wrapping_add(1);
+        #[cfg(windows)]
+        if let Some(pdf) = self.live.get(&id).and_then(|live| live.native_pdf.as_ref()) {
+            let generation = pdf.id;
+            let proxy = self.proxy();
+            pdf.fit_width(move |result| {
+                let _ = proxy.send_event(AppMessage::NativePdfFitWidthDone(id, generation, result));
+            });
+            return Ok(());
+        }
+        if self.is_viewer_tab(id) {
+            self.zoom_tab(id, "zoom_reset");
+            return Ok(());
+        }
+        if !self.live.contains_key(&id) {
+            return Err("The page is not loaded.".into());
+        }
+        self.zoom_tab(id, "zoom_reset");
+        self.measure_fit_width(id, 1.0, 0)
+    }
+
+    fn measure_fit_width(&self, id: TabId, zoom: f64, previous_width: u64) -> Result<(), String> {
+        let document = self.ai.identity.current(id.0).map(|key| key.document_token().0);
+        let script = format!("({})({},{},{},{})", include_str!("../ui/fit_width.js"),
+            self.zoom_request, json!(document), zoom, previous_width);
+        self.live.get(&id).ok_or("The page is not loaded.")?
+            .webview.evaluate_script(&script).map_err(|error| error.to_string())
+    }
+
+    fn fit_width_probe(&mut self, id: TabId, raw: &str) -> bool {
+        let Ok(value) = serde_json::from_str::<Value>(raw) else { return false };
+        if value["page"] != "fit_width" { return false; }
+        let document = self.ai.identity.current(id.0).map(|key| key.document_token().0);
+        if self.active != Some(id)
+            || value["request"].as_u64() != Some(self.zoom_request)
+            || value["document_token"].as_u64() != document {
+            return true;
+        }
+        if value["limited"] == true {
+            self.emit("shell.toast", json!({ "text": "The page is at the native browser's zoom limit." }));
+            return true;
+        }
+        if let Some(factor) = value["factor"].as_f64().filter(|factor| factor.is_finite() && *factor > 0.0) {
+            let Some(width) = value["width"].as_u64() else { return true };
+            if self.tabs.get(id).is_none_or(|tab| factor >= tab.zoom) { return true; }
+            let Some(live) = self.live.get(&id) else { return true };
+            if let Err(error) = live.webview.zoom(factor) {
+                self.note(format!("Fit to page width: {error}"));
+                return true;
+            }
+            #[cfg(windows)]
+            let factor = match crate::webview2::zoom_factor(&live.webview) {
+                Ok(applied) => applied,
+                Err(error) => {
+                    self.note(format!("Fit to page width: {error}"));
+                    return true;
+                }
+            };
+            if self.tabs.get(id).is_none_or(|tab| factor >= tab.zoom) {
+                self.emit("shell.toast", json!({ "text": "The page is at the native browser's zoom limit." }));
+                return true;
+            }
+            if let Some(tab) = self.tabs.get_mut(id) { tab.zoom = factor; }
+            self.emit("tab.zoom_changed", json!({ "tab_id": id.0, "factor": factor }));
+            self.mark_dirty();
+            if let Err(error) = self.measure_fit_width(id, factor, width) {
+                self.note(format!("Fit to page width: {error}"));
+            }
+        }
+        true
+    }
 
         /// The PDF viewer fits its pages to the window width, so the runtime's zoom would
         /// be undone by the re-fit; its pages are scaled by the viewer itself instead.
@@ -817,6 +894,10 @@ impl AppState {
     fn navigate(&mut self, tab: TabId, url: &str, typed: bool) {
         let resolved = self.resolve_url(url);
         let Some(t) = self.tabs.get_mut(tab) else { return };
+        if t.canvas.is_some() {
+            self.note(format!("navigate: tab {} is a canvas container, not a page", tab.0));
+            return;
+        }
         t.url = url.to_string();
         t.loading = true;
         let Some(live) = self.live.get(&tab) else { return };
@@ -1230,13 +1311,15 @@ impl AppState {
                 Ok(None)
             }
             "tab.zoom_set" | "tab.zoom_reset" => {
+                self.zoom_request = self.zoom_request.wrapping_add(1);
                 let Some(id) = id_arg() else { return Ok(None) };
                 let factor = if req.cmd == "tab.zoom_reset" {
                     1.0
                 } else {
-                    p.get("factor").and_then(Value::as_f64).unwrap_or(1.0)
-                }
-                .clamp(0.25, 5.0);
+                    p.get("factor").and_then(Value::as_f64)
+                        .filter(|factor| factor.is_finite() && *factor > 0.0)
+                        .ok_or("Zoom must be a positive finite number.")?
+                };
                 if self.live.contains_key(&id) {
                     self.apply_zoom(id, factor);
                 }
@@ -1827,6 +1910,13 @@ impl AppState {
                 let Some(id) = self.active else { return };
                 self.zoom_tab(id, name);
             }
+            "zoom_fit" => {
+                if let Some(id) = self.active {
+                    if let Err(error) = self.fit_page_width(id) {
+                        self.note(format!("Fit to page width: {error}"));
+                    }
+                }
+            }
             "open_settings" => {
                 self.open_settings();
             }
@@ -2148,6 +2238,10 @@ impl AppState {
             return;
         }
         let Some(tab) = self.tabs.get(id).cloned() else { return };
+        if tab.canvas.is_some() {
+            self.note(format!("build_webview: tab {} is a canvas container, not a page", id.0));
+            return;
+        }
         let Some(window) = self.window.as_ref() else {
             self.note("build_webview: no window");
             return;
@@ -2452,6 +2546,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
         tabs: TabSet::new(),
         groups: Vec::new(),
         active: None,
+        zoom_request: 0,
         canvas_shown: None,
         live: HashMap::new(),
         downloads: Vec::new(),
@@ -2790,15 +2885,23 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
                 }
             }
             #[cfg(windows)]
+            Event::UserEvent(AppMessage::NativePdfFitWidthDone(tab, generation, result)) => {
+                let mut s = shared.borrow_mut();
+                if s.live.get(&tab).and_then(|live| live.native_pdf.as_ref()).is_some_and(|pdf| pdf.id == generation) {
+                    match result {
+                        Ok(_) => s.sync_native_pdf_zoom(tab),
+                        Err(error) => s.note(format!("Native PDF fit to page width: {error}")),
+                    }
+                }
+            }
+            #[cfg(windows)]
             Event::UserEvent(AppMessage::RuntimeZoom(id, factor)) => {
                 let mut s = shared.borrow_mut();
-                if s.has_native_pdf(id) {
-                    let clamped = factor.clamp(0.25, 5.0);
-                    if clamped != factor { s.apply_zoom(id, clamped); }
-                    let factor = clamped;
-                    s.canvas_focus_tab(id);
+                if s.live.contains_key(&id) && factor.is_finite() && factor > 0.0 {
+                    if s.has_native_pdf(id) { s.canvas_focus_tab(id); }
                     if let Some(tab) = s.tabs.get_mut(id) { tab.zoom = factor; }
                     s.emit("tab.zoom_changed", json!({ "tab_id": id.0, "factor": factor }));
+                    s.mark_dirty();
                 }
             }
             #[cfg(windows)]
@@ -2855,7 +2958,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             }
             Event::UserEvent(AppMessage::PageProbe(tab, raw)) => {
                 let mut s = shared.borrow_mut();
-                if !s.lifecycle_probe(tab, &raw) && !s.find_probe(tab, &raw) && !s.settings_probe(tab, &raw) {
+                if !s.fit_width_probe(tab, &raw) && !s.lifecycle_probe(tab, &raw) && !s.find_probe(tab, &raw) && !s.settings_probe(tab, &raw) {
                     s.ai_on_probe(tab, &raw);
                 }
             }

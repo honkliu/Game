@@ -83,7 +83,8 @@ function layout() {
   generation++;
   cancelRendering();
   const first = slots[0].base;
-  fit = Math.max(0.2, (document.documentElement.clientWidth - MARGIN) / first.width);
+  fit = (document.documentElement.clientWidth - MARGIN) / first.width;
+  if (fit <= 0) return;
   const scale = fit * zoom;
   for (const slot of slots) {
     const b = slot.base || first;
@@ -256,7 +257,9 @@ window.__pdfFind = async (query, matchCase, wholeWord, _highlightAll, index) => 
 };
 
 window.__pdfZoom = (factor) => {
-  zoom = Math.min(5, Math.max(0.25, Number(factor) || 1));
+  const next = Number(factor);
+  if (!Number.isFinite(next) || next <= 0) return;
+  zoom = next;
   const y = window.scrollY / Math.max(1, document.documentElement.scrollHeight);
   layout();
   requestAnimationFrame(() => window.scrollTo(window.scrollX, y * document.documentElement.scrollHeight));

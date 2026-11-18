@@ -165,6 +165,99 @@ const cases = [
     await app.invoke('tab.close', { tab_id: (await app.invoke('canvas.state')).id });
   }],
 
+  ['canvas container page tools navigate and read its focused visible cell', async () => {
+    await app.invoke('canvas.create', { cols: 2, rows: 2, urls: [0, 1, 2, 3].map(cell => `${base}/?canvas-cell=${cell}`) });
+    const canvas = await app.invoke('canvas.state');
+    try {
+      await app.invoke('canvas.focus', { cell: 2 });
+      calls.length = 0;
+      const target = `${base}/other?canvas-focused=2`;
+      script = messages => {
+        const tools = toolMsg(messages);
+        if (tools.length === 0) return { tools: [{ name: 'list_tabs' }] };
+        if (tools.length === 1) return { tools: [{ name: 'navigate', args: { tab_id: canvas.id, url: target } }] };
+        if (tools.length === 2) return { tools: [{ name: 'read_page', args: { tab_id: canvas.id } }] };
+        return { text: 'navigation checked' };
+      };
+      await ask('in the current cell, open the other page');
+      const results = toolMsg(calls.at(-1).messages).map(message => JSON.parse(message.content));
+      const listed = results[0].tabs;
+      assert.equal(listed.find(tab => tab.tab_id === canvas.id).kind, 'canvas');
+      assert.equal(listed.find(tab => tab.tab_id === canvas.id).focused_tab_id, canvas.cells[2].tab_id);
+      assert.equal(listed.find(tab => tab.tab_id === canvas.cells[2].tab_id).cell, 2);
+      assert.equal(results[1].tab_id, canvas.cells[2].tab_id, 'navigation returns the actual focused page, not the container');
+      assert.equal(results[2].url, target, 'read_page of a canvas reads its focused cell');
+      const visible = await app.pageWith(/\/other\?canvas-focused=2$/);
+      assert.equal(await visible.evaluate(() => document.visibilityState), 'visible');
+      const after = await app.invoke('canvas.state');
+      assert.equal(after.id, canvas.id);
+      assert.equal(after.focus, 2);
+      for (let cell = 0; cell < 4; cell++) {
+        assert.equal(after.cells[cell].url, cell === 2 ? target : `${base}/?canvas-cell=${cell}`);
+      }
+      const context = await app.invoke('agent.context');
+      assert.equal(context.tabs.find(tab => tab.tab_id === canvas.id).url, 'native://canvas');
+      assert.match(calls[0].messages[0].content, new RegExp(`canvas ${canvas.id}, cell 2`));
+    } finally {
+      await app.invoke('tab.close', { tab_id: canvas.id });
+    }
+  }],
+
+  ['default agent navigation stays in the current cell with another canvas open', async () => {
+    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [`${base}/?background=0`, `${base}/?background=1`] });
+    const background = await app.invoke('canvas.state');
+    await app.invoke('canvas.create', { cols: 2, rows: 2, urls: [0, 1, 2, 3].map(cell => `${base}/?current=${cell}`) });
+    const current = await app.invoke('canvas.state');
+    try {
+      await app.invoke('canvas.focus', { cell: 3 });
+      calls.length = 0;
+      const target = `${base}/other?current-cell=3`;
+      script = messages => toolMsg(messages).length === 0
+        ? { tools: [{ name: 'navigate', args: { url: target } }] }
+        : { text: 'opened in the current cell' };
+      await ask('google in the current cell');
+      const result = JSON.parse(toolMsg(calls.at(-1).messages)[0].content);
+      assert.equal(result.tab_id, current.cells[3].tab_id);
+      await app.pageWith(/\/other\?current-cell=3$/);
+      const context = await app.invoke('agent.context');
+      assert.equal(context.page.tab_id, current.cells[3].tab_id);
+      for (let cell = 0; cell < 3; cell++) {
+        assert.equal(context.tabs.find(tab => tab.tab_id === current.cells[cell].tab_id).url, `${base}/?current=${cell}`);
+      }
+      for (let cell = 0; cell < 2; cell++) {
+        assert.equal(context.tabs.find(tab => tab.tab_id === background.cells[cell].tab_id).url, `${base}/?background=${cell}`);
+      }
+    } finally {
+      await app.invoke('tab.close', { tab_id: current.id });
+      await app.invoke('tab.close', { tab_id: background.id });
+    }
+  }],
+
+  ['canvas navigation replaces the focused new-tab cell without creating a hidden page', async () => {
+    await app.invoke('canvas.create', { cols: 2, rows: 1 });
+    const canvas = await app.invoke('canvas.state');
+    try {
+      await app.invoke('canvas.clear', { cell: 0 });
+      calls.length = 0;
+      const target = `${base}/other?blank-canvas=1`;
+      script = messages => toolMsg(messages).length === 0
+        ? { tools: [{ name: 'navigate', args: { tab_id: canvas.id, url: target } }] }
+        : { text: 'opened in the blank cell' };
+      await ask('open the other page in the current blank cell');
+      const result = JSON.parse(toolMsg(calls.at(-1).messages)[0].content);
+      assert.equal(result.tab_id, canvas.cells[0].tab_id);
+      const page = await app.pageWith(/\/other\?blank-canvas=1$/);
+      assert.equal(await page.evaluate(() => document.visibilityState), 'visible');
+      const after = await app.invoke('canvas.state');
+      assert.equal(after.cells[0].url, target);
+      assert.equal(after.cells[1].tab_id, null);
+      const context = await app.invoke('agent.context');
+      assert.equal(context.tabs.find(tab => tab.tab_id === canvas.id).url, 'native://canvas');
+    } finally {
+      await app.invoke('tab.close', { tab_id: canvas.id });
+    }
+  }],
+
   ['manual mode: the pane shows a link, the page does not move until it is clicked', async () => {
     await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
     await app.pageWith(/127\.0\.0\.1:\d+\/$/);

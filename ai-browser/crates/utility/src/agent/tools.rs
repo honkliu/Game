@@ -113,9 +113,9 @@ pub fn envelope(stash: &Mutex<Stash>, value: Value) -> String {
 pub fn builtins() -> Vec<ToolDef> {
     let b = Kind::Browser;
     let l = Kind::Local;
-    let tab = json!({ "type": "integer", "description": "Tab id from the browser context or list_tabs. Defaults to the active tab." });
+    let tab = json!({ "type": "integer", "description": "Tab id from the browser context or list_tabs. Defaults to the active page, which is the focused cell when a canvas is shown. For page operations, a canvas container id targets its focused cell." });
     let mut tools = vec![
-        def("list_tabs", "List the open browser tabs (id, title, url, active).", json!({}), &[], b.clone(), false),
+        def("list_tabs", "List open tabs and canvas cells (id, title, url, active, kind, canvas_id, cell, focused_tab_id). Canvas containers are not web pages.", json!({}), &[], b.clone(), false),
         def(
             "read_page",
             "Read a tab: its title, URL, visible text, links and form fields/buttons (each with a CSS selector usable by click and fill). Read a page before answering questions about it.",
@@ -151,7 +151,7 @@ pub fn builtins() -> Vec<ToolDef> {
         ),
         def(
             "navigate",
-            "Load a URL in an existing tab (the active tab by default). Replaces what that tab shows. When a canvas is on screen, pass `row` and `col` (or `cell`) to load it into that cell of the canvas.",
+            "Load a URL in an existing page (the active page by default). In a canvas, omitting the target navigates the focused cell; a canvas container tab_id also targets its focused cell. Pass `row` and `col` (or `cell`) to target another cell.",
             json!({ "url": { "type": "string" }, "tab_id": tab, "row": { "type": "integer" }, "col": { "type": "integer" }, "cell": { "type": "integer" } }),
             &["url"],
             b.clone(),

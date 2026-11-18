@@ -159,7 +159,7 @@ impl Session {
                     t.group_id = None;
                 }
             }
-            if !t.zoom.is_finite() || !(0.25..=5.0).contains(&t.zoom) {
+            if !t.zoom.is_finite() || t.zoom <= 0.0 {
                 t.zoom = 1.0;
             }
             if !t.scroll_y.is_finite() || t.scroll_y < 0.0 {
@@ -392,6 +392,21 @@ mod tests {
         assert_eq!(s.active_tab_id, Some(1));
         assert_eq!(s.tabs[1].group_id, None);
         assert_eq!(s.tabs[0].zoom, 1.0);
+    }
+
+    #[test]
+    fn restores_zoom_outside_previous_app_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let mut s = sample();
+        s.tabs[0].zoom = 0.1;
+        s.tabs[1].zoom = 8.0;
+        save(&path, &s).unwrap();
+        let (loaded, warn) = load(&path);
+        assert!(warn.is_none());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.tabs[0].zoom, 0.1);
+        assert_eq!(loaded.tabs[1].zoom, 8.0);
     }
 
     #[test]

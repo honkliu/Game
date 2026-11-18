@@ -832,7 +832,7 @@
   for (const edge of document.querySelectorAll('.win-edge')) {
     edge.addEventListener('mousedown', (e) => { if (e.button === 0) invoke('window.resize', { dir: edge.dataset.dir }); });
   }
-  for (const [id, name] of [['zoom-in', 'zoom_in'], ['zoom-out', 'zoom_out'], ['zoom-label', 'zoom_reset']]) {
+  for (const [id, name] of [['zoom-in', 'zoom_in'], ['zoom-out', 'zoom_out'], ['zoom-label', 'zoom_reset'], ['zoom-fit', 'zoom_fit']]) {
     $('#' + id).addEventListener('click', () => invoke('shortcut', { name }));
   }
 

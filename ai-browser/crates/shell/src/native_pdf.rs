@@ -109,6 +109,10 @@ impl Session {
             .read(move |result| done(request, result));
     }
 
+    pub fn fit_width(&self, done: impl FnOnce(Result<String, String>) + 'static) {
+        self.selection_reader.fit_width(done);
+    }
+
     pub fn read(&self, reply: impl FnOnce(String) + Send + 'static) -> Result<(), String> {
         self.sender
             .send(Command::Read(self.id, Box::new(reply)))
