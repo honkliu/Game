@@ -2770,7 +2770,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
                         }
                         crate::native_pdf::SelectionUpdate::Clear => {
                             pdf.invalidate_selection();
-                            s.ai_on_selection(tab, crate::ai::session::Selection { text: String::new(), rect: None });
+                            s.ai_clear_selection(tab);
                         }
                     }
                 }
@@ -2780,11 +2780,13 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
                 let mut s = shared.borrow_mut();
                 if s.live.get(&tab).and_then(|live| live.native_pdf.as_ref())
                     .is_some_and(|pdf| pdf.id == generation && pdf.selection_request() == request) {
-                    let text = result.unwrap_or_else(|error| {
-                        s.note(format!("Native PDF selection: {error}"));
-                        String::new()
-                    });
-                    s.ai_on_selection(tab, crate::ai::session::Selection { text, rect });
+                    match result {
+                        Ok(text) => s.ai_on_selection(tab, crate::ai::session::Selection { text, rect }),
+                        Err(error) => {
+                            s.note(format!("Native PDF selection: {error}"));
+                            s.ai_clear_selection(tab);
+                        }
+                    }
                 }
             }
             #[cfg(windows)]

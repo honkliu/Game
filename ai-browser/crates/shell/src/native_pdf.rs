@@ -333,10 +333,7 @@ impl Document {
             range.ScrollIntoView(true).map_err(|e| e.to_string())?;
             range.Select().map_err(|e| e.to_string())?;
             self.highlighted = Some(range.clone());
-            self.last_selection = range
-                .GetText(4000)
-                .map(|s| s.to_string())
-                .unwrap_or_default();
+            self.last_selection = range.GetText(-1).map(|s| s.to_string()).unwrap_or_default();
         } else {
             self.last_selection.clear();
         }
@@ -360,9 +357,7 @@ impl Document {
             let ranges = pattern.GetSelection()?;
             for j in 0..ranges.Length()?.min(100) {
                 let range = ranges.GetElement(j)?;
-                let part = range
-                    .GetText((4000 - text.chars().count()) as i32)?
-                    .to_string();
+                let part = range.GetText(-1)?.to_string();
                 if part.is_empty() {
                     continue;
                 }
@@ -370,21 +365,15 @@ impl Document {
                     rect = selection_rect(&range, self.hwnd);
                 }
                 text.push_str(&part);
-                if text.chars().count() >= 4000 {
-                    break;
-                }
             }
             // Some providers report ranges on the document itself; others only
             // on its text leaves. Stop before counting both representations.
             if !text.is_empty() && element.CurrentControlType()? == UIA_DocumentControlTypeId {
                 break;
             }
-            if text.chars().count() >= 4000 {
-                break;
-            }
         }
         if text != self.last_selection && !self.cancelled.load(Ordering::Relaxed) {
-            self.last_selection = text.clone();
+            self.last_selection = text;
             (self.selection)(SelectionUpdate::Changed(rect));
         }
         Ok(())

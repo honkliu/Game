@@ -145,7 +145,7 @@ fn browser_context(store: &Store, params: &Value) -> String {
         })
         .unwrap_or_default();
     let selection = match page.get("selection").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
-        Some(s) => format!("The user has selected this text on the active page:\n\"\"\"\n{}\n\"\"\"", s.chars().take(4000).collect::<String>()),
+        Some(s) => format!("The user has selected this text on the active page:\n\"\"\"\n{}\n\"\"\"", s),
         None => String::new(),
     };
     let content = page_content(&page);
@@ -595,6 +595,16 @@ mod tests {
         let store = Store::new(&dir);
         let out = browser_context(&store, &json!({ "context_override": "MY EDITED CONTEXT", "page": {"tab_id": 1, "content": "x"} }));
         assert_eq!(out, "MY EDITED CONTEXT");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn browser_context_preserves_the_full_selection() {
+        let dir = std::env::temp_dir().join(format!("ctx-long-selection-{}", std::process::id()));
+        let store = Store::new(&dir);
+        let text = "Long selected text\n\u{1f4d6} ".repeat(1000);
+        let out = browser_context(&store, &json!({ "page": { "selection": &text } }));
+        assert!(out.contains(&text));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

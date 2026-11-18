@@ -55,7 +55,7 @@
     if (text === last) return;
     last = text;
     var r = sel.getRangeAt(0).getBoundingClientRect();
-    post({ ai: 'sel', text: text.slice(0, 4000), rect: [r.left, r.top, r.width, r.height] });
+    post({ ai: 'sel', text: text, rect: [r.left, r.top, r.width, r.height] });
   }
 
   // Many sites call window.open('') and then set the new window's location. The host

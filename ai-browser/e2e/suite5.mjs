@@ -7,7 +7,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { launch, listen, run, sleep, nativePdfText, startModel } from './harness.mjs';
 
-function makePdf(text, { image = false } = {}) {
+function makePdf(text, { image = false, fontSize = 24 } = {}) {
   const pages = Array.isArray(text) ? text : [text];
   const objs = [
     '<< /Type /Catalog /Pages 2 0 R >>',
@@ -15,7 +15,8 @@ function makePdf(text, { image = false } = {}) {
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
   ];
   pages.forEach((text, i) => {
-    const stream = `${image ? 'q 20 0 0 20 72 735 cm /Logo Do Q\n' : ''}BT /F1 24 Tf 72 700 Td ${image ? '(Native selection report) Tj 0 -32 Td (Example authors) Tj 0 -32 Td (Abstract) Tj 0 -32 Td ' : ''}(${text}) Tj ET`;
+    const lines = text.split('\n').map((line, index) => `${index ? '0 -20 Td ' : ''}(${line}) Tj`).join('\n');
+    const stream = `${image ? 'q 20 0 0 20 72 735 cm /Logo Do Q\n' : ''}BT /F1 ${fontSize} Tf 72 700 Td ${image ? '(Native selection report) Tj 0 -32 Td (Example authors) Tj 0 -32 Td (Abstract) Tj 0 -32 Td ' : ''}${lines} ET`;
     objs.push(
       `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${5 + i * 2} 0 R /Resources << /Font << /F1 3 0 R >> ${image ? `/XObject << /Logo ${4 + pages.length * 2} 0 R >>` : ''} >> >>`,
       `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
@@ -65,7 +66,9 @@ const server = http.createServer((req, res) => {
   }
   if (req.url.endsWith('.pdf') || req.url === '/extensionless-document') {
     res.setHeader('content-type', 'application/pdf');
-    const text = req.url === '/find.pdf' ? ['Revenue report for the first page', 'revenue report on the second page', 'Final REVENUE report on page three'] :
+    const text = req.url === '/long.pdf' ? Array.from({ length: 6 }, (_, page) =>
+      Array.from({ length: 20 }, (_, line) => `Page ${page + 1} line ${line + 1} preserves the complete native selection.`).join('\n')) :
+      req.url === '/find.pdf' ? ['Revenue report for the first page', 'revenue report on the second page', 'Final REVENUE report on page three'] :
       req.url === '/multipage.pdf' ? [
       'FIRST-PAGE native document introduction',
       'SECOND-PAGE detailed revenue report',
@@ -73,7 +76,7 @@ const server = http.createServer((req, res) => {
     ] : req.url === '/left.pdf' ? 'LEFT-NATIVE-PDF independent financial report' :
       req.url === '/right.pdf' ? 'RIGHT-NATIVE-PDF separate canvas document' :
       'Quarterly revenue grew twelve percent';
-    res.end(makePdf(text, { image: req.url === '/image.pdf' }));
+    res.end(makePdf(text, { image: req.url === '/image.pdf', fontSize: req.url === '/long.pdf' ? 12 : 24 }));
   } else {
     res.setHeader('content-type', 'text/html');
     res.end(`<h1>Page before a drop</h1><a id="l" href="http://127.0.0.1:${server.address().port}/doc.pdf">pdf</a>
@@ -187,18 +190,46 @@ async function preview() {
   }));
 }
 
-async function assertRiverSelection(marker) {
+async function assertRiverSelection(marker, { reflow = false } = {}) {
   await app.invoke('shortcut', { name: 'ask_ai' });
   const river = await app.pageWith(/sidebar\.html/);
   try {
     await river.locator('#sel-card').waitFor();
-    const quote = marker.slice(0, 600) + (marker.length > 600 ? '\u2026' : '');
+    const quote = marker;
     try {
       await river.waitForFunction(expected =>
         document.querySelector('#sel-card .sel-quote')?.textContent === expected, quote);
     } catch (error) {
       assert.equal(await river.locator('#sel-card .sel-quote').textContent(), quote, 'River visibly displays the native selection');
       throw error;
+    }
+    if (reflow) {
+      const dimensions = await river.locator('.sel-quote').evaluate(quote => {
+        const previous = quote.style.cssText;
+        try {
+          quote.style.width = '400px';
+          const narrow = quote.scrollHeight;
+          quote.style.width = '800px';
+          return { narrow, wide: quote.scrollHeight, overflow: quote.scrollWidth > quote.clientWidth };
+        } finally { quote.style.cssText = previous; }
+      });
+      assert.ok(dimensions.wide < dimensions.narrow * 0.75, JSON.stringify(dimensions));
+      assert.equal(dimensions.overflow, false, 'expanded text wraps without horizontal overflow');
+      const copied = await river.locator('.sel-quote').evaluate(quote => {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(quote);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        try {
+          const data = new DataTransfer();
+          const event = new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: data });
+          quote.dispatchEvent(event);
+          if (!event.defaultPrevented) throw new Error('Original-text copy handler did not run');
+          return data.getData('text/plain');
+        } finally { selection.removeAllRanges(); }
+      });
+      assert.equal(copied, marker, 'copy preserves every original hard break without touching the system clipboard');
     }
     const before = model.calls.length;
     await river.locator('#sel-card button').filter({ hasText: 'Explain' }).click();
@@ -260,6 +291,22 @@ failed = await run([
       await assertRiverSelection(multiline);
     } finally {
       await app.invoke('nav.open', { url: `${base}/doc.pdf`, disposition: 'current' });
+      await waitPdf('Quarterly revenue');
+    }
+  }],
+  ['long PDF selections stay complete in River, reflow on resize and reach the model unchanged', async () => {
+    await app.invoke('nav.open', { url: base + '/long.pdf', disposition: 'current' });
+    try {
+      const page = await app.pageWith(/\/long\.pdf$/);
+      await waitPdf('Page 1 line 1');
+      const text = await engineSelection(page, { selectAll: true });
+      assert.ok(text.length > 4000, String(text.length));
+      assert.match(text, /Page 6 line 20/);
+      await app.shell.waitForFunction(async expected =>
+        (await window.__native.invoke('agent.context')).page.selection === expected, text);
+      await assertRiverSelection(text, { reflow: true });
+    } finally {
+      await app.invoke('nav.open', { url: base + '/doc.pdf', disposition: 'current' });
       await waitPdf('Quarterly revenue');
     }
   }],

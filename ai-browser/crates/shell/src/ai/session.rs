@@ -25,9 +25,6 @@ use super::identity::Identity;
 use super::link::Link;
 use super::policy::ReleaseZeroGate;
 
-/// The selection text the page reports is untrusted and bounded.
-pub const MAX_SELECTION_CHARS: usize = 4_000;
-
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -36,7 +33,7 @@ pub fn now_ms() -> i64 {
 }
 
 /// What the page last said is selected in one tab. **Page-provenance**: it came
-/// from script running in the page, so it is bounded, never executed, and only ever
+/// from script running in the page, so it is never executed, and only ever
 /// used as the text of a question the user chose to ask.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selection {
@@ -48,19 +45,14 @@ pub struct Selection {
 impl Selection {
     /// Parse one probe message, or `None` if it is not a well-formed selection.
     pub fn from_probe(raw: &str) -> Option<Selection> {
-        if raw.len() > 64 * 1024 {
-            return None;
-        }
         let value: Value = serde_json::from_str(raw).ok()?;
         if value.get("ai").and_then(Value::as_str) != Some("sel") {
             return None;
         }
-        let text: String = value
+        let text = value
             .get("text")
             .and_then(Value::as_str)?
-            .chars()
-            .take(MAX_SELECTION_CHARS)
-            .collect();
+            .to_string();
         let rect = value.get("rect").and_then(Value::as_array).and_then(|r| {
             let mut out = [0.0f64; 4];
             if r.len() != 4 {
@@ -437,14 +429,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selection_probe_is_bounded_and_validated() {
+    fn selection_probe_preserves_long_text_and_validates_shape() {
         let ok = Selection::from_probe(r#"{"ai":"sel","text":"hello","rect":[1,2,3,4]}"#).unwrap();
         assert_eq!(ok.text, "hello");
         assert_eq!(ok.rect, Some([1.0, 2.0, 3.0, 4.0]));
         assert!(Selection::from_probe(r#"{"ai":"other","text":"x"}"#).is_none());
         assert!(Selection::from_probe("not json").is_none());
-        let long = format!(r#"{{"ai":"sel","text":"{}"}}"#, "a".repeat(10_000));
-        assert_eq!(Selection::from_probe(&long).unwrap().text.chars().count(), MAX_SELECTION_CHARS);
+        let text = "Selected text\n\u{1f4d6}".repeat(5000);
+        let long = json!({ "ai": "sel", "text": &text }).to_string();
+        assert_eq!(Selection::from_probe(&long).unwrap().text, text);
         let bad_rect = Selection::from_probe(r#"{"ai":"sel","text":"x","rect":[1,2,3]}"#).unwrap();
         assert_eq!(bad_rect.rect, None);
         let huge = Selection::from_probe(r#"{"ai":"sel","text":"x","rect":[1e12,0,0,0]}"#).unwrap();

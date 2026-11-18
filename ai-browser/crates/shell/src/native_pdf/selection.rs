@@ -206,7 +206,7 @@ fn selected_text(value: &Value) -> Result<String, String> {
     }
     value["result"]["value"]
         .as_str()
-        .map(|text| text.chars().take(4000).collect())
+        .map(str::to_owned)
         .ok_or_else(|| "Invalid native PDF selection result.".into())
 }
 
@@ -251,8 +251,8 @@ mod tests {
         .is_err());
         let long = "\u{1f4d6}".repeat(4001);
         assert_eq!(
-            selected_text(&json!({ "result": { "value": long } })).unwrap(),
-            "\u{1f4d6}".repeat(4000),
+            selected_text(&json!({ "result": { "value": &long } })).unwrap(),
+            long,
         );
     }
 }

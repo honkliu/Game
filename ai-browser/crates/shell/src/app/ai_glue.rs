@@ -1148,18 +1148,14 @@ impl AppState {
     }
 
     pub(super) fn ai_on_selection(&mut self, tab: TabId, sel: Selection) {
+        if sel.text.trim().is_empty() {
+            self.ai_clear_selection(tab);
+            return;
+        }
         if self.active != Some(tab) {
             return;
         }
         let Some(key) = self.ai.identity.current(tab.0) else { return };
-        if sel.text.trim().is_empty() {
-            if self.ai.selections.remove(&tab.0).is_some() {
-                self.ai_notify(BrowserEvent::SelectionChanged { document: key.document_token(), selected_chars: 0 });
-                self.agent_context_changed();
-            }
-            self.ai_hide_toolbar();
-            return;
-        }
         let chars = sel.text.chars().count() as u32;
         let rect = sel.rect;
         self.ai.selections.insert(tab.0, sel);
@@ -1170,6 +1166,18 @@ impl AppState {
         if let (true, true, Some(rect)) = (usable, free, rect) {
             self.ai_show_toolbar(tab, rect);
         }
+    }
+
+    pub(super) fn ai_clear_selection(&mut self, tab: TabId) {
+        if self.active != Some(tab) {
+            return;
+        }
+        let Some(key) = self.ai.identity.current(tab.0) else { return };
+        if self.ai.selections.remove(&tab.0).is_some() {
+            self.ai_notify(BrowserEvent::SelectionChanged { document: key.document_token(), selected_chars: 0 });
+            self.agent_context_changed();
+        }
+        self.ai_hide_toolbar();
     }
 
     fn ai_show_toolbar(&mut self, tab: TabId, rect: [f64; 4]) {

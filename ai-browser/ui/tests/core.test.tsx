@@ -12,6 +12,8 @@ import { ToolsSettings } from '../src/components/ToolsSettings';
 import { act } from 'preact/test-utils';
 import { modelCommand } from '../src/model_commands';
 import type { ModelInfo } from '../src/types';
+import { ContextBar } from '../src/components/ContextBar';
+import { ctx as liveContext } from '../src/store';
 
 describe('/model command', () => {
   const entries = [
@@ -122,6 +124,52 @@ describe('markdown', () => {
 });
 
 describe('editable context', () => {
+  it('renders the complete long selection without a shortened preview', () => {
+    const text = 'Selected text with line breaks\n'.repeat(300) + 'END OF SELECTION';
+    const previous = liveContext.value;
+    const host = document.createElement('div');
+    try {
+      act(() => {
+        liveContext.value = ctx({ selection: text });
+        render(<ContextBar />, host);
+      });
+      expect(host.querySelector('.sel-quote')?.textContent).toBe(text);
+    } finally {
+      act(() => { render(null, host); liveContext.value = previous; });
+    }
+  });
+
+  it('copies original hard breaks from a partial selection rather than visual wrapping', () => {
+    const text = 'PREFIX First line\r\nSecond line\nThird line SUFFIX';
+    const expected = 'First line\r\nSecond line\nThird line';
+    const previous = liveContext.value;
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const selection = window.getSelection()!;
+    const setData = vi.fn();
+    try {
+      act(() => {
+        liveContext.value = ctx({ selection: text });
+        render(<ContextBar />, host);
+      });
+      const quote = host.querySelector('.sel-quote')!;
+      const range = document.createRange();
+      range.setStart(quote.firstChild!, text.indexOf('First'));
+      range.setEnd(quote.firstChild!, text.indexOf(' SUFFIX'));
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const event = new Event('copy', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', { value: { setData } });
+      quote.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(setData).toHaveBeenCalledWith('text/plain', expected);
+    } finally {
+      selection.removeAllRanges();
+      act(() => { render(null, host); liveContext.value = previous; });
+      host.remove();
+    }
+  });
+
   it('changes signature on content, selection, url and tab changes', () => {
     const base = contextSignature(ctx());
     expect(contextSignature(ctx())).toBe(base);
