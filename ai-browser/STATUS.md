@@ -27,6 +27,7 @@ Spec: `../ai-native-browser-design-and-engineering-backlog.md`.
 - Browser to AI: page content, form field values (passwords hidden), selection, tabs. The page probe reports DOM mutations, typing, clicks and in-page route changes, so the context changes without a URL change.
 - AI to browser: navigate, open/activate/close tabs, click, type, scroll, read other tabs. Writes need approval unless auto-approve is on.
 - Selecting text on a page: the toolbar (pane closed) or the pane's selection card (pane open); both route into the pane in the current mode.
+- Selection text is not shortened to a 600-character preview or cut off at 4,000 characters in PDF/HTML extraction or agent prompts. The scrollable quote preserves the original text, whitespace and hard line breaks. Copy uses the browser's normal behavior, without a custom clipboard handler or text reformatting.
 
 ## Canvas tab
 - A canvas is one tab holding a grid of live pages (1–4 columns × 1–3 rows, default 3×2, so at most 6 by default and 12 at the extreme). Rail "New canvas" button, `new-canvas` verb, or the agent's `canvas` tool.

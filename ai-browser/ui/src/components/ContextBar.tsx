@@ -43,14 +43,6 @@ function useNow(ms: number) {
 /** The selected text with the actions that use it: the answer to "I selected something,
  *  now what?" and to "what exactly is being sent?". */
 function SelectionCard({ text }: { text: string }) {
-  const copy = (event: ClipboardEvent) => {
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount !== 1) return;
-    const range = selection.getRangeAt(0);
-    if (!(event.currentTarget as HTMLElement).contains(range.commonAncestorContainer)) return;
-    event.preventDefault();
-    event.clipboardData!.setData('text/plain', range.toString());
-  };
   const act = (intent: Intent) => {
     if (agentOn.value) void sendMessage(SELECTION_PROMPTS[intent] ?? '');
     else void sendMessage('', { intent, selection: true });
@@ -61,7 +53,7 @@ function SelectionCard({ text }: { text: string }) {
         <b>✂ Selected text</b>
         <span>{text.length} chars · sent with your next message</span>
       </div>
-      <blockquote class="sel-quote" onCopy={copy}>{text}</blockquote>
+      <blockquote class="sel-quote">{text}</blockquote>
       <div class="sel-actions">
         {ACTIONS.map(([k, label]) => (
           <button type="button" class="ask-qbtn" key={k} disabled={busy.value} onClick={() => act(k)}>{label}</button>

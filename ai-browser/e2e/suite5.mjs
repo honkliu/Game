@@ -7,7 +7,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { launch, listen, run, sleep, nativePdfText, startModel } from './harness.mjs';
 
-function makePdf(text, { image = false, fontSize = 24 } = {}) {
+function makePdf(text, { image = false, fontSize = 24, pageWidth = 612 } = {}) {
   const pages = Array.isArray(text) ? text : [text];
   const objs = [
     '<< /Type /Catalog /Pages 2 0 R >>',
@@ -18,7 +18,7 @@ function makePdf(text, { image = false, fontSize = 24 } = {}) {
     const lines = text.split('\n').map((line, index) => `${index ? '0 -20 Td ' : ''}(${line}) Tj`).join('\n');
     const stream = `${image ? 'q 20 0 0 20 72 735 cm /Logo Do Q\n' : ''}BT /F1 ${fontSize} Tf 72 700 Td ${image ? '(Native selection report) Tj 0 -32 Td (Example authors) Tj 0 -32 Td (Abstract) Tj 0 -32 Td ' : ''}${lines} ET`;
     objs.push(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${5 + i * 2} 0 R /Resources << /Font << /F1 3 0 R >> ${image ? `/XObject << /Logo ${4 + pages.length * 2} 0 R >>` : ''} >> >>`,
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} 792] /Contents ${5 + i * 2} 0 R /Resources << /Font << /F1 3 0 R >> ${image ? `/XObject << /Logo ${4 + pages.length * 2} 0 R >>` : ''} >> >>`,
       `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
     );
   });
@@ -56,6 +56,11 @@ const server = http.createServer((req, res) => {
     res.end('<h1>Please sign in</h1>');
     return;
   }
+  if (req.url === '/long-html') {
+    res.setHeader('content-type', 'text/html');
+    res.end(`<pre id="long-selection">${'Selected browser text preserves spaces and line breaks.\n'.repeat(150)}END OF WEB SELECTION</pre>`);
+    return;
+  }
   if (req.url === '/authenticated.pdf') {
     authenticatedCookie = req.headers.cookie || '';
     if (!authenticatedCookie.includes('pdf_session=allowed')) {
@@ -66,8 +71,7 @@ const server = http.createServer((req, res) => {
   }
   if (req.url.endsWith('.pdf') || req.url === '/extensionless-document') {
     res.setHeader('content-type', 'application/pdf');
-    const text = req.url === '/long.pdf' ? Array.from({ length: 6 }, (_, page) =>
-      Array.from({ length: 20 }, (_, line) => `Page ${page + 1} line ${line + 1} preserves the complete native selection.`).join('\n')) :
+    const text = req.url === '/long.pdf' ? 'Long native PDF selection preserves original spaces. '.repeat(120) + 'END OF PDF SELECTION' :
       req.url === '/find.pdf' ? ['Revenue report for the first page', 'revenue report on the second page', 'Final REVENUE report on page three'] :
       req.url === '/multipage.pdf' ? [
       'FIRST-PAGE native document introduction',
@@ -76,7 +80,8 @@ const server = http.createServer((req, res) => {
     ] : req.url === '/left.pdf' ? 'LEFT-NATIVE-PDF independent financial report' :
       req.url === '/right.pdf' ? 'RIGHT-NATIVE-PDF separate canvas document' :
       'Quarterly revenue grew twelve percent';
-    res.end(makePdf(text, { image: req.url === '/image.pdf', fontSize: req.url === '/long.pdf' ? 12 : 24 }));
+    res.end(makePdf(text, { image: req.url === '/image.pdf',
+      fontSize: req.url === '/long.pdf' ? 1 : 24, pageWidth: req.url === '/long.pdf' ? 3600 : 612 }));
   } else {
     res.setHeader('content-type', 'text/html');
     res.end(`<h1>Page before a drop</h1><a id="l" href="http://127.0.0.1:${server.address().port}/doc.pdf">pdf</a>
@@ -119,6 +124,16 @@ async function dropFile(page, selector) {
 }
 async function waitPdf(marker) {
   return nativePdfText(app.child.pid, marker);
+}
+
+async function waitSelection(expected) {
+  let actual;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    actual = (await app.invoke('agent.context')).page.selection;
+    if (actual === expected) return;
+    await sleep(100);
+  }
+  assert.equal(actual, expected, 'the browser context preserves the complete native selection');
 }
 
 async function nativePdfEvaluate(page, expression) {
@@ -190,8 +205,8 @@ async function preview() {
   }));
 }
 
-async function assertRiverSelection(marker, { reflow = false } = {}) {
-  await app.invoke('shortcut', { name: 'ask_ai' });
+async function assertRiverSelection(marker, { alreadyOpen = false } = {}) {
+  if (!alreadyOpen) await app.invoke('shortcut', { name: 'ask_ai' });
   const river = await app.pageWith(/sidebar\.html/);
   try {
     await river.locator('#sel-card').waitFor();
@@ -200,36 +215,11 @@ async function assertRiverSelection(marker, { reflow = false } = {}) {
       await river.waitForFunction(expected =>
         document.querySelector('#sel-card .sel-quote')?.textContent === expected, quote);
     } catch (error) {
-      assert.equal(await river.locator('#sel-card .sel-quote').textContent(), quote, 'River visibly displays the native selection');
+      const actual = await river.locator('#sel-card .sel-quote').textContent();
+      assert.equal(actual.length, quote.length,
+        `River quote length ${actual.length}, expected ${quote.length}; actual tail ${JSON.stringify(actual.slice(-90))}, expected tail ${JSON.stringify(quote.slice(-90))}`);
+      assert.equal(actual, quote, 'River visibly displays the native selection');
       throw error;
-    }
-    if (reflow) {
-      const dimensions = await river.locator('.sel-quote').evaluate(quote => {
-        const previous = quote.style.cssText;
-        try {
-          quote.style.width = '400px';
-          const narrow = quote.scrollHeight;
-          quote.style.width = '800px';
-          return { narrow, wide: quote.scrollHeight, overflow: quote.scrollWidth > quote.clientWidth };
-        } finally { quote.style.cssText = previous; }
-      });
-      assert.ok(dimensions.wide < dimensions.narrow * 0.75, JSON.stringify(dimensions));
-      assert.equal(dimensions.overflow, false, 'expanded text wraps without horizontal overflow');
-      const copied = await river.locator('.sel-quote').evaluate(quote => {
-        const selection = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(quote);
-        selection.removeAllRanges();
-        selection.addRange(range);
-        try {
-          const data = new DataTransfer();
-          const event = new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: data });
-          quote.dispatchEvent(event);
-          if (!event.defaultPrevented) throw new Error('Original-text copy handler did not run');
-          return data.getData('text/plain');
-        } finally { selection.removeAllRanges(); }
-      });
-      assert.equal(copied, marker, 'copy preserves every original hard break without touching the system clipboard');
     }
     const before = model.calls.length;
     await river.locator('#sel-card button').filter({ hasText: 'Explain' }).click();
@@ -294,17 +284,41 @@ failed = await run([
       await waitPdf('Quarterly revenue');
     }
   }],
-  ['long PDF selections stay complete in River, reflow on resize and reach the model unchanged', async () => {
+  ['long PDF selections stay complete in River and reach the model unchanged', async () => {
     await app.invoke('nav.open', { url: base + '/long.pdf', disposition: 'current' });
     try {
       const page = await app.pageWith(/\/long\.pdf$/);
-      await waitPdf('Page 1 line 1');
-      const text = await engineSelection(page, { selectAll: true });
+      await app.invoke('shortcut', { name: 'ask_ai' });
+      await app.pageWith(/sidebar\.html/);
+      const document = await waitPdf('END OF PDF SELECTION');
+      await nativePdfText(app.child.pid, 'END OF PDF SELECTION', document.text.trim());
+      const text = await engineSelection(page);
       assert.ok(text.length > 4000, String(text.length));
-      assert.match(text, /Page 6 line 20/);
-      await app.shell.waitForFunction(async expected =>
-        (await window.__native.invoke('agent.context')).page.selection === expected, text);
-      await assertRiverSelection(text, { reflow: true });
+      assert.match(text, /END OF PDF SELECTION/);
+      await waitSelection(text);
+      await assertRiverSelection(text, { alreadyOpen: true });
+    } finally {
+      await app.invoke('nav.open', { url: base + '/doc.pdf', disposition: 'current' });
+      await waitPdf('Quarterly revenue');
+    }
+  }],
+  ['ordinary web selections also preserve text beyond 4,000 characters', async () => {
+    await app.invoke('nav.open', { url: base + '/long-html', disposition: 'current' });
+    try {
+      const page = await app.pageWith(/\/long-html$/);
+      await page.locator('#long-selection').waitFor();
+      await app.invoke('shortcut', { name: 'ask_ai' });
+      const text = await page.locator('#long-selection').evaluate(element => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return element.textContent;
+      });
+      assert.ok(text.length > 4000);
+      await waitSelection(text);
+      await assertRiverSelection(text, { alreadyOpen: true });
     } finally {
       await app.invoke('nav.open', { url: base + '/doc.pdf', disposition: 'current' });
       await waitPdf('Quarterly revenue');

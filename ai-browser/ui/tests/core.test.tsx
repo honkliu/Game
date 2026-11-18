@@ -139,37 +139,6 @@ describe('editable context', () => {
     }
   });
 
-  it('copies original hard breaks from a partial selection rather than visual wrapping', () => {
-    const text = 'PREFIX First line\r\nSecond line\nThird line SUFFIX';
-    const expected = 'First line\r\nSecond line\nThird line';
-    const previous = liveContext.value;
-    const host = document.createElement('div');
-    document.body.appendChild(host);
-    const selection = window.getSelection()!;
-    const setData = vi.fn();
-    try {
-      act(() => {
-        liveContext.value = ctx({ selection: text });
-        render(<ContextBar />, host);
-      });
-      const quote = host.querySelector('.sel-quote')!;
-      const range = document.createRange();
-      range.setStart(quote.firstChild!, text.indexOf('First'));
-      range.setEnd(quote.firstChild!, text.indexOf(' SUFFIX'));
-      selection.removeAllRanges();
-      selection.addRange(range);
-      const event = new Event('copy', { bubbles: true, cancelable: true });
-      Object.defineProperty(event, 'clipboardData', { value: { setData } });
-      quote.dispatchEvent(event);
-      expect(event.defaultPrevented).toBe(true);
-      expect(setData).toHaveBeenCalledWith('text/plain', expected);
-    } finally {
-      selection.removeAllRanges();
-      act(() => { render(null, host); liveContext.value = previous; });
-      host.remove();
-    }
-  });
-
   it('changes signature on content, selection, url and tab changes', () => {
     const base = contextSignature(ctx());
     expect(contextSignature(ctx())).toBe(base);
