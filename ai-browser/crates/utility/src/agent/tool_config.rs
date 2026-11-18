@@ -77,7 +77,22 @@ fn json_format() -> String {
 
 pub fn load(store: &Store, hub: &Hub) -> Result<ToolConfig, String> {
     let mut config = store.load_config()?;
-    if let Some(tools) = config.tools {
+    if let Some(mut tools) = config.tools.clone() {
+        let mut changed = false;
+        if let Some(read_enabled) = tools.enabled.get("read_page").copied() {
+            let write_enabled = read_enabled && tools.enabled.get("fill").copied().unwrap_or(false);
+            for (id, enabled) in [("read_cookies", read_enabled), ("read_storage", read_enabled),
+                ("write_cookie", write_enabled), ("write_storage", write_enabled)] {
+                if let std::collections::btree_map::Entry::Vacant(entry) = tools.enabled.entry(id.into()) {
+                    entry.insert(enabled);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            config.tools = Some(tools.clone());
+            store.save_config(&config)?;
+        }
         return Ok(tools);
     }
     // One-time migration preserves the user's existing enabled tools, visibly on disk.
@@ -475,6 +490,31 @@ mod tests {
             fs::read_to_string(dir.join("agent.json")).unwrap(),
             "{invalid"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn storage_tool_migration_preserves_existing_choices_and_write_approvals() {
+        let (dir, store) = profile("storage-migration");
+        let hub = Hub::default();
+        let mut config = store.config();
+        let mut tools = ToolConfig::default();
+        tools.enabled.insert("read_page".into(), true);
+        tools.enabled.insert("fill".into(), true);
+        tools.enabled.insert("read_cookies".into(), false);
+        config.tools = Some(tools);
+        store.save_config(&config).unwrap();
+        let migrated = load(&store, &hub).unwrap();
+        assert!(!migrated.enabled["read_cookies"]);
+        assert!(migrated.enabled["read_storage"]);
+        assert!(migrated.enabled["write_storage"]);
+        assert!(migrated.enabled["write_cookie"]);
+        assert_eq!(load(&Store::new(&dir), &hub).unwrap(), migrated);
+        for tool in definitions(&migrated, &hub).into_iter().filter(|tool| matches!(tool.id.as_str(), "write_storage" | "write_cookie")) {
+            assert!(tool.write);
+            assert!(!tool.trusted);
+            assert_eq!(tool.kind, Kind::Browser);
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -63,6 +63,7 @@ pub fn configure<'a>(
     environment: Option<&Environment>,
     trusted_ui: bool,
 ) -> WebViewBuilder<'a> {
+    let builder = builder.with_devtools(!trusted_ui);
     #[cfg(windows)]
     {
         use wry::WebViewBuilderExtWindows;

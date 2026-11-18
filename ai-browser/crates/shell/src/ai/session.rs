@@ -184,6 +184,7 @@ pub struct AiSession {
     pub agent_seq: u64,
     /// Browser tool calls that wait for a page script: utility request id → the call.
     pub agent_evals: HashMap<u64, AgentEval>,
+    pub(crate) devtools_calls: HashMap<u64, crate::app::devtools::PendingCall>,
     pub agent_documents: HashMap<u64, DocumentKey>,
     /// Runs and previews waiting for the active page's content before they are sent
     /// to the engine: job id → what to send.
@@ -259,6 +260,7 @@ impl AiSession {
             agent_run: 0,
             agent_seq: 0,
             agent_evals: HashMap::new(),
+            devtools_calls: HashMap::new(),
             agent_documents: HashMap::new(),
             agent_jobs: HashMap::new(),
             agent_job_seq: 0,

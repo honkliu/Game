@@ -17,7 +17,7 @@ harness = false
 
 [dependencies]
 # windowing + webview (WebView2 on Windows, WKWebView on macOS)
-wry = "=0.57.2"
+wry = { version = "=0.57.2", features = ["devtools"] }
 tao = "=0.37.2"
 # typed IPC envelope + JSON state files
 serde = { version = "1", features = ["derive"] }

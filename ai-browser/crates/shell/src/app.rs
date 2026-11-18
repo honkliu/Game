@@ -48,6 +48,7 @@ use crate::tabs::{self, Group, GroupColor, GroupId, Tab, TabId, TabSet};
 use crate::ui;
 
 mod agent_glue;
+pub(crate) mod devtools;
 mod ai_glue;
 mod canvas;
 mod lifecycle;
@@ -279,6 +280,7 @@ pub enum AppMessage {
     AgentEval(u64),
     /// A page script of an agent tool call returned (raw JSON text of its result).
     AgentEvalDone(u64, String),
+    DevtoolsDone(u64, u64, Result<String, String>),
     /// The active page's content was read for an agent job (None: it could not be, or
     /// took too long, and the job goes ahead without it).
     AgentJob(u64, Option<String>),
@@ -1815,6 +1817,20 @@ impl AppState {
         self.emit("shell.command_done", json!({ "verb": verb }));
     }
 
+    fn install_devtools_shortcut(&mut self, webview: &WebView) {
+        #[cfg(windows)]
+        {
+            let proxy = self.proxy();
+            if let Err(error) = crate::webview2::install_devtools_shortcut(webview, move || {
+                let _ = proxy.send_event(AppMessage::NativeShortcut(Shortcut::OpenDevtools));
+            }) {
+                self.note(format!("DevTools keyboard handler: {error}"));
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = webview;
+    }
+
     fn perform_shortcut(&mut self, name: &str, args: Value) {
         match name {
             "new_tab" => {
@@ -1904,6 +1920,11 @@ impl AppState {
             "view_source" => {
                 if let Some(id) = self.active {
                     self.navigate(id, ui::internal_page(ui::InternalPage::ViewSourceUnsupported), false);
+                }
+            }
+            "open_devtools" => {
+                if let Some(live) = self.active.and_then(|id| self.live.get(&id)) {
+                    live.webview.open_devtools();
                 }
             }
             "zoom_in" | "zoom_out" | "zoom_reset" => {
@@ -2273,8 +2294,7 @@ impl AppState {
             .with_focused(visible)
             .with_background_color((255, 255, 255, 255))
             // Browser accelerators are off so Ctrl+F/Ctrl+P/Ctrl+R never fire a
-            // WebView2 action behind our back; the process message hook in
-            // `main` delivers ours. Ctrl+W/Ctrl+T are not WebView2 accelerators.
+            // WebView2 action behind our back. F12 is registered on the controller.
             .with_url(&initial)
             // Page reports are untrusted and cannot reach the command dispatcher.
             // Only the bundled Settings document may send settings changes.
@@ -2356,6 +2376,7 @@ impl AppState {
 
         match built {
             Ok(wv) => {
+                self.install_devtools_shortcut(&wv);
                 #[cfg(windows)]
                 {
                     let proxy = self.proxy();
@@ -2932,6 +2953,10 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             Event::UserEvent(AppMessage::AgentEvalDone(id, raw)) => {
                 shared.borrow_mut().agent_eval_done(id, raw);
             }
+            Event::UserEvent(AppMessage::DevtoolsDone(generation, id, result)) => {
+                let mut s = shared.borrow_mut();
+                if s.ai.link_generation == generation { s.devtools_done(id, result); }
+            }
             Event::UserEvent(AppMessage::AgentJob(id, raw)) => {
                 shared.borrow_mut().agent_job_done(id, raw);
             }
@@ -3246,6 +3271,7 @@ fn build_shell(shared: &Shared) {
     let Some(window) = s.window.as_ref() else { return };
     match builder.build_as_child(window) {
         Ok(wv) => {
+            s.install_devtools_shortcut(&wv);
             // Remember the shell's child HWND: keystrokes going to it are the
             // shell's own, so the accelerator hook must not intercept them.
             #[cfg(windows)]
@@ -3297,6 +3323,7 @@ impl AppState {
         let Some(window) = self.window.as_ref() else { return };
         match builder.build_as_child(window) {
             Ok(wv) => {
+                self.install_devtools_shortcut(&wv);
                 self.overlay = Some(wv);
                 self.note("overlay webview ready (0x0)");
             }
@@ -3428,7 +3455,8 @@ fn dispatch_accelerator(shared: &Shared, msg: *const std::ffi::c_void) -> bool {
     // page webview is a different HWND owned by msedgewebview2.exe.
     // SAFETY: GetFocus returns the thread's focus HWND or null.
     let focus = unsafe { GetFocus() };
-    if !focus.is_invalid() && focus.0 as isize == shell_hwnd {
+    if !focus.is_invalid() && focus.0 as isize == shell_hwnd
+        && !(vk == keys::vk::F12 && mods == Mods::NONE) {
         return false;
     }
 
@@ -3503,6 +3531,7 @@ fn shortcut_name(s: &Shortcut) -> &'static str {
         S::Bookmark => "bookmark",
         S::BookmarkAllTabs => "bookmark_all_tabs",
         S::ViewSource => "view_source",
+        S::OpenDevtools => "open_devtools",
         S::ZoomIn => "zoom_in",
         S::ZoomOut => "zoom_out",
         S::ZoomReset => "zoom_reset",
@@ -3656,6 +3685,7 @@ mod tests {
             Shortcut::Bookmark,
             Shortcut::BookmarkAllTabs,
             Shortcut::ViewSource,
+            Shortcut::OpenDevtools,
             Shortcut::ZoomIn,
             Shortcut::ZoomOut,
             Shortcut::ZoomReset,

@@ -93,6 +93,43 @@ pub fn install_zoom_changed(webview: &wry::WebView, on_zoom: impl Fn(f64) + 'sta
     }
 }
 
+pub fn install_devtools_shortcut(webview: &wry::WebView, on_open: impl Fn() + 'static) -> windows::core::Result<()> {
+    use webview2_com::AcceleratorKeyPressedEventHandler;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
+    use wry::WebViewExtWindows;
+
+    // WebView2 owns the focused child HWND, so its keys need not enter tao's message hook.
+    unsafe {
+        let mut token = 0;
+        webview.controller().add_AcceleratorKeyPressed(
+            &AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut key = 0;
+                let mut kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
+                args.VirtualKey(&mut key)?;
+                args.KeyEventKind(&mut kind)?;
+                if key != crate::keys::vk::F12
+                    || !matches!(kind, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN | COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
+                    || [0x10, 0x11, 0x12].into_iter().any(|key| GetKeyState(key) < 0) {
+                    return Ok(());
+                }
+                args.SetHandled(true)?;
+                let mut lparam = 0;
+                args.KeyEventLParam(&mut lparam)?;
+                if lparam & (1 << 30) == 0 {
+                    // Queue the action: windowed accelerator callbacks block cross-process COM.
+                    on_open();
+                }
+                Ok(())
+            })),
+            &mut token,
+        )
+    }
+}
+
 pub fn zoom_factor(webview: &wry::WebView) -> windows::core::Result<f64> {
     use wry::WebViewExtWindows;
     let mut factor = 1.0;

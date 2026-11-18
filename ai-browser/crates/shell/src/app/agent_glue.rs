@@ -386,6 +386,7 @@ impl AppState {
     pub(super) fn agent_link_closed(&mut self) {
         let run = std::mem::take(&mut self.ai.agent_run);
         self.ai.agent_evals.clear();
+        self.ai.devtools_calls.clear();
         self.ai.agent_jobs.clear();
         if run != 0 {
             self.emit(
@@ -429,7 +430,23 @@ impl AppState {
         self.tabs.get(id).map(|_| id).ok_or_else(|| format!("tab {} does not exist", id.0))
     }
 
-    fn agent_page_tab(&self, args: &Value) -> Result<TabId, String> {
+    pub(super) fn agent_page_tab(&self, args: &Value) -> Result<TabId, String> {
+        if ["cell", "row", "col"].iter().any(|key| args.get(*key).is_some()) {
+            let canvas = if args.get("tab_id").is_some() {
+                let id = self.agent_tab(args)?;
+                self.tabs.get(id).and_then(|tab| tab.canvas.as_ref().map(|_| id).or(tab.member_of))
+            } else { self.canvas_shown }.ok_or("there is no canvas for that cell")?;
+            let grid = self.canvas_of(canvas).ok_or("there is no canvas for that cell")?;
+            let cell = if args.get("row").is_some() || args.get("col").is_some() {
+                let row = args["row"].as_u64().filter(|row| *row < grid.rows as u64).ok_or("invalid cell row")?;
+                let col = args["col"].as_u64().filter(|col| *col < grid.cols as u64).ok_or("invalid cell column")?;
+                row as usize * grid.cols + col as usize
+            } else {
+                args["cell"].as_u64().filter(|cell| *cell < grid.capacity() as u64).ok_or("invalid cell index")? as usize
+            };
+            return grid.cells.get(cell).copied().flatten()
+                .ok_or_else(|| "that cell is empty".into());
+        }
         let id = self.agent_tab(args)?;
         let tab = self.tabs.get(id).ok_or_else(|| format!("tab {} does not exist", id.0))?;
         let Some(canvas) = tab.canvas.as_ref() else { return Ok(id) };
@@ -563,6 +580,11 @@ impl AppState {
         let args = params.get("args").cloned().unwrap_or_else(|| json!({}));
         let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
         match name.as_str() {
+            "read_cookies" | "write_cookie" | "read_storage" | "write_storage" => {
+                if let Err(error) = self.devtools_start(id, &name, &args) {
+                    self.agent_reply_err(id, error);
+                }
+            }
             "list_tabs" => {
                 let rows: Vec<Value> = self
                     .tabs

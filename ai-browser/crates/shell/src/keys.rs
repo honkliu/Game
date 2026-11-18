@@ -25,6 +25,7 @@ pub mod vk {
     pub const F3: u32 = 0x72;
     pub const F5: u32 = 0x74;
     pub const F6: u32 = 0x75;
+    pub const F12: u32 = 0x7B;
     pub const NUMPAD_PLUS: u32 = 0x6B;
     pub const NUMPAD_MINUS: u32 = 0x6D;
     pub const OEM_PLUS: u32 = 0xBB;
@@ -124,6 +125,7 @@ pub enum Shortcut {
     Bookmark,
     BookmarkAllTabs,
     ViewSource,
+    OpenDevtools,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -164,6 +166,7 @@ pub fn resolve(vk: u32, mods: Mods, focused_is_input: bool) -> Outcome {
             vk::F3 => Outcome::Consume(S::FindNext),
             vk::F5 => Outcome::Consume(S::Reload),
             vk::F6 => Outcome::Consume(S::CycleFocus),
+            vk::F12 => Outcome::Consume(S::OpenDevtools),
             vk::ESCAPE => Outcome::Consume(S::Escape),
             vk::SPACE if !focused_is_input => Outcome::Consume(S::ItemMenu),
             _ => Outcome::Pass,
@@ -261,6 +264,7 @@ pub fn macos_key(code: u16, characters: &str) -> u32 {
         96 => vk::F5,
         97 => vk::F6,
         99 => vk::F3,
+        111 => vk::F12,
         116 => vk::PRIOR,
         121 => vk::NEXT,
         123 => vk::LEFT,
@@ -296,7 +300,7 @@ pub fn resolve_macos(key: u32, command: bool, control: bool, option: bool, shift
     if option || (command && matches!(key, vk::H | vk::TAB)) {
         return Outcome::Pass;
     }
-    if !command && !matches!(key, vk::ESCAPE | vk::F3 | vk::F5 | vk::F6) {
+    if !command && !matches!(key, vk::ESCAPE | vk::F3 | vk::F5 | vk::F6 | vk::F12) {
         return Outcome::Pass;
     }
     if command && key == b'Y' as u32 {
@@ -323,6 +327,15 @@ pub fn resolve_macos(key: u32, command: bool, control: bool, option: bool, shift
 mod tests {
     use super::vk::*;
     use super::*;
+
+    #[test]
+    fn f12_opens_the_page_inspector_without_stealing_modified_keys() {
+        assert_eq!(resolve(F12, Mods::NONE, true), Outcome::Consume(Shortcut::OpenDevtools));
+        assert_eq!(resolve(F12, Mods::CTRL, false), Outcome::Pass);
+        assert_eq!(resolve(F12, Mods::SHIFT, false), Outcome::Pass);
+        assert_eq!(macos_key(111, ""), F12);
+        assert_eq!(resolve_macos(F12, false, false, false, false), Outcome::Consume(Shortcut::OpenDevtools));
+    }
 
     #[test]
     fn mac_shortcuts_preserve_editing_and_system_commands() {
