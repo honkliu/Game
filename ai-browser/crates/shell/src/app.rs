@@ -48,6 +48,7 @@ use crate::tabs::{self, Group, GroupColor, GroupId, Tab, TabId, TabSet};
 use crate::ui;
 
 mod agent_glue;
+mod discussion;
 mod api;
 mod dispatch;
 mod operations;
@@ -437,10 +438,13 @@ impl AppState {
 
     fn emit(&mut self, event: &str, mut payload: Value) {
         self.ai.ui.record(event, &mut payload);
+        let discussion_finished = event == "agent.event" && matches!(payload["type"].as_str(), Some("done" | "error"));
+        if discussion_finished { self.discussion_finished(&payload); }
         self.emit_settings(event, payload.clone());
         if let Some(server) = self.api.server.as_ref() {
             server.publish(None, event, payload);
         }
+        if discussion_finished { self.discussion_flush(); }
     }
 
     fn emit_tabs(&mut self) {
@@ -2012,12 +2016,33 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
     let event_loop = builder.build();
     let proxy = event_loop.create_proxy();
     shared.borrow_mut().proxy = Some(proxy.clone());
-    let api_proxy = proxy.clone();
-    match crate::api_server::ApiServer::start(&dir, move |request| api_proxy.send_event(AppMessage::ApiRequest(request)).map_err(|_| "the browser is closing".to_string())) {
-        Ok(server) => shared.borrow_mut().api.server = Some(server),
-        Err(error) => {
-            platform::show_fatal(&format!("Cannot start the browser MCP server.\n\n{error}"));
-            std::process::exit(5);
+    let start_server = |config| {
+        let api_proxy = proxy.clone();
+        crate::api_server::ApiServer::start_configured(&dir, config, platform::bind_mcp_listener, move |request| api_proxy.send_event(AppMessage::ApiRequest(request)).map_err(|_| "the browser is closing".to_string()))
+    };
+    let mut configured = shared.borrow().settings.river_mcp.clone();
+    configured.port = 3000;
+    if configured.token.is_empty() {
+        configured.token = crate::api_server::random_token().unwrap_or_else(|error| { platform::show_fatal(&format!("Cannot initialize RiverMCP.\n\n{error}")); std::process::exit(5); });
+    }
+    let server = match start_server(configured.clone()) {
+        Ok(server) => server,
+        Err(_) => {
+            configured.port = 0;
+            start_server(configured.clone()).unwrap_or_else(|error| { platform::show_fatal(&format!("Cannot start RiverMCP.\n\n{error}")); std::process::exit(5); })
+        }
+    };
+    configured.port = server.config().port;
+    {
+        let mut state = shared.borrow_mut();
+        state.api.server = Some(server);
+        if state.settings.river_mcp != configured {
+            let mut candidate = state.settings.clone();
+            candidate.river_mcp = configured;
+            if let Err(error) = settings::save(&state.settings_path(), &candidate) {
+                state.api.river_mcp_error = Some(format!("Could not save RiverMCP settings: {error}"));
+            }
+            state.settings = candidate;
         }
     }
     shared.borrow_mut().omnibox_worker = Some(omnibox_worker::start(dir.join("data.db"), proxy.clone()));

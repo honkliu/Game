@@ -28,6 +28,7 @@ const MAX_SESSIONS: usize = 256;
 const SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_EVENTS: usize = 1024;
 const MAX_EVENT_BYTES: usize = 4 * 1024 * 1024;
+const PROTOCOL_VERSION: &str = "2025-03-26";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApiCaller {
@@ -48,6 +49,8 @@ pub struct ApiRequest {
 pub struct ConnectionInfo {
     pub url: String,
     pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -55,6 +58,8 @@ pub struct UiConnectionInfo {
     pub url: String,
     pub token: String,
     pub cursor: u64,
+    pub client_id: String,
+    pub revision: u64,
 }
 
 impl From<UiConnectionInfo> for ConnectionInfo {
@@ -62,6 +67,7 @@ impl From<UiConnectionInfo> for ConnectionInfo {
         Self {
             url: info.url,
             token: info.token,
+            client_id: Some(info.client_id),
         }
     }
 }
@@ -75,6 +81,20 @@ struct Session {
     pending: HashSet<String>,
     changed: Arc<Notify>,
     stream_generation: u64,
+    connection: Option<Value>,
+    previous_credential: Option<(String, Instant)>,
+}
+
+impl Session {
+    fn accepts(&self, credential: &str) -> bool {
+        matches_token(&self.credential, credential)
+            || self
+                .previous_credential
+                .as_ref()
+                .is_some_and(|(previous, until)| {
+                    Instant::now() < *until && matches_token(previous, credential)
+                })
+    }
 }
 
 struct PublishedEvent {
@@ -107,25 +127,52 @@ impl Hub {
 
 struct State {
     shutdown: watch::Sender<bool>,
-    builtin: String,
-    external: String,
-    host: String,
+    config: Mutex<Config>,
     hub: Mutex<Hub>,
-    ui_credentials: Mutex<Vec<(String, Surface)>>,
+    clients: Mutex<Vec<(String, ApiCaller)>>,
     ui_calls: Semaphore,
     agent_calls: Semaphore,
     next_caller: AtomicU64,
+    revision: AtomicU64,
     dispatch: Box<dyn Fn(ApiRequest) -> Result<(), String> + Send + Sync>,
 }
 
 pub struct ApiServer {
     state: Arc<State>,
-    url: String,
     descriptor: PathBuf,
     workers: Vec<JoinHandle<()>>,
+    runtime: tokio::runtime::Handle,
+    listeners: watch::Sender<Arc<tokio::net::TcpListener>>,
+    bind: fn(u16) -> std::io::Result<TcpListener>,
 }
 
-fn random_token() -> Result<String, String> {
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    pub port: u16,
+    pub token: String,
+}
+
+impl Config {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.token.is_empty()
+            || self.token.len() > 512
+            || !self.token.bytes().all(|byte| (33..=126).contains(&byte))
+        {
+            return Err(
+                "Token must contain 1-512 printable ASCII characters without spaces".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+pub struct PreparedConfig {
+    config: Config,
+    listener: Option<Arc<tokio::net::TcpListener>>,
+}
+
+pub fn random_token() -> Result<String, String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| "shell API entropy unavailable".to_string())?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
@@ -147,14 +194,28 @@ impl ApiServer {
         data_dir: &Path,
         dispatch: impl Fn(ApiRequest) -> Result<(), String> + Send + Sync + 'static,
     ) -> Result<Self, String> {
-        let listener =
-            TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
+        Self::start_configured(
+            data_dir,
+            Config {
+                port: 0,
+                token: random_token()?,
+            },
+            |port| TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)),
+            dispatch,
+        )
+    }
+
+    pub fn start_configured(
+        data_dir: &Path,
+        mut config: Config,
+        bind: fn(u16) -> std::io::Result<TcpListener>,
+        dispatch: impl Fn(ApiRequest) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Result<Self, String> {
+        config.validate()?;
+        let listener = bind(config.port)
+            .map_err(|e| format!("Could not listen on 0.0.0.0:{}: {e}", config.port))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-        let host = listener
-            .local_addr()
-            .map_err(|e| e.to_string())?
-            .to_string();
-        let url = format!("http://{host}/mcp");
+        config.port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -163,25 +224,35 @@ impl ApiServer {
             let _guard = runtime.enter();
             tokio::net::TcpListener::from_std(listener).map_err(|e| e.to_string())?
         };
+        let (listeners, listening) = watch::channel(Arc::new(listener));
         let (shutdown, _) = watch::channel(false);
         let state = Arc::new(State {
             shutdown,
-            builtin: random_token()?,
-            external: random_token()?,
-            host,
+            config: Mutex::new(config),
             hub: Mutex::new(Hub::default()),
-            ui_credentials: Mutex::new(Vec::new()),
+            clients: Mutex::new(vec![(
+                random_token()?,
+                ApiCaller {
+                    id: 1,
+                    builtin: true,
+                    surface: None,
+                },
+            )]),
             ui_calls: Semaphore::new(MAX_CALLS_PER_KIND),
             agent_calls: Semaphore::new(MAX_CALLS_PER_KIND),
             next_caller: AtomicU64::new(2),
+            revision: AtomicU64::new(1),
             dispatch: Box::new(dispatch),
         });
         std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
         let descriptor = data_dir.join("shell-api.json");
+        let active = state.config.lock().unwrap_or_else(|e| e.into_inner());
         let info = ConnectionInfo {
-            url: url.clone(),
-            token: state.external.clone(),
+            url: format!("http://127.0.0.1:{}/mcp", active.port),
+            token: active.token.clone(),
+            client_id: None,
         };
+        drop(active);
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
         #[cfg(unix)]
@@ -196,52 +267,132 @@ impl ApiServer {
             .map_err(|e| e.to_string())?;
         let mut server = Self {
             state,
-            url,
             descriptor,
             workers: Vec::new(),
+            runtime: runtime.handle().clone(),
+            listeners,
+            bind,
         };
         let state = Arc::clone(&server.state);
         server.workers.push(
             std::thread::Builder::new()
                 .name("shell-api".into())
-                .spawn(move || runtime.block_on(accept_requests(listener, state)))
+                .spawn(move || runtime.block_on(accept_requests(listening, state)))
                 .map_err(|e| e.to_string())?,
         );
         Ok(server)
     }
 
     pub fn builtin_connection(&self) -> ConnectionInfo {
-        ConnectionInfo {
-            url: self.url.clone(),
-            token: self.state.builtin.clone(),
-        }
+        let mut connection = self.connection();
+        connection.client_id = self
+            .state
+            .clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find_map(|(id, caller)| (caller.id == 1).then(|| id.clone()));
+        connection
     }
 
     pub fn connection(&self) -> ConnectionInfo {
+        let config = self.state.config.lock().unwrap_or_else(|e| e.into_inner());
         ConnectionInfo {
-            url: self.url.clone(),
-            token: self.state.external.clone(),
+            url: format!("http://127.0.0.1:{}/mcp", config.port),
+            token: config.token.clone(),
+            client_id: None,
         }
+    }
+
+    pub fn config(&self) -> Config {
+        self.state
+            .config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn client_id(&self, caller: ApiCaller) -> Result<String, String> {
+        let mut clients = self.state.clients.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((id, _)) = clients.iter().find(|(_, bound)| *bound == caller) {
+            return Ok(id.clone());
+        }
+        let id = random_token()?;
+        clients.push((id.clone(), caller));
+        Ok(id)
+    }
+
+    pub fn prepare(&self, config: Config) -> Result<PreparedConfig, String> {
+        config.validate()?;
+        if config.port == 0 {
+            return Err("Port must be between 1 and 65535".into());
+        }
+        if self.listeners.is_closed() {
+            return Err("RiverMCP is not running".into());
+        }
+        let listener = if config.port != self.config().port {
+            let listener = (self.bind)(config.port)
+                .map_err(|e| format!("Could not listen on 0.0.0.0:{}: {e}", config.port))?;
+            listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+            let _guard = self.runtime.enter();
+            Some(Arc::new(
+                tokio::net::TcpListener::from_std(listener).map_err(|e| e.to_string())?,
+            ))
+        } else {
+            None
+        };
+        Ok(PreparedConfig { config, listener })
+    }
+
+    pub fn apply(&self, prepared: PreparedConfig) {
+        let changed = self.config() != prepared.config;
+        *self.state.config.lock().unwrap_or_else(|e| e.into_inner()) = prepared.config;
+        if let Some(listener) = prepared.listener {
+            self.listeners.send_replace(listener);
+        }
+        if !changed {
+            return;
+        }
+        let revision = self.state.revision.fetch_add(1, Ordering::AcqRel) + 1;
+        let connection = self.connection();
+        let mut hub = self.state.hub.lock().unwrap_or_else(|e| e.into_inner());
+        hub.sessions.retain(|_, session| {
+            if session.caller.builtin {
+                session.previous_credential = Some((
+                    session.credential.clone(),
+                    Instant::now() + Duration::from_secs(30),
+                ));
+                session.credential = connection.token.clone();
+                if session.caller.surface.is_some() {
+                    session.connection = Some(
+                        json!({"url":connection.url,"token":connection.token,"revision":revision}),
+                    );
+                }
+                session.changed.notify_one();
+                true
+            } else {
+                session.changed.notify_waiters();
+                false
+            }
+        });
+        drop(hub);
+        // Discovery is an output for tooling, never the source of application settings.
+        let _ = std::fs::write(
+            &self.descriptor,
+            serde_json::to_vec(&connection).unwrap_or_default(),
+        );
     }
 
     pub fn ui_connection(&self, surface: Surface) -> Result<UiConnectionInfo, String> {
         if matches!(surface, Surface::ApiCall(_)) {
             return Err("API calls are not UI surfaces".into());
         }
-        let mut credentials = self
-            .state
-            .ui_credentials
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let token =
-            if let Some((token, _)) = credentials.iter().find(|(_, bound)| *bound == surface) {
-                token.clone()
-            } else {
-                let token = random_token()?;
-                credentials.push((token.clone(), surface));
-                token
-            };
-        drop(credentials);
+        let client_id = self.client_id(ApiCaller {
+            id: 0,
+            builtin: true,
+            surface: Some(surface),
+        })?;
+        let connection = self.connection();
         // Baseline at script issuance, before native code publishes initial surface state.
         let cursor = self
             .state
@@ -250,9 +401,11 @@ impl ApiServer {
             .unwrap_or_else(|e| e.into_inner())
             .sequence;
         Ok(UiConnectionInfo {
-            url: self.url.clone(),
-            token,
+            url: connection.url,
+            token: connection.token,
             cursor,
+            client_id,
+            revision: self.state.revision.load(Ordering::Acquire),
         })
     }
 
@@ -314,7 +467,8 @@ impl Drop for ApiServer {
             .ok()
             .and_then(|v| serde_json::from_slice::<ConnectionInfo>(&v).ok())
             .is_some_and(|info| {
-                info.url == self.url && matches_token(&info.token, &self.state.external)
+                let active = self.connection();
+                info.url == active.url && matches_token(&info.token, &active.token)
             });
         if ours {
             let _ = std::fs::remove_file(&self.descriptor);
@@ -322,19 +476,24 @@ impl Drop for ApiServer {
     }
 }
 
-async fn accept_requests(listener: tokio::net::TcpListener, state: Arc<State>) {
+async fn accept_requests(
+    mut listeners: watch::Receiver<Arc<tokio::net::TcpListener>>,
+    state: Arc<State>,
+) {
     let mut shutdown = state.shutdown.subscribe();
     let mut requests = tokio::task::JoinSet::new();
     loop {
         if *shutdown.borrow() {
             break;
         }
+        let listener = Arc::clone(&listeners.borrow_and_update());
         tokio::select! {
             _ = shutdown.changed() => break,
+            _ = listeners.changed() => continue,
             Some(_) = requests.join_next(), if !requests.is_empty() => {},
             accepted = listener.accept() => {
-                let Ok((mut stream, peer)) = accepted else { break };
-                if !peer.ip().is_loopback() || requests.len() >= MAX_CONNECTIONS { continue; }
+                let Ok((mut stream, _peer)) = accepted else { break };
+                if requests.len() >= MAX_CONNECTIONS { continue; }
                 let state = Arc::clone(&state);
                 requests.spawn(async move {
                     let _ = stream.set_nodelay(true);
@@ -499,17 +658,19 @@ async fn serve_request(
         .get("host")
         .map(String::as_str)
         .unwrap_or("");
-    let localhost = state.host.replacen("127.0.0.1", "localhost", 1);
-    if host != state.host && host != localhost {
+    let local = match stream.local_addr() {
+        Ok(local) => local,
+        Err(_) => return,
+    };
+    let loopback = stream.peer_addr().is_ok_and(|peer| peer.ip().is_loopback());
+    let valid_host =
+        host == local.to_string() || (loopback && host == format!("localhost:{}", local.port()));
+    if !valid_host {
         return respond_cors(stream, 403, None, None, "", keep_alive).await;
     }
     let origin = request.headers.get("origin").map(String::as_str);
     let asset_origin = origin.is_some_and(approved_origin);
-    if origin.is_some_and(|origin| {
-        !asset_origin
-            && origin != format!("http://{}", state.host)
-            && origin != format!("http://{localhost}")
-    }) {
+    if origin.is_some_and(|origin| !asset_origin && origin != format!("http://{host}")) {
         return respond_cors(stream, 403, None, None, "", keep_alive).await;
     }
     let cors = origin
@@ -553,17 +714,23 @@ async fn serve_request(
         .get("authorization")
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    let surface = state
-        .ui_credentials
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .find_map(|(token, surface)| matches_token(credential, token).then_some(*surface));
-    let builtin = matches_token(credential, &state.builtin);
-    if !builtin && surface.is_none() && !matches_token(credential, &state.external) {
+    let authenticated = {
+        let config = state.config.lock().unwrap_or_else(|e| e.into_inner());
+        matches_token(credential, &config.token)
+    } || (loopback
+        && request.headers.get("mcp-session-id").is_some_and(|id| {
+            state
+                .hub
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .sessions
+                .get(id)
+                .is_some_and(|session| session.caller.builtin && session.accepts(credential))
+        }));
+    if !authenticated {
         return respond_cors(stream, 401, None, None, "", keep_alive).await;
     }
-    if asset_origin && surface.is_none() {
+    if asset_origin && !loopback {
         return respond_cors(stream, 403, None, None, "", keep_alive).await;
     }
     macro_rules! reply {
@@ -574,19 +741,19 @@ async fn serve_request(
     if !matches!(request.method.as_str(), "POST" | "DELETE" | "GET") {
         return reply!(405, None, None);
     }
-    if let Some(protocol) = request.headers.get("mcp-protocol-version") {
-        if protocol != "2025-03-26" {
-            return reply!(400, None, None);
-        }
+    let unsupported_protocol = request
+        .headers
+        .get("mcp-protocol-version")
+        .is_some_and(|protocol| protocol != PROTOCOL_VERSION);
+    if request.method != "POST" && unsupported_protocol {
+        return reply!(400, None, None);
     }
     if request.method == "DELETE" {
         let removed = request.headers.get("mcp-session-id").is_some_and(|id| {
             let mut hub = state.hub.lock().unwrap_or_else(|e| e.into_inner());
-            if hub
-                .sessions
-                .get(id)
-                .is_some_and(|s| matches_token(&s.credential, credential))
-            {
+            if hub.sessions.get(id).is_some_and(|s| {
+                s.accepts(credential) && (!asset_origin || s.caller.surface.is_some())
+            }) {
                 if let Some(session) = hub.sessions.remove(id) {
                     session.changed.notify_waiters();
                 }
@@ -614,10 +781,13 @@ async fn serve_request(
             let session = hub
                 .sessions
                 .get_mut(id)
-                .filter(|s| matches_token(&s.credential, credential))
+                .filter(|s| s.accepts(credential))
                 .ok_or(404u16)?;
             if !session.initialized {
                 return Err(400);
+            }
+            if asset_origin && session.caller.surface.is_none() {
+                return Err(403);
             }
             session.touched = Instant::now();
             session.stream_generation += 1;
@@ -660,6 +830,9 @@ async fn serve_request(
         return reply!(400, None, None);
     }
     let initializing = messages.len() == 1 && messages[0]["method"] == "initialize";
+    if !initializing && unsupported_protocol {
+        return reply!(400, None, None);
+    }
     let mut session_header = None;
     let caller = if initializing {
         if request.headers.contains_key("mcp-session-id") {
@@ -671,14 +844,14 @@ async fn serve_request(
         if messages[0]
             .pointer("/params/protocolVersion")
             .and_then(Value::as_str)
-            != Some("2025-03-26")
+            .is_none_or(|version| version.is_empty())
         {
             return reply!(
                 200,
                 Some(&rpc_error(
                     &messages[0]["id"],
                     -32602,
-                    "Unsupported protocol version"
+                    "protocolVersion must be a non-empty string"
                 )),
                 None
             );
@@ -687,17 +860,31 @@ async fn serve_request(
             Ok(id) => id,
             Err(_) => return reply!(503, None, None),
         };
-        let caller = ApiCaller {
-            id: if surface.is_some() {
-                0
-            } else if builtin {
-                1
-            } else {
-                state.next_caller.fetch_add(1, Ordering::Relaxed)
-            },
-            builtin: builtin || surface.is_some(),
-            surface,
+        let native_client = messages[0]
+            .pointer("/params/_meta/river.client_id")
+            .and_then(Value::as_str);
+        let native_caller = if loopback {
+            state
+                .clients
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .find_map(|(id, caller)| {
+                    native_client
+                        .filter(|client| matches_token(client, id))
+                        .map(|_| *caller)
+                })
+        } else {
+            None
         };
+        if asset_origin && !native_caller.is_some_and(|caller| caller.surface.is_some()) {
+            return reply!(403, None, None);
+        }
+        let caller = native_caller.unwrap_or_else(|| ApiCaller {
+            id: state.next_caller.fetch_add(1, Ordering::Relaxed),
+            builtin: false,
+            surface: None,
+        });
         let inserted = {
             let mut hub = state.hub.lock().unwrap_or_else(|e| e.into_inner());
             hub.prune_sessions();
@@ -715,6 +902,8 @@ async fn serve_request(
                         pending: HashSet::new(),
                         changed: Arc::new(Notify::new()),
                         stream_generation: 0,
+                        connection: None,
+                        previous_credential: None,
                     },
                 );
                 true
@@ -735,8 +924,11 @@ async fn serve_request(
             let session = hub
                 .sessions
                 .get_mut(id)
-                .filter(|s| matches_token(&s.credential, credential))
+                .filter(|s| s.accepts(credential))
                 .ok_or(404u16)?;
+            if asset_origin && session.caller.surface.is_none() {
+                return Err(403);
+            }
             if !session.initialized
                 && !messages
                     .iter()
@@ -777,7 +969,7 @@ async fn serve_request(
         }
         let result = match method {
             "initialize" if initializing => Ok(
-                json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{"listChanged":false},"resources":{"subscribe":true,"listChanged":false}},"serverInfo":{"name":"ai-browser-shell","version":env!("CARGO_PKG_VERSION")}}),
+                json!({"protocolVersion":PROTOCOL_VERSION,"capabilities":{"tools":{"listChanged":false},"resources":{"subscribe":true,"listChanged":false}},"serverInfo":{"name":"ai-browser-shell","version":env!("CARGO_PKG_VERSION")},"instructions":browser::CLIENT_INSTRUCTIONS}),
             ),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(
@@ -907,7 +1099,7 @@ async fn read_resource(
             .map(|event| json!({"sequence":event.sequence,"event":event.event,"payload":event.payload})).collect();
         json!({"sequence":hub.sequence,"oldest_sequence":oldest,"reset":after.is_some_and(|after| after.saturating_add(1) < oldest),"events":events})
     } else if uri == "shell://interface" {
-        json!({"tools":browser::definitions(),"resources":browser::resources(),"resourceTemplates":browser::resource_templates(),"events":browser::events()})
+        json!({"tools":browser::definitions(),"resources":browser::resources(),"resourceTemplates":browser::resource_templates(),"events":browser::events(),"instructions":browser::CLIENT_INSTRUCTIONS})
     } else {
         if !browser::resources()
             .iter()
@@ -937,7 +1129,7 @@ async fn stream_events(
     loop {
         // Register before examining pending updates so a concurrent publication cannot be lost.
         let notified = changed.notified();
-        let pending = {
+        let (pending, connection) = {
             let mut hub = state.hub.lock().unwrap_or_else(|e| e.into_inner());
             let Some(session) = hub.sessions.get_mut(id) else {
                 return;
@@ -948,8 +1140,19 @@ async fn stream_events(
             session.touched = Instant::now();
             let mut pending: Vec<_> = session.pending.drain().collect();
             pending.sort();
-            pending
+            (pending, session.connection.take())
         };
+        if let Some(connection) = connection {
+            let notification = json!({"jsonrpc":"2.0","method":"notifications/river/connection_changed","params":connection});
+            if !write_stream(
+                stream,
+                format!("event: message\ndata: {notification}\n\n").as_bytes(),
+            )
+            .await
+            {
+                return;
+            }
+        }
         if !pending.is_empty() {
             let mut buffer = String::new();
             for uri in pending {
@@ -1157,7 +1360,7 @@ mod tests {
             info,
             "POST",
             None,
-            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}),
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","_meta":{"river.client_id":info.client_id}}}),
             "",
         );
         assert_eq!(response.status, 200);
@@ -1241,6 +1444,188 @@ mod tests {
                 "stream did not close after explicit teardown"
             );
         }
+    }
+
+    #[test]
+    fn initialization_offers_supported_version_and_validates_subsequent_headers() {
+        let fixture = Fixture::new();
+        let info = fixture.server().connection();
+        for requested in [PROTOCOL_VERSION, "2025-06-18", "2025-11-25", "2099-01-01"] {
+            for extra in [
+                String::new(),
+                format!("MCP-Protocol-Version: {requested}\r\n"),
+            ] {
+                let response = send(
+                    &info,
+                    "POST",
+                    None,
+                    json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":requested}}),
+                    &extra,
+                );
+                assert_eq!(response.status, 200);
+                assert_eq!(response.body["result"]["protocolVersion"], PROTOCOL_VERSION);
+                let session = response.headers.get("mcp-session-id").unwrap();
+                let protocol = format!("MCP-Protocol-Version: {PROTOCOL_VERSION}\r\n");
+                let ready = send(
+                    &info,
+                    "POST",
+                    Some(session),
+                    json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                    &protocol,
+                );
+                assert_eq!(ready.status, 202);
+                let tools = send(
+                    &info,
+                    "POST",
+                    Some(session),
+                    json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+                    &protocol,
+                );
+                assert_eq!(tools.status, 200);
+                assert!(tools.body["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["name"] == "shell_tab"));
+                for method in ["POST", "GET", "DELETE"] {
+                    let invalid = send(
+                        &info,
+                        method,
+                        Some(session),
+                        json!({"jsonrpc":"2.0","id":3,"method":"ping"}),
+                        "MCP-Protocol-Version: unsupported\r\n",
+                    );
+                    assert_eq!(invalid.status, 400);
+                }
+                assert_eq!(
+                    send(&info, "DELETE", Some(session), Value::Null, &protocol).status,
+                    200
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn initialization_rejects_missing_or_invalid_version_without_creating_a_session() {
+        let fixture = Fixture::new();
+        let server = fixture.server();
+        let info = server.connection();
+        for params in [
+            json!({}),
+            json!({"protocolVersion":null}),
+            json!({"protocolVersion":42}),
+            json!({"protocolVersion":""}),
+        ] {
+            let response = send(
+                &info,
+                "POST",
+                None,
+                json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":params}),
+                "",
+            );
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body["error"]["code"], -32602);
+            assert!(!response.headers.contains_key("mcp-session-id"));
+            assert!(server.state.hub.lock().unwrap().sessions.is_empty());
+        }
+    }
+
+    #[test]
+    fn listener_reconfiguration_is_transactional_and_migrates_native_sessions_only() {
+        let fixture = Fixture::new();
+        let server = fixture.server();
+        assert!(server
+            .listeners
+            .borrow()
+            .local_addr()
+            .unwrap()
+            .ip()
+            .is_unspecified());
+        let old = server.config();
+        let ui: ConnectionInfo = server.ui_connection(Surface::Shell).unwrap().into();
+        let ui_session = initialize(&ui);
+        subscribe_resource(&ui, &ui_session, "shell://events");
+        let mut updates = stream(&ui, &ui_session);
+        notification(&mut updates);
+        let external = server.connection();
+        let external_session = initialize(&external);
+        let occupied = TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        assert!(server
+            .prepare(Config {
+                port: occupied.local_addr().unwrap().port(),
+                token: "next-token".into()
+            })
+            .is_err());
+        assert_eq!(server.config(), old);
+        assert_eq!(rpc(&ui, &ui_session, "ping", json!({})).status, 200);
+        let free = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let prepared = server
+            .prepare(Config {
+                port,
+                token: "next-token".into(),
+            })
+            .unwrap();
+        assert_eq!(server.config(), old);
+        server.apply(prepared);
+        let migration = notification(&mut updates);
+        assert_eq!(
+            migration["method"],
+            "notifications/river/connection_changed"
+        );
+        assert_eq!(migration["params"]["token"], "next-token");
+        assert!(migration["params"]["url"]
+            .as_str()
+            .unwrap()
+            .contains(&format!(":{port}/mcp")));
+        let current = server.connection();
+        assert_eq!(current.token, server.builtin_connection().token);
+        let mut revoked = current.clone();
+        revoked.token = old.token;
+        assert_eq!(
+            rpc(&revoked, &external_session, "ping", json!({})).status,
+            401
+        );
+        assert_eq!(
+            rpc(&current, &external_session, "ping", json!({})).status,
+            404
+        );
+        let next_ui: ConnectionInfo = server.ui_connection(Surface::Shell).unwrap().into();
+        assert_eq!(next_ui.client_id, ui.client_id);
+        let reconnected = initialize(&next_ui);
+        assert_eq!(
+            resource(&next_ui, &reconnected, "shell://context")["surface"],
+            "shell"
+        );
+    }
+
+    #[test]
+    fn token_changes_on_the_same_port_revoke_external_sessions_without_changing_ui_identity() {
+        let fixture = Fixture::new();
+        let server = fixture.server();
+        let original = server.connection();
+        let session = initialize(&original);
+        let before = server.ui_connection(Surface::Sidebar).unwrap();
+        let prepared = server
+            .prepare(Config {
+                port: server.config().port,
+                token: "replacement-token".into(),
+            })
+            .unwrap();
+        assert!(prepared.listener.is_none());
+        server.apply(prepared);
+        assert_eq!(server.connection().url, original.url);
+        assert_eq!(rpc(&original, &session, "ping", json!({})).status, 401);
+        assert_eq!(
+            server.ui_connection(Surface::Sidebar).unwrap().client_id,
+            before.client_id
+        );
+        let session = initialize(&server.connection());
+        assert_eq!(
+            rpc(&server.connection(), &session, "ping", json!({})).status,
+            200
+        );
     }
 
     #[test]
@@ -1563,15 +1948,16 @@ mod tests {
         assert_eq!(context["caller"], 0);
         assert_eq!(context["builtin"], true);
         assert_eq!(context["surface"], "shell");
+        // A shared bearer authorizes access; only native-issued identities establish UI roles.
         assert_eq!(
-            rpc(&external, &shell_session, "ping", json!({})).status,
-            404
+            resource(&external, &external_session, "shell://context")["builtin"],
+            false
         );
-        assert_eq!(rpc(&sidebar, &shell_session, "ping", json!({})).status, 404);
+        assert_ne!(shell.client_id, sidebar.client_id);
         let descriptor: ConnectionInfo =
             serde_json::from_slice(&std::fs::read(&server.descriptor).unwrap()).unwrap();
         assert!(matches_token(&descriptor.token, &external.token));
-        assert!(!matches_token(&descriptor.token, &shell.token));
+        assert!(matches_token(&descriptor.token, &shell.token));
     }
 
     #[test]
@@ -1760,7 +2146,7 @@ mod tests {
                 "true"
             );
             assert!(preflight.headers["access-control-allow-headers"].contains("Mcp-Session-Id"));
-            let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}});
+            let mut initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}});
             for denied in [&external, &builtin] {
                 assert_eq!(
                     send(
@@ -1774,6 +2160,7 @@ mod tests {
                     403
                 );
             }
+            initialize["params"]["_meta"] = json!({"river.client_id":ui.client_id});
             let response = send(
                 &ui,
                 "POST",

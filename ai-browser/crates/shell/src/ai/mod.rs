@@ -31,6 +31,7 @@
 
 pub mod answer;
 pub mod context;
+pub mod discussion;
 pub mod identity;
 pub mod link;
 pub mod mode;

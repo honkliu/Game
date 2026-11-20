@@ -260,6 +260,7 @@ export interface AgentTurn {
   rounds: number;
   error?: string;
   echo?: ContextEcho;
+  discussion?: { id: string; turn_id: number; participant: string };
   /** Pages the agent offered in manual navigation mode, to be opened by a click. */
   links?: { id: string; url: string }[];
   /** Restored from a saved conversation: only tool summaries survive. */
@@ -287,6 +288,7 @@ export interface AskTurn {
 export type Turn = AgentTurn | AskTurn;
 
 export type AgentEvent = { state_seq?: number } & (
+  | { type: 'queued'; run_id: number; turn: Omit<AgentTurn, 'id'> }
   | { type: 'start'; run_id: number; model?: string }
   | { type: 'round'; run_id: number; n: number }
   | { type: 'delta'; run_id: number; text: string }

@@ -418,8 +418,12 @@ No code. Three surfaces: (a) host → UI events, (b) UI → host commands, (c) p
 
 - Shell, sidebar, overlay and Settings use the same authenticated MCP Streamable HTTP service as browser-control agents. The shared UI client exposes `window.__shell.invoke(name, arguments)` and `window.__shell.on(event, listener)`; neither command IPC nor host-injected JavaScript delivers public commands or events.
 - MCP tools execute commands; resources expose current state; `resources/subscribe` and authenticated `GET /mcp` deliver standard `notifications/resources/updated`. A notification identifies a changed resource, not its contents: clients then use `resources/read`.
+- The implemented handshake protocol is `2025-03-26`. Initialization counter-offers that version when clients request a different revision instead of rejecting their version offer; subsequent HTTP requests must use the negotiated version. A version header sent with initialization does not prevent negotiation. This does not claim support for later revisions' additional features.
+- Initialization and `shell://interface` carry shared client usage instructions. For an explanation or translation in an external client's own chat, read `shell_agent` with `operation: context_get`, use `page.selection`, and answer there. `shell_ai` ask/selection_run and `shell_agent` run intentionally start work in River's built-in AI UI and return asynchronous acknowledgments; they are not synchronous question-answering tools for external clients.
+- For an intentional discussion between an external assistant and River, `shell_agent` discuss starts a visible sidebar turn and waits for its answer. The external assistant orchestrates follow-ups; River does not autonomously call back into VS Code.
 - **One-way state**: the host owns `Tab`, `Group`, `Download`, `History`, `Settings`. The UI never mutates its own copies; it sends a command and waits for the resulting `state.*` event. Optimistic rendering is allowed **only** for hover/focus/selection, never for tab order or existence.
-- The service starts with the browser, even without an AI worker. The profile's `shell-api.json` exports the external endpoint and credential. Embedded surfaces receive separate, unexported, surface-scoped credentials only in trusted bundled top-level documents. Native page probes and the AI utility's private execution protocol remain implementation details, not parallel public browser APIs.
+- The service starts with the browser, even without an AI worker, listening on `0.0.0.0`. Each launch tries port 3000 first, then an OS-assigned free port if unavailable; it does not read the previous port from configuration. The profile's `shell-api.json` is generated discovery output, not authoritative configuration. UI, built-in AI and external agents share one port and bearer token. Native-issued, unexported client identities preserve internal caller roles and surface permissions. Native page probes and the AI utility's private execution protocol remain implementation details, not parallel public browser APIs.
+- **Settings > RiverMCP** edits the port and shared token. Apply validates and reserves the listener, atomically saves settings, then switches the live listener; errors leave the old configuration working and appear beside Apply. The token persists across launches, while the applied port lasts for the current run. Authenticated `notifications/river/connection_changed` notifications migrate native UI clients directly; private utility control refreshes the built-in agent connection, including subsequent tools in an ongoing run. Native sessions get a short, session-bound credential grace period; external sessions are revoked and must reconnect with the new endpoint/token. There is no permanent second internal listener. Tokens are omitted from public resource snapshots and the event journal.
 
 ### 6.2 Commands (UI → host)
 
@@ -437,9 +441,28 @@ The authoritative tool names, descriptions, operations and schemas live in `ai_p
 | `shell_ui` | `{ operation: "omnibox_focus" }` | scoped UI event |
 | `shell_window` | `{ operation: "state_get" }` | window state / `state.window` |
 | `shell_agent` | `{ operation: "context_get" }` | current context / `context.changed` |
+| `shell_agent` | `{ operation: "discuss", request_id, message, discussion_id? }` | sidebar turn and waitable result with discussion/turn/run IDs |
 | `shell_diagnostics` | `{ operation: "self_test" }` | diagnostics result |
 
 `Ctrl+W`-style shortcuts that originate in the **page** webview are intercepted host-side (accelerator) and delivered to the UI as `shell.shortcut { name }` before the page sees them, except those explicitly allowed to the page (see `data-intercept` rule §3.5).
+
+### 6.2.1 Managed River discussions
+
+Start a discussion with `shell_agent` arguments such as:
+
+```json
+{"operation":"discuss","request_id":"explain-1","participant":"VSCode","message":"Explain the selected text and identify uncertain claims."}
+```
+
+River opens its sidebar, labels the question as `<participant> asks` and the response as `River replies`, and streams its normal agent output there. Discussion turn numbers are separate from River's internal model-round count. Completion returns the same final text recorded in the native sidebar transcript as `answer`, together with `discussion_id`, `turn_id`, `run_id`, `status`, and a source-context summary. Only `completed` results have an answer; `failed` and `stopped` results have an explicit error instead of presenting partial text as a completed answer.
+
+Shared client instructions and the tool description ask the orchestrator to show each numbered question in its own chat, then a clearly attributed summary of River's completed reply before the next question, followed by its own separately labelled final conclusion. Returning intermediate tool results does not itself render assistant chat messages; actual presentation remains under the external client's control.
+
+`wait_ms` defaults to 25000 and accepts 0 through 45000. A wait deadline returns `running` or `stopping` with the IDs and `next_operation: "discussion_wait"`; it does not stop or restart River. Continue with `{"operation":"discussion_wait","discussion_id":"<returned ID>","turn_id":1}` until terminal. Multiple waiters receive the same result. `discussion_stop` with the same IDs cancels that turn only; the sidebar Stop control also works.
+
+After completion, use `discuss` with the returned `discussion_id`, a **new** `request_id`, and the next question. River receives the discussion's user/assistant history, independently of other sidebar conversations. The first turn captures the focused page, selection, and available page content; follow-ups keep that snapshot even if focus or selection changes. Set `refresh_context: true` on a new turn to capture current context instead. Earlier turns retain their own source summaries. Only one River task runs at a time.
+
+Reuse a request ID only to retry the same turn after a transport interruption, and retain the MCP session ID. Retrying a retained request returns its existing run/result rather than starting duplicate work. Discussion ownership belongs to the originating MCP session: another session cannot read or stop it, and a new initialization or browser restart cannot resume its handles. State is in memory, limited to 32 discussions, 40 turns per discussion, 32 KiB messages, 256 KiB captured context, and an approximately 8 MiB retention budget. Oversized snapshots fail explicitly rather than silently discarding the pinned article. Finished discussions may be evicted to make room; request deduplication lasts only while that discussion is retained.
 
 ### 6.3 Events (host → UI)
 
@@ -465,7 +488,7 @@ One `session.json` (sub-second writes debounced 500 ms, atomic replace) + one `h
 
 **Startup path:** read settings → open main window → create shell webview (paint header + rail skeleton from `session.json` before any tab webview is created) → create active tab webview. This ordering is what makes W1 reachable.
 
-**Security:** trusted UI loads only bundled `asset://` content (mapped to `https://asset.shell` on Windows). Ordinary page WebViews receive no Shell MCP credential or client. Settings alone gets a restricted, document-bound UI credential. Browser-origin requests require a trusted UI credential and an exact approved origin; external agents use their separate bearer credential without browser CORS authority. Tokens never travel in URLs or model context.
+**Security:** trusted UI loads only bundled `asset://` content (mapped to `https://asset.shell` on Windows). Ordinary page WebViews receive no Shell MCP credential or client. Native-issued internal client identities are injected only into trusted bundled documents or passed privately to the AI utility. Settings sessions have a restricted, document-bound role. Browser-origin requests require a native UI session and an exact approved origin; the shared bearer token alone grants neither internal roles nor browser CORS authority. Tokens never travel in URLs or model context.
 
 ---
 

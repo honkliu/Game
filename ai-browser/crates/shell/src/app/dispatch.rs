@@ -55,6 +55,9 @@ impl AppState {
             )),
             ("shell_ai", "history_clear") => self.wv_ai_history_clear(),
             ("shell_agent", "run") => self.wv_agent_run(p),
+            ("shell_agent", "discuss") => self.wv_agent_discuss(p),
+            ("shell_agent", "discussion_wait") => self.wv_agent_discussion_wait(p),
+            ("shell_agent", "discussion_stop") => self.wv_agent_discussion_stop(p),
             ("shell_agent", "stop") => self.wv_agent_stop(),
             ("shell_agent", "approval_resolve") => self.wv_agent_approval_resolve(p),
             ("shell_agent", "state_get" | "config_set" | "context_preview")
@@ -322,6 +325,8 @@ impl AppState {
                 self.wv_download(operation, p)
             }
             ("shell_download", "list_clear") => self.wv_download_list_clear(),
+            ("shell_settings", "river_mcp_get") => self.wv_river_mcp_get().map(Some),
+            ("shell_settings", "river_mcp_apply") => self.wv_river_mcp_apply(&p["value"]).map(Some),
             ("shell_settings", "set") => {
                 let key = p.get("key").and_then(Value::as_str).ok_or("missing key")?;
                 let value = p.get("value").cloned().unwrap_or(Value::Null);

@@ -31,6 +31,7 @@ pub(super) struct ClientState {
 #[derive(Default)]
 pub(super) struct State {
     pub server: Option<ApiServer>,
+    pub river_mcp_error: Option<String>,
     pub current: u64,
     pub next_id: u64,
     pub pending: HashMap<u64, PendingCall>,
@@ -195,6 +196,7 @@ impl AppState {
     }
 
     pub(super) fn wv_api_prune(&mut self) {
+        self.discussion_flush();
         let expired: Vec<u64> = self
             .api
             .pending

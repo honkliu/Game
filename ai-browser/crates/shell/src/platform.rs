@@ -25,6 +25,39 @@ pub const ENGINE_NAME: &str = if cfg!(target_os = "macos") {
     "WebView2"
 };
 
+pub fn bind_mcp_listener(port: u16) -> std::io::Result<std::net::TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows::Win32::Networking::WinSock::{
+            setsockopt, WSAGetLastError, SOCKET, SOCKET_ERROR, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+        };
+        let enabled = 1i32.to_ne_bytes();
+        // Wildcard binds must not share a port owned on a specific interface.
+        if unsafe {
+            setsockopt(
+                SOCKET(socket.as_raw_socket() as usize),
+                SOL_SOCKET,
+                SO_EXCLUSIVEADDRUSE,
+                Some(&enabled),
+            )
+        } == SOCKET_ERROR
+        {
+            return Err(std::io::Error::from_raw_os_error(
+                unsafe { WSAGetLastError() }.0,
+            ));
+        }
+    }
+    socket.bind(&std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, port).into())?;
+    socket.listen(128)?;
+    Ok(socket.into())
+}
+
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("AI_BROWSER_DATA_DIR") {
         return PathBuf::from(dir);
@@ -112,10 +145,19 @@ mod tests {
     fn page_asset_navigation_preserves_state_and_external_urls() {
         let url = "asset://shell/pages/settings.html#state=abc-_";
         #[cfg(windows)]
-        assert_eq!(super::page_asset_url(url), "https://asset.shell/pages/settings.html#state=abc-_");
+        assert_eq!(
+            super::page_asset_url(url),
+            "https://asset.shell/pages/settings.html#state=abc-_"
+        );
         #[cfg(not(windows))]
         assert_eq!(super::page_asset_url(url), url);
-        assert_eq!(super::page_asset_url("https://example.com/asset://shell/"), "https://example.com/asset://shell/");
-        assert_eq!(super::page_asset_url("asset://untrusted/page"), "asset://untrusted/page");
+        assert_eq!(
+            super::page_asset_url("https://example.com/asset://shell/"),
+            "https://example.com/asset://shell/"
+        );
+        assert_eq!(
+            super::page_asset_url("asset://untrusted/page"),
+            "asset://untrusted/page"
+        );
     }
 }

@@ -2,7 +2,7 @@ import { createServer, type ServerResponse } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
 import { bridge, createAgentCalls, createMcpClient } from '../src/mcp';
 
-async function fixture() {
+async function fixture(token = 'fixture-token') {
   let sequence = 0;
   let sessions = 0;
   let reset = false;
@@ -33,7 +33,7 @@ async function fixture() {
     for await (const chunk of req) raw += chunk;
     const message = JSON.parse(raw);
     calls.push(message);
-    expect(req.headers.authorization).toBe('Bearer fixture-token');
+    expect(req.headers.authorization).toBe(`Bearer ${token}`);
     if (message.method === 'initialize' && rejectInitialization) {
       rejectInitialization = false;
       res.writeHead(503).end();
@@ -76,7 +76,10 @@ async function fixture() {
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('test server unavailable');
   return {
-    connection: { url: `http://127.0.0.1:${address.port}/mcp`, token: 'fixture-token' }, calls,
+    connection: { url: `http://127.0.0.1:${address.port}/mcp`, token }, calls,
+    migrate(connection: object) {
+      for (const stream of streams) stream.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/river/connection_changed', params: connection })}\n\n`);
+    },
     get sessions() { return sessions; },
     set tool(next: typeof tool) { tool = next; },
     failInitialization() { rejectInitialization = true; },
@@ -100,6 +103,59 @@ async function fixture() {
 }
 
 describe('shared UI MCP client', () => {
+  it('migrates a native UI connection without replaying a write already in flight', async () => {
+    const first = await fixture();
+    const second = await fixture('replacement-token');
+    const changed = vi.fn();
+    const connected = vi.fn();
+    const client = createMcpClient({ ...first.connection, client_id: 'native-view' }, { onConnection: changed });
+    client.on('mcp.connected', connected);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    first.tool = async () => { await gate; return { saved: true }; };
+    try {
+      await client.ready;
+      const pending = client.invoke('shell_settings', { operation: 'set', key: 'theme', value: 'dark' });
+      await vi.waitFor(() => expect(first.calls.filter(call => call.method === 'tools/call')).toHaveLength(1));
+      first.migrate({ ...second.connection, revision: 2 });
+      await vi.waitFor(() => expect(connected).toHaveBeenCalledTimes(2));
+      expect(changed).toHaveBeenCalledWith({ ...second.connection, client_id: 'native-view', revision: 2 });
+      release();
+      await expect(pending).resolves.toEqual({ saved: true });
+      expect(second.calls.filter(call => call.method === 'tools/call')).toHaveLength(0);
+      expect(second.calls.find(call => call.method === 'initialize')?.params._meta).toEqual({ 'river.client_id': 'native-view' });
+    } finally { release(); client.close(); await first.close(); await second.close(); }
+  });
+
+  it('restores a migrated endpoint on reload even when the native bootstrap predates Apply', async () => {
+    const first = await fixture();
+    const second = await fixture('replacement-token');
+    const previous = window.__shell;
+    const bootstrap = { ...first.connection, client_id: 'native-view', revision: 1, cursor: 0 };
+    const key = `shell.mcp.cursor:${window.location.pathname}`;
+    let client;
+    let replacement;
+    try {
+      window.__shell = undefined;
+      window.__shellMcpBootstrap = bootstrap;
+      client = bridge();
+      await client.ready;
+      first.migrate({ ...second.connection, revision: 2 });
+      await vi.waitFor(() => expect(second.sessions).toBe(1));
+      await client.ready;
+      client.close();
+      window.__shell = undefined;
+      window.__shellMcpBootstrap = bootstrap;
+      replacement = bridge();
+      await replacement.ready;
+      expect(first.sessions).toBe(1);
+      expect(second.sessions).toBe(2);
+    } finally {
+      client?.close(); replacement?.close(); window.__shell = previous;
+      window.sessionStorage.removeItem(key); await first.close(); await second.close();
+    }
+  });
+
   it('initializes, subscribes and returns correlated management results directly', async () => {
     const server = await fixture();
     const client = createMcpClient(server.connection);

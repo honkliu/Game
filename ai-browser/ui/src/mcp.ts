@@ -22,6 +22,8 @@ export interface ConnectionInfo {
   url: string;
   token: string;
   cursor?: number;
+  client_id?: string;
+  revision?: number;
 }
 
 export interface ShellClient {
@@ -38,7 +40,7 @@ interface EventBatch {
   events: { sequence: number; event: string; payload: Payload }[];
 }
 
-export function createMcpClient(connection?: ConnectionInfo, options: { fetch?: typeof fetch; timeoutMs?: number; reconnectMs?: number; onCursor?: (sequence: number) => void } = {}): ShellClient {
+export function createMcpClient(connection?: ConnectionInfo, options: { fetch?: typeof fetch; timeoutMs?: number; reconnectMs?: number; onCursor?: (sequence: number) => void; onConnection?: (connection: ConnectionInfo) => void } = {}): ShellClient {
   const fetcher: typeof fetch = options.fetch ?? ((...args) => globalThis.fetch(...args));
   const timeoutMs = options.timeoutMs ?? 150_000;
   let next = 0;
@@ -166,6 +168,16 @@ export function createMcpClient(connection?: ConnectionInfo, options: { fetch?: 
           const data = frame.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).replace(/^ /, '')).join('\n');
           if (!data) continue;
           const message = JSON.parse(data);
+          if (message.method === 'notifications/river/connection_changed' && connection?.client_id && typeof message.params?.url === 'string' && typeof message.params?.token === 'string') {
+            connection = { ...connection, ...message.params };
+            options.onConnection?.(connection!);
+            ++generation;
+            activeDrain = { dirty: false };
+            startup = undefined;
+            controller.abort();
+            void ensure().catch(() => reconnect());
+            return;
+          }
           if (message.method === 'notifications/resources/updated' && message.params?.uri === 'shell://events') {
             void drain().catch(() => { if (current === generation) controller.abort(); });
           }
@@ -186,7 +198,7 @@ export function createMcpClient(connection?: ConnectionInfo, options: { fetch?: 
     activeDrain = { dirty: false };
     if (session) deleteSession(session);
     session = null;
-    await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'ai-browser-ui', version: '1' } });
+    await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'ai-browser-ui', version: '1' }, ...(connection?.client_id ? { _meta: { 'river.client_id': connection.client_id } } : {}) });
     await rpc('notifications/initialized', {}, true);
     if (cursor === undefined) cursor = (await read<EventBatch>('shell://events')).sequence;
     await rpc('resources/subscribe', { uri: 'shell://events' });
@@ -274,14 +286,20 @@ export function bridge(): ShellClient {
     const key = `shell.mcp.cursor:${window.location.pathname}`;
     try {
       const saved = JSON.parse(window.sessionStorage.getItem(key) ?? 'null');
+      if (connection?.client_id && saved?.connection?.client_id === connection.client_id && (saved.connection.revision ?? 0) >= (connection.revision ?? 0)) {
+        connection = { ...connection, ...saved.connection };
+      }
       if (connection && saved?.url === connection.url && Number.isSafeInteger(saved.cursor) && saved.cursor >= (connection.cursor ?? 0)) {
         connection = { ...connection, cursor: saved.cursor };
       }
     } catch { /* Storage may be unavailable in an embedded document. */ }
-    const client = createMcpClient(connection, { onCursor(cursor) {
-      try { window.sessionStorage.setItem(key, JSON.stringify({ url: connection?.url, cursor })); }
+    let checkpoint = connection?.cursor ?? 0;
+    const save = () => {
+      try { window.sessionStorage.setItem(key, JSON.stringify({ url: connection?.url, cursor: checkpoint, ...(connection?.client_id ? { connection } : {}) })); }
       catch { /* Cursor recovery still works for the live connection. */ }
-    } });
+    };
+    const client = createMcpClient(connection, { onCursor(cursor) { checkpoint = cursor; save(); },
+      onConnection(next) { connection = next; save(); } });
     window.__shell = client;
     window.addEventListener('pagehide', () => client.close(), { once: true });
   }

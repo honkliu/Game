@@ -155,10 +155,13 @@ fn browser_context(store: &Store, params: &Value) -> String {
     if !template.contains("{{page_content}}") {
         template.push_str("\n{{page_content}}");
     }
-    render(
+    let rendered = render(
         &template,
         &[("active_tab", active), ("tabs", tabs), ("selection", selection), ("page_content", content)],
-    )
+    );
+    if params["discussion"]["context_pinned"] == true {
+        format!("This is a discussion with another assistant. The page and selection below are a pinned snapshot, not necessarily the currently active page. Answer the other assistant's latest message using this context and discussion history. If fresh browser state is needed, read it explicitly rather than assuming this snapshot is live.\n\n{rendered}")
+    } else { rendered }
 }
 
 fn canvas_location(tab: &Value) -> String {

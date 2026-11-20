@@ -16,6 +16,34 @@ import { ContextBar } from '../src/components/ContextBar';
 import { ctx as liveContext } from '../src/store';
 import { agentOn, promptHistory, sendMessage, turns } from '../src/store';
 import { Composer } from '../src/components/Composer';
+import { Transcript } from '../src/components/Transcript';
+
+describe('transcript speaker attribution', () => {
+  it('distinguishes external questions, River answers and internal model rounds', () => {
+    const previous = turns.value;
+    const host = document.createElement('div');
+    try {
+      act(() => {
+        turns.value = [
+          { ...newAgentTurn(1, 'Please challenge this claim.'), status: 'done', text: 'River answered the question.', rounds: 6,
+            discussion: { id: 'discussion-1', turn_id: 2, participant: 'Copilot' } },
+          { ...newAgentTurn(2, 'My own question.'), status: 'done', text: 'Another River answer.' },
+        ];
+        render(<Transcript onStarter={() => {}} />, host);
+      });
+      const external = host.querySelector('[data-discussion-id="discussion-1"]')!;
+      expect(external.querySelector('.is-user .ag-speaker')?.textContent).toBe('Copilot asks');
+      expect(external.querySelector('.is-assistant .ag-speaker')?.textContent).toBe('River replies');
+      expect(external.querySelector('.ag-answer')?.textContent?.trim()).toBe('River answered the question.');
+      expect(external.querySelector('.ag-meta')?.textContent).toBe('Discussion turn 2 - pinned context');
+      expect(external.querySelector('.is-assistant .ag-meta')?.textContent).toBe('6 internal model rounds');
+      expect(host.querySelectorAll('.is-user .ag-speaker')[1]?.textContent).toBe('You ask');
+      expect(host.querySelectorAll('.is-assistant .ag-speaker')[1]?.textContent).toBe('River replies');
+    } finally {
+      act(() => { render(null, host); turns.value = previous; });
+    }
+  });
+});
 
 describe('composer input history', () => {
   it('recalls both chat modes with arrows, clamps at the oldest and restores the draft', () => {

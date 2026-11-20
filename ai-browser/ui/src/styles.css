@@ -93,6 +93,8 @@ textarea, input, select { font: inherit; color: inherit; user-select: text; }
 .ask-meta, .ag-meta { font: var(--text-xs); color: var(--fg-subtle); }
 .ag-msg.is-user { align-self: flex-end; background: var(--bg-surface-active); padding: 6px 10px; border-radius: var(--radius-md); white-space: pre-wrap; max-width: 100%; }
 .ag-msg.is-assistant { display: flex; flex-direction: column; gap: var(--space-2); }
+.ag-speaker { font: var(--text-sm-strong); color: var(--fg-primary); }
+.ag-msg.is-user .ag-speaker { margin-bottom: var(--space-1); }
 .ag-links { display: flex; flex-wrap: wrap; gap: 6px; }
 .ag-link { font: var(--text-sm-strong); padding: 5px 10px; border: 1px solid var(--accent); border-radius: 14px; color: var(--accent); background: var(--accent-15); }
 .ag-link:hover { background: var(--accent); color: var(--fg-on-accent); }

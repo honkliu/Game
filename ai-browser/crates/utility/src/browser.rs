@@ -1,4 +1,4 @@
-//! The running shell's fixed MCP connection. It is not a user-configured server.
+//! The running shell's MCP connection, refreshed when RiverMCP settings change.
 //! Each tool call has its own HTTP request; only initial session setup is locked.
 
 use std::io::Read;
@@ -17,6 +17,8 @@ use crate::control::{lock, TaskControl};
 pub struct ConnectionInfo {
     pub url: String,
     pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
 }
 
 struct Inner {
@@ -85,7 +87,9 @@ impl Client {
     fn session(&self) -> Result<String, Failure> {
         let mut session = lock(&self.0.session);
         if let Some(session) = session.as_ref() { return Ok(session.clone()); }
-        let (initialized, issued) = self.rpc("initialize", json!({"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ai-browser-runtime","version":env!("CARGO_PKG_VERSION")}}), None, false)?;
+        let mut params = json!({"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ai-browser-runtime","version":env!("CARGO_PKG_VERSION")}});
+        if let Some(client) = &self.0.info.client_id { params["_meta"] = json!({"river.client_id":client}); }
+        let (initialized, issued) = self.rpc("initialize", params, None, false)?;
         if initialized["protocolVersion"] != "2025-03-26" { return Err(Failure::unsupported("browser.protocol_version")); }
         let issued = issued.ok_or_else(|| Failure::unavailable("browser.missing_session"))?;
         self.rpc("notifications/initialized", json!({}), Some(&issued), true)?;

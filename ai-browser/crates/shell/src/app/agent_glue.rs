@@ -35,6 +35,10 @@ impl AppState {
 
     /// `agent.run`: one agent turn over the conversation the sidebar holds.
     pub(super) fn wv_agent_run(&mut self, p: &Value) -> Result<Option<Value>, String> {
+        self.wv_agent_start(p, self.wv_agent_context_get(), false)
+    }
+
+    pub(super) fn wv_agent_start(&mut self, p: &Value, ctx: Value, reuse_context: bool) -> Result<Option<Value>, String> {
         if self.ai.agent_run != 0 {
             return Err("the agent is already working; stop it first".into());
         }
@@ -42,12 +46,14 @@ impl AppState {
         self.ai_ensure_link().map_err(|f| failure_message(&f))?;
         self.ai.agent_seq += 1;
         let run = self.ai.agent_seq;
-        let ctx = self.wv_agent_context_get();
         let mut params = json!({
             "run_id": run, "messages": messages, "page": ctx["page"], "tabs": ctx["tabs"],
             "model": p.get("model"), "loaded_skills": p.get("loaded_skills").cloned().unwrap_or_else(|| json!([])),
             "nav_mode": p.get("nav_mode"),
         });
+        if ctx["discussion"].is_object() {
+            params["discussion"] = ctx["discussion"].clone();
+        }
         // The user edited the context in the pane: send exactly that, read nothing.
         let edited = p.get("context_override").and_then(Value::as_str).is_some();
         if edited {
@@ -55,8 +61,8 @@ impl AppState {
         }
         self.ai.agent_run = run;
         self.api.clients.entry(1).or_default().observed.clear();
-        if let Some((tab, document)) = self.active.and_then(|tab|
-            self.ai.identity.current(tab.0).map(|document| (tab.0, document))) {
+        if let Some((tab, document)) = ctx["page"]["tab_id"].as_u64().and_then(|tab|
+            self.ai.identity.current(tab).filter(|document| ctx["page"]["document_token"].as_u64() == Some(document.document_token().0)).map(|document| (tab, document))) {
             self.wv_api_record_read(1, TabId(tab), document);
         }
         let question = messages.as_array().and_then(|m| m.iter().rev()
@@ -67,10 +73,10 @@ impl AppState {
             "tabs": ctx["tabs"].as_array().map_or(0, Vec::len),
             "edited": edited,
         }));
-        if edited {
+        if edited || reuse_context {
             self.ai.agent_job_seq += 1;
             let job = self.ai.agent_job_seq;
-            let tab = self.active.map(|tab| tab.0);
+            let tab = ctx["page"]["tab_id"].as_u64();
             let document = tab.and_then(|tab| self.ai.identity.current(tab));
             self.ai.agent_jobs.insert(job, crate::ai::session::AgentJob { tab, document, method: Method::AgentRun, params, pending: Pending::AgentRun(run), run: Some(run) });
             self.agent_job_done(job, None);
@@ -86,7 +92,7 @@ impl AppState {
     fn agent_send_with_content(&mut self, method: Method, params: Value, pending: Pending, run: Option<u64>) {
         self.ai.agent_job_seq += 1;
         let job = self.ai.agent_job_seq;
-        let tab = self.active.filter(|id| self.tabs.get(*id).is_some_and(|t| is_readable_url(&t.url)));
+        let tab = params["page"]["tab_id"].as_u64().map(TabId).filter(|id| self.tabs.get(*id).is_some_and(|t| is_readable_url(&t.url)));
         let document = tab.and_then(|tab| self.ai.identity.current(tab.0));
         self.ai.agent_jobs.insert(job, crate::ai::session::AgentJob { tab: tab.map(|tab| tab.0), document, method, params, pending, run });
         let started = tab.and_then(|id| self.live.get(&id)).map(|live| {
@@ -111,6 +117,13 @@ impl AppState {
         let Some(mut job) = self.ai.agent_jobs.remove(&job) else { return };
         let current = job.tab.and_then(|tab| self.ai.identity.current(tab));
         let valid = current == job.document && job.tab.is_none_or(|tab| self.tabs.get(TabId(tab)).is_some());
+        if let Some(run) = job.run.filter(|run| self.ai.discussions.contains_run(*run)) {
+            if !valid && job.params["discussion"]["reuse_context"] != true {
+                self.agent_run_failed(run, &Failure::unsupported("discussion.context_changed")
+                    .with_detail("The source page changed during context capture; send a new turn with refresh_context: true"));
+                return;
+            }
+        }
         let content: Option<Value> = raw
             .and_then(|r| serde_json::from_str::<String>(&r).ok())
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -132,6 +145,10 @@ impl AppState {
             }
         }
         if let Some(run) = job.run {
+            if let Err(error) = self.ai.discussions.capture(run, &job.params["page"], &job.params["tabs"]) {
+                self.agent_run_failed(run, &Failure::unsupported("discussion.context_limit").with_detail(error));
+                return;
+            }
             let page = job.params.get("page").cloned().unwrap_or(Value::Null);
             self.emit(
                 "agent.event",
@@ -154,7 +171,7 @@ impl AppState {
     /// What the agent is given about the browser right now: the active page (with the
     /// selected text, if any) and the open tabs. Shown in the pane and sent with a run.
     pub(super) fn wv_agent_context_get(&self) -> Value {
-        let active = self.active;
+        let active = self.wv_page_target(&json!({})).ok().or(self.active);
         let page = active.and_then(|id| self.tabs.get(id)).map(|t| {
             let selection = self.ai.selections.get(&t.id.0).map(|s| s.text.clone()).filter(|s| !s.trim().is_empty());
             json!({ "tab_id": t.id.0, "title": t.display_title(), "url": t.url, "selection": selection,

@@ -52,6 +52,16 @@ impl UiState {
         json!({ "sequence": self.sequence, "turns": self.turns })
     }
 
+    pub fn agent_turn(&self, run: u64) -> Option<&Value> {
+        self.turns.iter().find(|turn| turn["runId"] == run)
+    }
+
+    pub fn label_discussion(&mut self, run: u64, discussion: Value) {
+        if let Some(turn) = self.turns.iter_mut().find(|turn| turn["runId"] == run) {
+            turn["discussion"] = discussion;
+        }
+    }
+
     pub fn record(&mut self, event: &str, payload: &mut Value) {
         if !matches!(event, "agent.event" | "ai.answer" | "ai.delta" | "ai.stage" | "ai.answer.stale") {
             return;

@@ -63,6 +63,7 @@ pub struct Settings {
     pub download_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span_layout: Option<SpanLayout>,
+    pub river_mcp: crate::api_server::Config,
 }
 
 impl Default for Settings {
@@ -82,6 +83,7 @@ impl Default for Settings {
             sleep_after_minutes: DEFAULT_SLEEP_MINUTES,
             download_dir: String::new(),
             span_layout: None,
+            river_mcp: crate::api_server::Config::default(),
         }
     }
 }

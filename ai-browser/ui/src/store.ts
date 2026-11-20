@@ -18,7 +18,7 @@ export const native = bridge();
 export const call = createAgentCalls(native);
 
 export type View = 'chat' | 'settings' | 'history';
-export type SettingsTab = 'tools' | 'skills' | 'mcp' | 'prompts' | 'instructions' | 'model' | 'general' | 'history' | 'downloads' | 'chats';
+export type SettingsTab = 'tools' | 'skills' | 'mcp' | 'rivermcp' | 'prompts' | 'instructions' | 'model' | 'general' | 'history' | 'downloads' | 'chats';
 export type Intent = 'ask' | 'summarize' | 'explain' | 'verify' | 'translate' | 'rewrite' | 'act';
 
 const MAX_TURNS = 100;
@@ -451,6 +451,13 @@ export function startStore() {
 
   on('agent.event', (ev: AgentEvent) => {
     observeSessionEvent(ev);
+    if (ev.type === 'queued') {
+      const previous = turns.value.find(t => t.kind === 'agent' && t.runId === ev.run_id);
+      if (previous) updateTurn(previous.id, () => ({ ...ev.turn, id: previous.id }));
+      else pushTurn({ ...ev.turn, id: nextId() });
+      if (ev.turn.status === 'running') setStatus('River is discussing...');
+      return;
+    }
     const running = turns.value.find((t) => t.kind === 'agent' && t.status === 'running' && (!t.runId || t.runId === ev.run_id));
     if (!running) return;
     updateTurn(running.id, (t) => (t.kind === 'agent' ? reduceAgent(t, ev) : t));

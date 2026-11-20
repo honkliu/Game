@@ -74,10 +74,15 @@ function ToolSummaryList({ rows }: { rows: ToolSummary[] }) {
 function AgentView({ t }: { t: AgentTurn }) {
   const live = t.status === 'running';
   return (
-    <div class="ag-turn">
-      <div class="ag-msg is-user">{t.question}</div>
+    <div class="ag-turn" data-discussion-id={t.discussion?.id}>
+      {t.discussion ? <div class="ag-meta">Discussion turn {t.discussion.turn_id} - pinned context</div> : null}
+      <div class="ag-msg is-user">
+        <div class="ag-speaker">{t.discussion ? `${t.discussion.participant} asks` : 'You ask'}</div>
+        {t.question}
+      </div>
       {t.echo ? <Echo e={t.echo} /> : null}
       <div class={'ag-msg is-assistant' + (live ? ' is-live' : '')}>
+        <div class="ag-speaker">River replies</div>
         {live ? (
           <div class="ag-live">
             {t.thinking.map((x, i) => <div class="ag-think" key={i}>{x}</div>)}
@@ -99,7 +104,7 @@ function AgentView({ t }: { t: AgentTurn }) {
             ))}
           </div>
         ) : null}
-        {t.status === 'done' && t.rounds ? <div class="ag-meta">{t.rounds} round{t.rounds === 1 ? '' : 's'}</div> : null}
+        {t.status === 'done' && t.rounds ? <div class="ag-meta">{t.rounds} internal model round{t.rounds === 1 ? '' : 's'}</div> : null}
       </div>
     </div>
   );

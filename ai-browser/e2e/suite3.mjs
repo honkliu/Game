@@ -2,6 +2,8 @@
 // Fake OpenAI-compatible model that speaks native tool calls. Run after `cargo build`.
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import { launch, startFixtures, listen, run, sleep } from './harness.mjs';
 
 const fx = await startFixtures();
@@ -70,6 +72,33 @@ const toolMsg = (messages) => messages.filter((m) => m.role === 'tool');
 const mgmt = (resource, operation, params = {}) => ui(([resource, operation, p]) =>
   window.__shell.invoke(resource, { ...p, operation }), [resource, operation, params]);
 
+async function externalClient() {
+  const descriptor = JSON.parse(fs.readFileSync(path.join(app.data, 'shell-api.json'), 'utf8'));
+  let session, sequence = 0, protocol;
+  const request = async (method, params = {}, notification = false) => {
+    const response = await fetch(descriptor.url, { method: 'POST', headers: {
+      authorization: `Bearer ${descriptor.token}`, 'content-type': 'application/json',
+      ...(session ? { 'Mcp-Session-Id': session } : {}), ...(protocol ? { 'MCP-Protocol-Version': protocol } : {}),
+    }, body: JSON.stringify({ jsonrpc: '2.0', ...(notification ? {} : { id: ++sequence }), method, params }), signal: AbortSignal.timeout(55000) });
+    assert.ok(response.ok, `MCP HTTP ${response.status}`);
+    session ||= response.headers.get('mcp-session-id');
+    if (notification) return;
+    const body = await response.json();
+    if (body.error) throw new Error(body.error.message);
+    return body.result;
+  };
+  protocol = (await request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'discussion-test', version: '1' } })).protocolVersion;
+  await request('notifications/initialized', {}, true);
+  return {
+    async agent(args) {
+      const result = await request('tools/call', { name: 'shell_agent', arguments: args });
+      if (result.isError) throw new Error(result.content.map(item => item.text || '').join('\n'));
+      return result.structuredContent;
+    },
+    async close() { await fetch(descriptor.url, { method: 'DELETE', headers: { authorization: `Bearer ${descriptor.token}`, 'Mcp-Session-Id': session } }); },
+  };
+}
+
 const cases = [
   ['setup: article tab, agent mode', async () => {
     await app.invoke('shell_page_navigate', { url: `${base}/` });
@@ -95,6 +124,95 @@ const cases = [
     assert.equal(last.tools.length, 2);
     assert.ok(calls[0].tools.some((t) => t.function.name === 'shell_page_read'));
     assert.match(calls[0].messages[0].content, /browser/i);
+  }],
+
+  ['external discussions share sidebar answers, retain history and selection, and safely retry or refresh', async () => {
+    const external = await externalClient(), other = await externalClient();
+    try {
+      const page = await app.pageWith(/127\.0\.0\.1:\d+\/$/);
+      const select = async id => {
+        await page.evaluate(id => { const range = document.createRange(); range.selectNodeContents(document.getElementById(id)); const selected = getSelection(); selected.removeAllRanges(); selected.addRange(range); document.dispatchEvent(new Event('selectionchange')); }, id);
+      };
+      await select('p1');
+      await waitFor(async () => (await app.invoke('shell_agent', { operation: 'context_get' })).page.selection?.includes('Returns are accepted'));
+      calls.length = 0;
+      script = messages => ({ delay: 350, text: `RIVER-ROUND-${messages.filter(m => m.role === 'user').length}` });
+      const args = { operation: 'discuss', request_id: 'discussion-1', message: 'Explain my selection', wait_ms: 0 };
+      const started = await external.agent(args);
+      assert.equal(started.status, 'running');
+      const retry = await external.agent(args);
+      assert.equal(retry.run_id, started.run_id);
+      assert.equal(retry.turn_id, started.turn_id);
+      const id = started.discussion_id;
+      const firstRow = side.locator(`[data-discussion-id="${id}"]`).first();
+      await firstRow.waitFor();
+      await assert.rejects(other.agent({ operation: 'discussion_wait', discussion_id: id, wait_ms: 0 }), /not found/);
+      await assert.rejects(other.agent({ operation: 'discussion_stop', discussion_id: id, wait_ms: 0 }), /not found/);
+      const waiting = external.agent({ operation: 'discussion_wait', discussion_id: id, turn_id: 1, wait_ms: 5000 });
+      assert.ok((await app.invoke('shell_window', { operation: 'state_get' })).displays.length);
+      const first = await waiting;
+      assert.equal(first.status, 'completed');
+      assert.equal(first.answer, 'RIVER-ROUND-1');
+      await waitFor(async () => (await firstRow.locator('.ag-answer').textContent()).trim() === first.answer);
+      assert.match(await firstRow.textContent(), /VSCode \/ River/);
+      await select('p2');
+      await waitFor(async () => (await app.invoke('shell_agent', { operation: 'context_get' })).page.selection?.includes('Shipping is free'));
+      const second = await external.agent({ operation: 'discuss', discussion_id: id, request_id: 'discussion-2', message: 'Challenge your first conclusion' });
+      assert.equal(second.turn_id, 2);
+      assert.equal(second.answer, 'RIVER-ROUND-2');
+      assert.match(second.context.selection, /Returns are accepted/);
+      assert.ok(calls[1].messages.some(m => m.role === 'assistant' && m.content === first.answer));
+      assert.match(calls[1].messages[0].content, /pinned snapshot/);
+      assert.match(calls[1].messages[0].content.match(/The user has selected this text[\s\S]*?"""([\s\S]*?)"""/)[1], /Returns are accepted/);
+      const third = await external.agent({ operation: 'discuss', discussion_id: id, request_id: 'discussion-3', message: 'Now use the newly selected text', refresh_context: true });
+      assert.equal(third.answer, 'RIVER-ROUND-3');
+      assert.match(third.context.selection, /Shipping is free/);
+      assert.equal(calls.length, 3, 'retries and wait calls must not execute a second model run');
+      await waitFor(async () => (await side.locator(`[data-discussion-id="${id}"] .ag-answer`).allTextContents()).at(-1)?.trim() === third.answer);
+      const cached = await external.agent({ operation: 'discussion_wait', discussion_id: id, turn_id: 1, wait_ms: 0 });
+      assert.equal(cached.answer, first.answer);
+      await assert.rejects(external.agent({ ...args, message: 'A different request using the same key' }), /already used/);
+    } finally { await Promise.allSettled([external.close(), other.close()]); }
+  }],
+
+  ['discussion waiting, stopping and provider errors return explicit terminal results', async () => {
+    const external = await externalClient();
+    try {
+      calls.length = 0;
+      script = () => ({ delay: 1500, text: 'SHOULD-BE-STOPPED' });
+      const started = await external.agent({ operation: 'discuss', request_id: 'stop-1', message: 'Wait for cancellation', wait_ms: 0 });
+      const stillRunning = await external.agent({ operation: 'discussion_wait', discussion_id: started.discussion_id, wait_ms: 1 });
+      assert.equal(stillRunning.status, 'running');
+      const stopped = await external.agent({ operation: 'discussion_stop', discussion_id: started.discussion_id, wait_ms: 5000 });
+      assert.equal(stopped.status, 'stopped');
+      assert.equal(stopped.answer, null);
+      const row = side.locator(`[data-discussion-id="${started.discussion_id}"]`);
+      await waitFor(async () => /Stopped/.test(await row.textContent()));
+      const failed = await external.agent({ operation: 'discuss', request_id: 'failure-1', message: 'Use an unavailable model', model: 'does-not-exist/model', wait_ms: 5000 });
+      assert.equal(failed.status, 'failed');
+      assert.equal(failed.answer, null);
+      assert.ok(failed.error);
+    } finally { await external.close(); }
+  }],
+
+  ['RiverMCP changes migrate a running agent and sidebar without replaying its tool', async () => {
+    calls.length = 0;
+    script = messages => toolMsg(messages).length === 0
+      ? { delay: 1200, tools: [{ name: 'shell_tab', args: { operation: 'list' } }] }
+      : { text: 'MIGRATED: ' + toolMsg(messages)[0].content };
+    const answer = ask('list my tabs after reconnecting');
+    await waitFor(() => calls.length > 0);
+    const reservation = await listen((_request, response) => response.end());
+    const port = reservation.port;
+    await new Promise(resolve => reservation.server.close(resolve));
+    await app.invoke('shell_settings', { operation: 'river_mcp_apply', value: { port, token: 'running-agent-migration-token' } });
+    const last = await answer;
+    assert.match(last.content, /MIGRATED:.*tabs/s);
+    assert.equal(last.tools.length, 1);
+    assert.equal(calls.length, 2);
+    await side.reload();
+    await side.waitForSelector('#ag-input');
+    assert.equal((await mgmt('shell_settings', 'river_mcp_get')).active_port, port);
   }],
 
   ['write tool asks for approval: deny', async () => {

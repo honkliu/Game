@@ -59,7 +59,7 @@ fn initialize(info: &api_server::ConnectionInfo) -> String {
 }
 
 fn client(info: api_server::ConnectionInfo) -> Client {
-    Client::new(ConnectionInfo { url: info.url, token: info.token }).unwrap()
+    Client::new(ConnectionInfo { url: info.url, token: info.token, client_id: info.client_id }).unwrap()
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn authenticated_discovery_sessions_canonical_calls_and_client_isolation() {
     let descriptor: api_server::ConnectionInfo = serde_json::from_slice(&std::fs::read(profile.0.join("shell-api.json")).unwrap()).unwrap();
     assert_eq!(descriptor.url, info.url);
     assert_eq!(descriptor.token, info.token);
-    assert_ne!(info.token, server.builtin_connection().token);
+    assert_eq!(info.token, server.builtin_connection().token);
     assert!(matches!(ureq::post(&info.url).send_string("{}"), Err(ureq::Error::Status(401, _))));
     for (header, content) in [("Origin", "https://evil.example"), ("Host", "evil.example")] {
         assert!(matches!(ureq::post(&info.url).set("Authorization", &format!("Bearer {}",info.token)).set(header,content).send_string("{}"), Err(ureq::Error::Status(403, _))));

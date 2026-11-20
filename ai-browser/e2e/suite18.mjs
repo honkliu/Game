@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
+import os from 'node:os';
 import { performance } from 'node:perf_hooks';
-import { launch, startFixtures, run, sleep } from './harness.mjs';
+import { launch, startFixtures, listen, run, sleep } from './harness.mjs';
 
 const fixtures = await startFixtures();
 const base = `http://127.0.0.1:${fixtures.port}`;
@@ -22,11 +23,13 @@ const waitFor = async fn => {
 };
 async function client() {
   let session;
+  let protocol;
   const request = async (method, params = {}, notification = false) => {
     const response = await fetch(descriptor.url, {
       method: 'POST',
       headers: { authorization: `Bearer ${descriptor.token}`, 'content-type': 'application/json',
-        accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-03-26',
+        accept: 'application/json, text/event-stream',
+        ...(protocol ? { 'MCP-Protocol-Version': protocol } : {}),
         ...(session ? { 'Mcp-Session-Id': session } : {}) },
       body: JSON.stringify({ jsonrpc: '2.0', ...(notification ? {} : { id: ++sequence }), method, params }),
       signal: AbortSignal.timeout(25000),
@@ -38,7 +41,10 @@ async function client() {
     if (body.error) throw new Error(body.error.message);
     return body.result;
   };
-  await request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'native-e2e', version: '1' } });
+  const initialized = await request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'native-e2e', version: '1' } });
+  protocol = initialized.protocolVersion;
+  assert.equal(protocol, '2025-03-26');
+  assert.ok(initialized.instructions?.includes('page.selection'), 'initialization explains how to answer selected-text questions in the calling chat');
   assert.ok(session);
   await request('notifications/initialized', {}, true);
   return {
@@ -52,7 +58,7 @@ async function client() {
       const controller = new AbortController();
       const response = await fetch(descriptor.url, { method: 'GET', headers: {
         authorization: `Bearer ${descriptor.token}`, 'Mcp-Session-Id': session,
-        'MCP-Protocol-Version': '2025-03-26', accept: 'text/event-stream',
+        'MCP-Protocol-Version': protocol, accept: 'text/event-stream',
       }, signal: controller.signal });
       assert.equal(response.status, 200);
       const notices = [];
@@ -165,6 +171,9 @@ try {
         });
         await waitFor(() => updates.notices.filter(uri => uri === 'shell://context').length > count);
         await waitFor(async () => (await first.read('shell://context')).page.selection?.includes('Returns are accepted'));
+        const selected = await first.call('shell_agent', { operation: 'context_get' });
+        assert.match(selected.page.selection, /Returns are accepted/);
+        assert.equal((await first.call('shell_ai', { operation: 'status_get' })).link, 'idle', 'reading the selection must not start River AI');
         const replay = await first.read(`shell://events?after=${cursor}`);
         assert.ok(replay.events.some(event => event.event === 'context.changed' && event.payload.page.selection?.includes('Returns are accepted')));
         assert.ok(replay.events.every((event, index, list) => index === 0 || event.sequence > list[index - 1].sequence));
@@ -282,9 +291,92 @@ try {
       await first.call('shell_omnibox', { operation: 'query', text: 'mcp' });
       assert.equal((await first.call('shell_ai', { operation: 'status_get' })).link, 'idle');
     }],
+    ['RiverMCP Apply reports errors inline, changes port and token live, and survives Settings reload', async () => {
+      await assert.rejects(first.call('shell_settings', { operation: 'river_mcp_get' }), /browser UI/);
+      await app.invoke('shell_settings', { operation: 'open', section: 'rivermcp' });
+      const settings = await app.pageWith(/pages\/settings\.html/);
+      await settings.locator('#rivermcp-port:not(:disabled)').waitFor();
+      const initial = await app.invoke('shell_settings', { operation: 'river_mcp_get' });
+      assert.equal(initial.port, Number(new URL(descriptor.url).port));
+      assert.equal(initial.token, descriptor.token);
+      await settings.locator('#rivermcp-port').fill(String(fixtures.port));
+      await settings.locator('#rivermcp-apply').click();
+      await waitFor(async () => (await settings.locator('#rivermcp-result').textContent()).includes('Could not listen'));
+      assert.equal((await app.invoke('shell_settings', { operation: 'river_mcp_get' })).active_port, initial.port);
+      assert.equal((await first.call('shell_tab', { operation: 'list' })).tabs.length > 0, true);
+      const reservation = await listen((_request, response) => response.end());
+      const nextPort = reservation.port;
+      await new Promise(resolve => reservation.server.close(resolve));
+      const nextToken = 'rivermcp-live-test-token';
+      await settings.locator('#rivermcp-port').fill(String(nextPort));
+      await settings.locator('#rivermcp-token').fill(nextToken);
+      await settings.locator('#rivermcp-apply').click();
+      await waitFor(async () => (await settings.locator('#rivermcp-result').textContent()).includes(`Applied. Listening on 0.0.0.0:${nextPort}.`));
+      await app.invoke('shell_tab', { operation: 'list' });
+      const previous = { ...descriptor };
+      Object.assign(descriptor, JSON.parse(fs.readFileSync(path.join(app.data, 'shell-api.json'), 'utf8')));
+      assert.equal(Number(new URL(descriptor.url).port), nextPort);
+      assert.equal(descriptor.token, nextToken);
+      const revoked = await fetch(descriptor.url, { method: 'POST', headers: { authorization: `Bearer ${previous.token}`, 'content-type': 'application/json' }, body: '{}' });
+      assert.equal(revoked.status, 401);
+      const fresh = await client();
+      try { assert.ok((await fresh.call('shell_tab', { operation: 'list' })).tabs.length > 0); }
+      finally { await fresh.close(); }
+      const address = Object.values(os.networkInterfaces()).flat().find(address => address.family === 'IPv4' && !address.internal)?.address;
+      if (address) {
+        const remote = await fetch(`http://${address}:${nextPort}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${nextToken}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } }), signal: AbortSignal.timeout(5000) });
+        assert.equal(remote.status, 200);
+        await remote.arrayBuffer();
+      }
+      await settings.reload();
+      await settings.locator('#rivermcp-port:not(:disabled)').waitFor();
+      assert.equal(await settings.locator('#rivermcp-port').inputValue(), String(nextPort));
+      assert.equal(await settings.locator('#rivermcp-token').inputValue(), nextToken);
+      await settings.locator('#rivermcp-token').fill('rivermcp-rotated-test-token');
+      await settings.locator('#rivermcp-apply').click();
+      await waitFor(async () => (await settings.locator('#rivermcp-result').textContent()).includes('Applied.'));
+      await app.invoke('shell_window', { operation: 'state_get' });
+      Object.assign(descriptor, JSON.parse(fs.readFileSync(path.join(app.data, 'shell-api.json'), 'utf8')));
+      assert.equal(Number(new URL(descriptor.url).port), nextPort);
+      const saved = JSON.parse(fs.readFileSync(path.join(app.data, 'settings.json'), 'utf8')).river_mcp;
+      assert.equal(saved.port, nextPort);
+      assert.equal(saved.token, descriptor.token);
+      await app.invoke('shell_ui', { operation: 'palette_open' });
+      const overlay = await app.pageWith(/overlay\.html/);
+      await overlay.locator('#pal-input').waitFor();
+      await app.invoke('shell_ui', { operation: 'overlay_close_top' });
+    }],
+    ['startup ignores the saved port, falls back from occupied port 3000 and retains the token', async () => {
+      const blocker = net.createServer();
+      const ownsPort = await new Promise((resolve, reject) => {
+        blocker.once('error', error => error.code === 'EADDRINUSE' || error.code === 'EACCES' ? resolve(false) : reject(error));
+        blocker.listen(3000, '127.0.0.1', () => resolve(true));
+      });
+      const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'river-mcp-busy-'));
+      const data = path.join(profile, 'native-browser');
+      fs.mkdirSync(data);
+      fs.copyFileSync(path.join(app.data, 'settings.json'), path.join(data, 'settings.json'));
+      const other = await launch({ profilePath: profile, debugPort: 16000 + Math.floor(Math.random() * 30000), withProvider: false });
+      try {
+        const state = await other.invoke('shell_settings', { operation: 'river_mcp_get' });
+        assert.notEqual(state.active_port, Number(new URL(descriptor.url).port));
+        assert.notEqual(state.active_port, 3000);
+        assert.equal(state.active_port, state.port);
+        assert.equal(state.token, descriptor.token);
+        assert.equal(state.error, null);
+        await other.invoke('shell_settings', { operation: 'open', section: 'rivermcp' });
+        const settings = await other.pageWith(/pages\/settings\.html/);
+        await settings.locator('#rivermcp-apply:not(:disabled)').waitFor();
+        assert.equal(await settings.locator('#rivermcp-port').inputValue(), String(state.active_port));
+      } finally {
+        await other.close();
+        if (ownsPort) await new Promise(resolve => blocker.close(resolve));
+      }
+    }],
   ]);
 } finally {
-  await Promise.all([first.close(), second.close()]);
+  await Promise.allSettled([first.close(), second.close()]);
   await app.close();
   fixtures.close();
 }

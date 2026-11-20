@@ -6,10 +6,11 @@ import { BrowserPreferences } from './BrowserPreferences';
 import { BrowserHistory } from './BrowserHistory';
 import { Downloads } from './Downloads';
 import { History } from './History';
+import { RiverMcpSettings } from './RiverMcpSettings';
 
 const sections: [SettingsTab, string][] = [
   ['general', 'General'], ['model', 'Models'], ['tools', 'Tools'], ['skills', 'Skills'],
-  ['mcp', 'MCP'], ['prompts', 'Prompts'], ['instructions', 'Instructions'],
+  ['mcp', 'MCP'], ['rivermcp', 'RiverMCP'], ['prompts', 'Prompts'], ['instructions', 'Instructions'],
   ['history', 'History'], ['downloads', 'Downloads'], ['chats', 'Saved chats'],
 ];
 
@@ -32,7 +33,7 @@ export function SettingsPage() {
       {section === 'general' ? <>
         {preferences.value ? <BrowserPreferences settings={preferences.value} /> : <p>Loading preferences...</p>}
         <h2>River</h2><SettingsPanel key={section} />
-      </> : section === 'history' ? <BrowserHistory /> : section === 'downloads' ? <Downloads /> : section === 'chats' ? <History /> : <SettingsPanel key={section} />}
+      </> : section === 'rivermcp' ? <RiverMcpSettings /> : section === 'history' ? <BrowserHistory /> : section === 'downloads' ? <Downloads /> : section === 'chats' ? <History /> : <SettingsPanel key={section} />}
     </div></main>
   </div>;
 }

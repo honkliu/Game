@@ -37,6 +37,7 @@ percent-encoding = "2"
 url = "2"
 httparse = "1"
 getrandom = "0.3"
+socket2 = "0.6"
 tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "macros"] }
 # The PDF viewer fetches documents for pages (same TLS stack as the AI utility).
 ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
@@ -61,6 +62,7 @@ windows-core = "=0.62.2"
 # Pinned to the version wry links so COM/FFI types line up exactly.
 windows = { version = "=0.62.2", features = [
     "Win32_Foundation",
+    "Win32_Networking_WinSock",
     "Win32_System_Com",
     "Win32_System_Ole",
     "Win32_System_Variant",
