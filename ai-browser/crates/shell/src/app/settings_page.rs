@@ -16,7 +16,7 @@ pub(super) fn valid_section(section: &str) -> bool {
     ["general", "model", "tools", "skills", "mcp", "prompts", "instructions", "history", "downloads", "chats"].contains(&section)
 }
 
-fn allowed(request: &Request) -> bool {
+pub(super) fn allowed(request: &Request) -> bool {
     let operation = request.payload["operation"].as_str().unwrap_or("");
     match (request.cmd.as_str(), operation) {
         ("shell_settings", "state_get" | "section_set" | "set" | "profile_folder_open") |
@@ -58,13 +58,8 @@ impl AppState {
     }
 
     pub(super) fn emit_surface(&mut self, source: Surface, event: &str, payload: Value) {
-        if let Surface::Settings(id) = source {
-            let envelope = json!({ "event": event, "payload": payload });
-            if let Some(view) = self.settings_view(id) {
-                let _ = view.evaluate_script(&format!("window.__native&&window.__native._dispatch({envelope})"));
-            }
-        } else {
-            self.emit_raw(source.target(), event, payload);
+        if let Some(server) = self.api.server.as_ref() {
+            server.publish(Some(source), event, payload);
         }
     }
 
@@ -103,18 +98,8 @@ impl AppState {
     pub(super) fn settings_probe(&mut self, tab: TabId, raw: &str) -> bool {
         if raw.len() > 512_000 { return false; }
         let Ok(value) = serde_json::from_str::<Value>(raw) else { return false };
-        if value.get("cmd").is_none() { return false; }
-        if self.settings_view(tab).is_none() { return true; }
-        if value.get("cmd").is_some() {
-            if let Ok(request) = serde_json::from_value::<Request>(value) {
-                let source = Surface::Settings(tab);
-                let reply = if allowed(&request) { self.dispatch(source, raw) }
-                    else { Some(Reply::err(request.id, "command not available in Settings")) };
-                if let Some(reply) = reply { self.reply(source, reply); }
-            }
-            return true;
-        }
-        true
+        let _ = tab;
+        value.get("cmd").is_some()
     }
 }
 

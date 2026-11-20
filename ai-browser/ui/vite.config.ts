@@ -16,9 +16,13 @@ export default defineConfig({
     cssCodeSplit: false,
     modulePreload: false,
     rollupOptions: {
-      input: fileURLToPath(new URL('./sidebar.html', import.meta.url)),
+      preserveEntrySignatures: 'strict',
+      input: {
+        sidebar: fileURLToPath(new URL('./sidebar.html', import.meta.url)),
+        mcp: fileURLToPath(new URL('./src/mcp.ts', import.meta.url)),
+      },
       output: {
-        entryFileNames: 'sidebar.js',
+        entryFileNames: '[name].js',
         chunkFileNames: 'chunk-[name].js',
         assetFileNames: '[name][extname]',
       },

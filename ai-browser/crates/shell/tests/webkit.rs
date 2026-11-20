@@ -167,7 +167,7 @@ fn main() {
             Event::UserEvent(Check::Ready(name)) => {
                 let done = proxy.clone();
                 views[name].evaluate_script_with_callback(
-                    "typeof window.__native?.invoke === 'function' && typeof window.ipc?.postMessage === 'function'",
+                    "typeof window.__shell?.invoke === 'function' && window.__native === undefined",
                     move |result| { let _ = done.send_event(Check::Script(name, result)); },
                 ).unwrap();
             }

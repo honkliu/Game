@@ -199,9 +199,11 @@ export async function launch({ modelPort, debugPort = 9444, withProvider = true,
     return null;
   };
   const shell = await find(/asset\.shell\/index\.html/);
+  await shell.waitForFunction(() => !!window.__shell);
+  await shell.evaluate(() => window.__shell.ready);
   const app = {
     child, browser, ctx, shell, profile, data, find,
-    invoke: (cmd, payload = {}) => shell.evaluate(([c, p]) => window.__native.invoke(c, p), [cmd, payload]),
+    invoke: (cmd, payload = {}) => shell.evaluate(([c, p]) => window.__shell.invoke(c, p), [cmd, payload]),
     pageWith: async (urlRe, timeout) => find(urlRe, timeout),
     async close() {
       try { await browser.close(); } catch {}

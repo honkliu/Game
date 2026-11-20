@@ -35,6 +35,7 @@ export interface Download {
 export const preferences = signal<BrowserSettings | null>(null);
 export const downloads = signal<Download[]>([]);
 export const settingsError = signal('');
+export const settingsReady = signal(false);
 
 function applyPreferences(next: BrowserSettings) {
   preferences.value = next;
@@ -54,14 +55,26 @@ export function startSettingsStore() {
   native.on('ai.models', payload => applyModels(payload.models ?? []));
   native.on('agent.event', () => void refreshStatus());
   native.on('ai.answer', () => void refreshStatus());
+  let restoring: Promise<void> | undefined;
+  const restore = () => {
+    restoring ??= Promise.all([
+      refreshPreferences(), refreshStatus(), refreshAgentState(),
+      native.invoke('shell_ai', { operation: 'models_list' }).catch(() => undefined),
+    ]).then(() => undefined).finally(() => { restoring = undefined; });
+    return restoring;
+  };
+  native.on('mcp.resync', restore);
+  native.on('mcp.connected', restore);
   window.addEventListener('focus', () => { void refreshStatus(); void refreshAgentState(); });
-  void native.invoke<{ section: SettingsTab; settings: BrowserSettings; downloads: Download[]; skill_draft?: unknown }>('shell_settings', { operation: 'state_get' })
+  void native.ready.then(restore).catch(() => undefined);
+}
+
+function refreshPreferences() {
+  return native.invoke<{ section: SettingsTab; settings: BrowserSettings; downloads: Download[]; skill_draft?: unknown }>('shell_settings', { operation: 'state_get' })
     .then(snapshot => {
       applyPreferences(snapshot.settings);
       downloads.value = snapshot.downloads;
       section(snapshot);
+      settingsReady.value = true;
     }).catch(error => { settingsError.value = String(error); });
-  void refreshStatus();
-  void refreshAgentState();
-  void native.invoke('shell_ai', { operation: 'models_list' }).catch(() => undefined);
 }

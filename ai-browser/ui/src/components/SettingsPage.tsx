@@ -1,6 +1,6 @@
 import { useEffect } from 'preact/hooks';
 import { native, settingsTab, status, type SettingsTab } from '../store';
-import { preferences, settingsError } from '../settings_store';
+import { preferences, settingsError, settingsReady } from '../settings_store';
 import { SettingsPanel } from './Settings';
 import { BrowserPreferences } from './BrowserPreferences';
 import { BrowserHistory } from './BrowserHistory';
@@ -15,12 +15,14 @@ const sections: [SettingsTab, string][] = [
 
 export function SettingsPage() {
   const section = settingsTab.value;
+  const ready = settingsReady.value;
   useEffect(() => {
+    if (!ready) return;
     void native.invoke('shell_settings', { operation: 'section_set', section }).catch(error => { settingsError.value = String(error); });
-  }, [section]);
+  }, [section, ready]);
   return <div class="settings-page">
     <nav class="settings-nav" aria-label="Settings"><h1>Settings</h1><div role="tablist" aria-label="Settings sections" aria-orientation="vertical">
-      {sections.map(([id, label]) => <button type="button" key={id} role="tab" aria-selected={section === id}
+      {sections.map(([id, label]) => <button type="button" key={id} role="tab" disabled={!ready} aria-selected={section === id}
         aria-controls="settings-content" id={`settings-${id}`} onClick={() => { settingsTab.value = id; status.value = { text: '' }; }}>{label}</button>)}
     </div></nav>
     <main><div id="settings-content" role="tabpanel" aria-labelledby={`settings-${section}`}>

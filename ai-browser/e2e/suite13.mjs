@@ -49,11 +49,11 @@ const model = await listen((req, res) => {
     const tools = body.messages.filter(message => message.role === 'tool');
     let delta;
     const aliasCalls = [
-      ['read_current_page', {}],
+      ['shell_page_read', {}],
       ['read_skill_definition', { skill_id: 'research' }],
       ['moonshot_search', { query }],
       ['configured_echo', { text: 'configured argument' }],
-      ['propose_page', { url: `http://127.0.0.1:${fixtures.port}/other?manual-alias=1` }],
+      ['shell_page_navigate', { url: `http://127.0.0.1:${fixtures.port}/other?manual-alias=1` }],
     ];
     if (aliases && tools.length < aliasCalls.length) {
       const [name, args] = aliasCalls[tools.length];
@@ -83,15 +83,8 @@ const app = await launch({ modelPort: model.port, debugPort });
 const base = `http://127.0.0.1:${fixtures.port}`;
 const apiBase = `http://127.0.0.1:${api.port}`;
 let side, chat, workingId;
-const mgmt = (resource, operation, payload = {}) => side.evaluate(([resource, operation, payload]) => new Promise((resolve, reject) => {
-  const req = 1000000 + Math.floor(Math.random() * 1000000);
-  const off = window.__native.on('agent.reply', result => {
-    if (result.req !== req) return;
-    off();
-    result.ok ? resolve(result.value) : reject(new Error(result.error));
-  });
-  window.__native.invoke(resource, { ...payload, operation, req }).catch(error => { off(); reject(error); });
-}), [resource, operation, payload]);
+const mgmt = (resource, operation, payload = {}) => side.evaluate(([resource, operation, payload]) =>
+  window.__shell.invoke(resource, { ...payload, operation }), [resource, operation, payload]);
 const ask = async text => {
   const count = await chat.evaluate(() => window.__agentUi.messages.length);
   await chat.evaluate(text => window.__agentUi.send(text), text);
@@ -133,7 +126,7 @@ const inspectColors = () => app.shell.evaluate(() => {
 
 let failed = 0;
 try {
-  await app.shell.waitForFunction(() => !!window.__native);
+  await app.shell.waitForFunction(() => !!window.__shell);
   failed = await run([
     ['River and 洛 labels retain the existing icon in the toolbar and address suggestions', async () => {
       const cdp = await app.ctx.newCDPSession(app.shell);
@@ -155,7 +148,7 @@ try {
         await cdp.detach();
       }
       await app.shell.reload();
-      await app.shell.waitForFunction(() => !!window.__native);
+      await app.shell.waitForFunction(() => !!window.__shell);
     }],
     ['only a thin tab-strip bottom line follows the active tab in light/dark themes and canvas tabs', async () => {
       const ids = [];
@@ -244,7 +237,7 @@ try {
     }],
     ['tool definitions and disabled choices persist through pane reload', async () => {
       await side.reload();
-      await side.waitForFunction(() => !!window.__native);
+      await side.waitForFunction(() => !!window.__shell);
       await openTools();
       assert.equal(await side.getByRole('checkbox', { name: 'Enable fetch_url', exact: true }).isChecked(), false);
       assert.equal(await side.getByRole('checkbox', { name: 'Enable mcp_fixture__echo', exact: true }).isChecked(), false);
@@ -255,7 +248,7 @@ try {
       assert.equal(config.tools.enabled.fetch_url, false);
       assert.equal(config.tools.enabled.get_search_document, true);
     }],
-    ['every source has editable names and schemas, and renamed tools retain their original handlers', async () => {
+    ['browser APIs keep canonical names while editable definitions and nonbrowser aliases retain their handlers', async () => {
       await openTools();
       const edit = async (id, name) => {
         await side.getByRole('button', { name: `Edit ${id}`, exact: true }).click();
@@ -266,6 +259,11 @@ try {
         if (parameters.properties.tab_id) parameters.properties.tab_id.description = 'Configured tab selection';
         await field.fill(JSON.stringify(parameters));
         await side.getByRole('button', { name: 'Save', exact: true }).click();
+        if (id.startsWith('shell_') && name !== id) {
+          await side.getByRole('status').filter({ hasText: 'must remain canonical' }).waitFor();
+          await side.getByLabel('Model tool name', { exact: true }).fill(id);
+          await side.getByRole('button', { name: 'Save', exact: true }).click();
+        }
         await side.locator(`[data-tool-id="${id}"]`).waitFor();
       };
       await edit('shell_page_read', 'read_current_page');
@@ -283,7 +281,7 @@ try {
       await readCard.waitFor();
       await readCard.locator('summary').click();
       const definition = JSON.parse(await readCard.locator('pre').innerText());
-      assert.equal(definition.function.name, 'read_current_page');
+      assert.equal(definition.function.name, 'shell_page_read');
       assert.equal(definition.function.description, 'CONFIGURED shell_page_read description');
       assert.equal(definition.function.parameters.properties.tab_id.description, 'Configured tab selection');
       await backToChat();
@@ -297,15 +295,16 @@ try {
       const answer = await ask('Use the configured tool names.');
       assert.match(answer.content, /ALIASES-OK/);
       const sent = calls[0].tools.map(tool => tool.function.name);
-      for (const [id, name] of [['shell_page_read', 'read_current_page'], ['fetch_skill', 'read_skill_definition'],
-        ['mcp_fixture__echo', 'configured_echo'], ['web_search', 'moonshot_search'], ['shell_page_navigate', 'propose_page']]) {
+      for (const name of ['shell_page_read', 'shell_page_navigate']) assert.ok(sent.includes(name));
+      for (const [id, name] of [['fetch_skill', 'read_skill_definition'],
+        ['mcp_fixture__echo', 'configured_echo'], ['web_search', 'moonshot_search']]) {
         assert.ok(sent.includes(name) && !sent.includes(id), `${id} is exposed only as ${name}`);
       }
       assert.ok(mcpRequests.some(message => message.method === 'tools/call' &&
         message.params.name === 'echo' && message.params.arguments.text === 'configured argument'));
       assert.ok(!app.ctx.pages().some(page => page.url().includes('manual-alias=1')), 'renaming navigation preserves manual mode');
       await side.reload();
-      await side.waitForFunction(() => window.__agentUi?.state?.tools?.some(tool => tool.name === 'read_current_page'));
+      await side.waitForFunction(() => window.__agentUi?.state?.tools?.some(tool => tool.name === 'shell_page_read' && tool.description === 'CONFIGURED shell_page_read description'));
       await openTools();
       const state = await mgmt('shell_agent', 'state_get');
       assert.equal(state.tools.find(tool => tool.id === 'web_search').name, 'moonshot_search');

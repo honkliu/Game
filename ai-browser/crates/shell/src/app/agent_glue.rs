@@ -141,11 +141,11 @@ impl AppState {
                         "headings": page.get("headings").and_then(Value::as_array).map_or(0, Vec::len) }),
             );
         }
-        let control_req = if let Pending::Control(source, req) = &job.pending { Some((*source, *req)) } else { None };
+        let control_req = if let Pending::Control(req) = &job.pending { *req } else { None };
         if let Err(f) = self.ai_request(job.method, &job.params, job.pending) {
             match (job.run, control_req) {
                 (Some(run), _) => self.agent_run_failed(run, &f),
-                (None, Some((source, req))) => self.agent_control_reply(source, req, ResponsePayload::Failure(f)),
+                (None, Some(req)) => self.agent_control_reply(Some(req), ResponsePayload::Failure(f)),
                 (None, None) => {}
             }
         }
@@ -295,7 +295,7 @@ impl AppState {
             return Ok(Some(json!({ "stopping": true })));
         }
         let params = json!({ "op": "cancel", "run_id": run });
-        self.ai_request(Method::AgentControl, &params, Pending::Control(crate::ipc::Surface::Sidebar, 0)).map_err(|f| failure_message(&f))?;
+        self.ai_request(Method::AgentControl, &params, Pending::Control(None)).map_err(|f| failure_message(&f))?;
         Ok(Some(json!({ "stopping": true })))
     }
 
@@ -305,19 +305,17 @@ impl AppState {
             "call_id": p.get("call_id").and_then(Value::as_str).unwrap_or(""),
             "allow": p.get("allow").and_then(Value::as_bool).unwrap_or(false),
         });
-        self.ai_request(Method::AgentControl, &params, Pending::Control(crate::ipc::Surface::Sidebar, 0)).map_err(|f| failure_message(&f))?;
+        self.ai_request(Method::AgentControl, &params, Pending::Control(None)).map_err(|f| failure_message(&f))?;
         Ok(None)
     }
 
-    /// A canonical management operation. The UI reply arrives later as `agent.reply`
-    /// with the same `req`.
+    /// A canonical management operation; the utility's reply completes its MCP call.
     pub(super) fn wv_agent_manage(&mut self, method: &str, p: &Value, source: crate::ipc::Surface) -> Result<Option<Value>, String> {
-        let req = if let crate::ipc::Surface::ApiCall(id) = source { self.wv_api_defer(id); id }
-            else { p.get("req").and_then(Value::as_u64).ok_or("missing req")? };
+        let crate::ipc::Surface::ApiCall(req) = source else { return Err("management operations require an MCP request".into()) };
+        self.wv_api_defer(req);
         let mut params = p.clone();
         let mut preview = false;
         if let Some(map) = params.as_object_mut() {
-            map.remove("req");
             map.insert("method".into(), json!(method));
             if method == "shell_agent" && map.get("operation").and_then(Value::as_str) == Some("context_preview") {
                 let ctx = self.wv_agent_context_get();
@@ -329,29 +327,20 @@ impl AppState {
         self.ai_ensure_link().map_err(|f| failure_message(&f))?;
         if preview {
             // The preview shows the page content the model will get, so it reads the page too.
-            self.agent_send_with_content(Method::AgentControl, params, Pending::Control(source, req), None);
+            self.agent_send_with_content(Method::AgentControl, params, Pending::Control(Some(req)), None);
             return Ok(None);
         }
-        self.ai_request(Method::AgentControl, &params, Pending::Control(source, req)).map_err(|f| failure_message(&f))?;
+        self.ai_request(Method::AgentControl, &params, Pending::Control(Some(req))).map_err(|f| failure_message(&f))?;
         Ok(None)
     }
 
-    pub(super) fn agent_control_reply(&mut self, source: crate::ipc::Surface, req: u64, payload: ResponsePayload) {
-        if let crate::ipc::Surface::ApiCall(id) = source {
+    pub(super) fn agent_control_reply(&mut self, request: Option<u64>, payload: ResponsePayload) {
+        if let Some(id) = request {
             match payload {
                 ResponsePayload::Ok(value) => self.wv_reply_ok(id, value),
-                ResponsePayload::Failure(failure) => self.wv_reply_failure(id, failure),
+                ResponsePayload::Failure(failure) => self.wv_reply_err(id, failure_message(&failure)),
             }
-            return;
         }
-        if req == 0 {
-            return;
-        }
-        let body = match payload {
-            ResponsePayload::Ok(value) => json!({ "req": req, "ok": true, "value": value }),
-            ResponsePayload::Failure(f) => json!({ "req": req, "ok": false, "error": failure_message(&f) }),
-        };
-        self.emit_surface(source, "agent.reply", body);
     }
 
     pub(super) fn agent_run_failed(&mut self, run: u64, failure: &Failure) {

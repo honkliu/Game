@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { render } from 'preact';
 import { Markdown } from '../src/markdown';
 import { contextSignature, reconcileEdit } from '../src/context';
-import { COMMANDS, createAgentCalls, createBridge } from '../src/ipc';
+import { COMMANDS } from '../src/mcp';
 import { fromMessages, newAgentTurn, reduceAgent, toMessages } from '../src/reducers';
 import type { AgentContext } from '../src/types';
 import type { ConfiguredTool } from '../src/types';
@@ -162,22 +162,21 @@ describe('markdown', () => {
     expect(host.querySelector('del')?.textContent).toBe('no');
   });
   it('link clicks on nested labels and bare URLs open native tabs without navigating the pane', () => {
-    const post = vi.fn();
-    (window as unknown as { ipc: unknown }).ipc = { postMessage: post };
+    const invoke = vi.spyOn(window.__shell!, 'invoke').mockResolvedValue(null);
     const host = document.createElement('div');
     document.body.appendChild(host);
     render(<Markdown text="[**go**](https://a.example/?x=1&y=2) or https://b.example/" />, host);
     const click = new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true });
     host.querySelector('a strong')!.dispatchEvent(click);
     expect(click.defaultPrevented).toBe(true);
-    const sent = JSON.parse(post.mock.calls[0]?.[0] as string);
-    expect(sent.cmd).toBe('shell_tab');
-    expect(sent.payload).toMatchObject({ operation: 'open', background: false });
-    expect(sent.payload).toEqual({ operation: 'open', url: 'https://a.example/?x=1&y=2', background: false });
+    expect(invoke).toHaveBeenNthCalledWith(1, 'shell_tab', { operation: 'open', url: 'https://a.example/?x=1&y=2', background: false });
     const middle = new MouseEvent('auxclick', { button: 1, bubbles: true, cancelable: true });
     host.querySelectorAll('a')[1]!.dispatchEvent(middle);
     expect(middle.defaultPrevented).toBe(true);
-    expect(JSON.parse(post.mock.calls[1]?.[0] as string).payload).toEqual({ operation: 'open', url: 'https://b.example/', background: false });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'shell_tab', { operation: 'open', url: 'https://b.example/', background: false });
+    invoke.mockRestore();
+    render(null, host);
+    host.remove();
   });
   it('renders reference links, escaped punctuation and ordered list starts using standard Markdown', () => {
     const host = document.createElement('div');
@@ -252,68 +251,6 @@ describe('agent reducer and history', () => {
     expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant']);
     const back = fromMessages(msgs, () => ++id);
     expect(back[0]).toMatchObject({ question: 'hello', text: 'hi', status: 'done' });
-  });
-});
-
-describe('bridge', () => {
-  it('rejects timed-out requests and releases completed timers', async () => {
-    vi.useFakeTimers();
-    try {
-      const b = createBridge(() => {}, 1, 25);
-      const request = b.invoke('shell_ai', { operation: 'status_get' });
-      const rejected = expect(request).rejects.toThrow('shell_ai timed out');
-      await vi.advanceTimersByTimeAsync(25);
-      await rejected;
-      const next = b.invoke('shell_ai', { operation: 'status_get' });
-      b._reply({ id: 2, ok: true, data: 'done' });
-      await expect(next).resolves.toBe('done');
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-  it('resolves replies by id, and unsubscribes listeners', async () => {
-    const post = vi.fn();
-    const b = createBridge(post, 10);
-    const p = b.invoke('shell_ai', { operation: 'status_get' });
-    expect(JSON.parse(post.mock.calls[0]![0])).toMatchObject({ id: 10, cmd: 'shell_ai', payload: { operation: 'status_get' } });
-    b._reply({ id: 10, ok: true, data: { x: 1 } });
-    await expect(p).resolves.toEqual({ x: 1 });
-    const fn = vi.fn();
-    const off = b.on('e', fn);
-    b._dispatch({ event: 'e', payload: 1 });
-    off();
-    b._dispatch({ event: 'e', payload: 2 });
-    expect(fn).toHaveBeenCalledTimes(1);
-  });
-  it('sends canonical management operations and pairs req with agent.reply', async () => {
-    const b = createBridge((raw) => {
-      const { id, cmd, payload } = JSON.parse(raw);
-      expect(cmd).toBe('shell_agent');
-      expect(payload).not.toHaveProperty('op');
-      b._reply({ id, ok: true });
-      queueMicrotask(() => b._dispatch({ event: 'agent.reply', payload: { req: payload.req, ok: true, value: payload.operation } }));
-    });
-    const call = createAgentCalls(b);
-    await expect(call('shell_agent', 'state_get')).resolves.toBe('state_get');
-    const bad = createBridge((raw) => bad._reply({ id: JSON.parse(raw).id, ok: false, error: 'nope' }));
-    await expect(bad.invoke('shell_ai', { operation: 'stop' })).rejects.toThrow('nope');
-  });
-  it('correlates concurrent canonical resource calls without changing payload fields', async () => {
-    const sent: { id: number; cmd: string; payload: Record<string, unknown> }[] = [];
-    const b = createBridge(raw => { sent.push(JSON.parse(raw)); });
-    const call = createAgentCalls(b);
-    const first = call('shell_agent_tool', 'enabled_set', { id: 'shell_cookie', enabled: false });
-    const second = call('shell_conversation', 'load', { id: 'saved-chat' });
-    for (const message of sent) b._reply({ id: message.id, ok: true });
-    expect(sent.map(message => [message.cmd, message.payload])).toEqual([
-      ['shell_agent_tool', { operation: 'enabled_set', req: 1, id: 'shell_cookie', enabled: false }],
-      ['shell_conversation', { operation: 'load', req: 2, id: 'saved-chat' }],
-    ]);
-    b._dispatch({ event: 'agent.reply', payload: { req: 2, ok: true, value: 'conversation' } });
-    b._dispatch({ event: 'agent.reply', payload: { req: 1, ok: true, value: 'tools' } });
-    await expect(second).resolves.toBe('conversation');
-    await expect(first).resolves.toBe('tools');
   });
 });
 

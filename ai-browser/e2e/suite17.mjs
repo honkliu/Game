@@ -146,20 +146,19 @@ try {
         await click('#win-span');
         await waitFor(async () => { const s = await state(); return !s.spanning && same(s.bounds, initial.bounds); });
       }
-      const result = await app.shell.evaluate(() => {
-        window.__native._dispatch({ event: 'state.tabs', payload: {
-          tabs: Array.from({ length: 80 }, (_, i) => ({ id: 10000 + i, title: `Crowded tab ${i}`, url: 'https://example.test/', active: i === 0 })), groups: [], canvas: null,
-        } });
+      await Promise.all(Array.from({ length: 80 }, () => app.invoke('shell_tab', { operation: 'open', url: 'about:blank', background: true })));
+      await app.shell.waitForFunction(() => document.querySelectorAll('#rail-list .tab-row').length >= 80);
+      const result = await app.shell.evaluate(async () => {
         const row = document.querySelector('#rail-list .tab-row');
-        const ipc = window.chrome.webview;
-        const original = ipc.postMessage;
+        const original = window.fetch;
         const commands = [];
-        ipc.postMessage = body => {
-          const message = JSON.parse(body);
-          if (['shell_window', 'shell_tab'].includes(message.cmd)) {
-            commands.push([message.cmd, message.payload.operation]);
-            window.__native._reply({ id: message.id, ok: true, data: null });
-          } else original.call(ipc, body);
+        window.fetch = async (input, init) => {
+          const message = init?.method === 'POST' ? JSON.parse(init.body) : null;
+          if (message?.method === 'tools/call' && ['shell_window', 'shell_tab'].includes(message.params.name)) {
+            commands.push([message.params.name, message.params.arguments.operation]);
+            return new Response(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { structuredContent: null, content: [] } }), { headers: { 'content-type': 'application/json' } });
+          }
+          return original.call(window, input, init);
         };
         const pointer = (target, type, x, y = 16, extra = {}) => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, buttons: type === 'pointerup' ? 0 : 1, pointerId: 7, clientX: x, clientY: y, ...extra }));
         try {
@@ -183,11 +182,12 @@ try {
           pointer(window, 'pointermove', 40);
           pointer(window, 'pointerup', 40);
           document.getElementById('win-drag').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, detail: 1 }));
+          await new Promise(resolve => setTimeout(resolve, 0));
           const drag = document.getElementById('win-drag').getBoundingClientRect();
           const controls = document.getElementById('win-ctl').getBoundingClientRect();
           const list = document.getElementById('rail-list');
           return { commands, width: drag.width, right: drag.right, controls: controls.left, overflow: list.scrollWidth > list.clientWidth };
-        } finally { ipc.postMessage = original; }
+        } finally { window.fetch = original; }
       });
       assert.deepEqual(result.commands, [['shell_tab', 'activate'], ['shell_window', 'drag'], ['shell_tab', 'close'], ['shell_window', 'drag']]);
       assert.ok(result.width >= 48 && result.right <= result.controls + 1, JSON.stringify(result));

@@ -1,7 +1,7 @@
 //! Host-side URL construction for internal pages and search.
 //!
 //! Internal pages receive initial state in URL fragments, not a command bridge.
-//! Settings writes use a separate, origin-checked message channel.
+//! Settings receives a scoped MCP credential only in its trusted WebView.
 
 use crate::history::HistoryEntry;
 use crate::omnibox;

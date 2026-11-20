@@ -4,7 +4,7 @@
 //!   1. `AppState` + snapshots the shell consumes
 //!   2. tab lifecycle (create/activate/close/navigate)
 //!   3. panels & overlay sizing
-//!   4. command dispatch (the IPC surface, §6.2)
+//!   4. native dispatch for MCP commands (§6.2)
 //!   5. webview construction
 //!   6. `run()`: startup order, event loop, event handlers
 //!
@@ -230,8 +230,6 @@ struct FindResult {
 }
 
 pub enum AppMessage {
-    /// A raw IPC envelope from the shell or overlay.
-    Ipc(Surface, String),
     ApiRequest(crate::api_server::ApiRequest),
     /// A page webview changed its document title.
     TabTitle(TabId, String),
@@ -427,35 +425,21 @@ impl AppState {
     // ---- emitting -------------------------------------------------------
 
     fn emit_raw(&mut self, target: &'static str, event: &str, payload: Value) {
-        let env = match serde_json::to_string(&ipc::Event::new(event, payload)) {
-            Ok(s) => s,
-            Err(e) => {
-                self.note(format!("serialize {event}: {e}"));
-                return;
-            }
+        let surface = match target {
+            "overlay" => Surface::Overlay,
+            "sidebar" => Surface::Sidebar,
+            _ => Surface::Shell,
         };
-        let script = format!("window.__native&&window.__native._dispatch({env})");
-        let wv = match target {
-            "overlay" => self.overlay.as_ref(),
-            "sidebar" => self.sidebar.as_ref(),
-            _ => self.shell.as_ref(),
-        };
-        if let Some(wv) = wv {
-            if let Err(e) = wv.evaluate_script(&script) {
-                self.note(format!("emit {event} -> {target}: {e}"));
-            }
+        if let Some(server) = self.api.server.as_ref() {
+            server.publish(Some(surface), event, payload);
         }
     }
 
     fn emit(&mut self, event: &str, mut payload: Value) {
         self.ai.ui.record(event, &mut payload);
         self.emit_settings(event, payload.clone());
-        self.emit_raw("shell", event, payload.clone());
-        if self.sidebar.is_some() {
-            self.emit_raw("sidebar", event, payload.clone());
-        }
-        if self.overlay.is_some() {
-            self.emit_raw("overlay", event, payload);
+        if let Some(server) = self.api.server.as_ref() {
+            server.publish(None, event, payload);
         }
     }
 
@@ -469,19 +453,6 @@ impl AppState {
         if let Surface::ApiCall(id) = source {
             if r.ok { self.wv_reply_ok(id, r.data.unwrap_or(Value::Null)); }
             else { self.wv_reply_err(id, r.error.unwrap_or_else(|| "operation failed".into())); }
-            return;
-        }
-        let Ok(body) = serde_json::to_string(&r) else { return };
-        let script = format!("window.__native&&window.__native._reply({body})");
-        let view = match source {
-            Surface::Shell => self.shell.as_ref(),
-            Surface::Overlay => self.overlay.as_ref(),
-            Surface::Sidebar => self.sidebar.as_ref(),
-            Surface::Settings(id) => self.settings_view(id),
-            Surface::ApiCall(_) => None,
-        };
-        if let Some(view) = view {
-            let _ = view.evaluate_script(&script);
         }
     }
 
@@ -1102,25 +1073,6 @@ impl AppState {
 
     // ---- 4. command dispatch -------------------------------------------
 
-    fn dispatch(&mut self, source: Surface, raw: &str) -> Option<Reply> {
-        let req: Request = match serde_json::from_str(raw) {
-            Ok(r) => r,
-            Err(e) => return Some(Reply::err(None, format!("bad envelope: {e}"))),
-        };
-        let id = self.wv_api_begin(crate::api_server::ApiCaller { id: 0, builtin: true }, api::ReplyTarget::Ui(source, req.id));
-        let previous = std::mem::replace(&mut self.api.current, id);
-        let result = self.wv_execute(&req, source);
-        self.api.current = previous;
-        let pending = self.api.pending.get(&id)?;
-        if pending.deferred && result.is_ok() { return None; }
-        self.api.pending.remove(&id);
-        match result {
-            Ok(Some(value)) => Some(Reply::ok(req.id, value)),
-            Ok(None) => Some(Reply::empty(req.id)),
-            Err(error) => Some(Reply::err(req.id, error)),
-        }
-    }
-
     fn run(&mut self, req: &Request) -> Result<Option<Value>, String> {
         self.wv_execute(req, Surface::Shell)
     }
@@ -1380,15 +1332,14 @@ impl AppState {
 
     /// One dispatch of a driver command, returning the reply's ok flag.
     fn driver_call(&mut self, cmd: &str, payload: Value) -> bool {
-        let raw = json!({ "id": 0, "cmd": cmd, "payload": payload }).to_string();
-        let reply = self.dispatch(Surface::Shell, &raw);
-        let Some(reply) = reply else { return true };
-        let text = serde_json::to_string(&reply).unwrap_or_default();
-        let ok = text.contains("\"ok\":true");
-        if !ok {
-            self.note(format!("DRIVER {cmd} -> {text}"));
+        let request = Request { id: None, cmd: cmd.to_string(), payload };
+        match self.run(&request) {
+            Ok(_) => true,
+            Err(error) => {
+                self.note(format!("DRIVER {cmd} -> {error}"));
+                false
+            }
         }
-        ok
     }
 
     fn driver_script(&self) -> Vec<(&'static str, Value)> {
@@ -1671,6 +1622,11 @@ impl AppState {
             // Only the bundled Settings document may send settings changes.
             .with_initialization_script(include_str!("../ui/probe.js"))
             .with_initialization_script(include_str!("../ui/pdf-drop.js"))
+            .with_initialization_script(if tab.url == "native://settings" {
+                self.wv_ui_bootstrap(Surface::Settings(id))
+            } else {
+                String::new()
+            })
             .with_custom_protocol("asset".into(), asset_handler())
             .with_ipc_handler(move |req: HttpRequest<String>| {
                 let _ = proxy_probe.send_event(AppMessage::PageProbe(id, req.body().clone()));
@@ -2059,7 +2015,10 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
     let api_proxy = proxy.clone();
     match crate::api_server::ApiServer::start(&dir, move |request| api_proxy.send_event(AppMessage::ApiRequest(request)).map_err(|_| "the browser is closing".to_string())) {
         Ok(server) => shared.borrow_mut().api.server = Some(server),
-        Err(error) => shared.borrow_mut().note(format!("shell API unavailable: {error}")),
+        Err(error) => {
+            platform::show_fatal(&format!("Cannot start the browser MCP server.\n\n{error}"));
+            std::process::exit(5);
+        }
     }
     shared.borrow_mut().omnibox_worker = Some(omnibox_worker::start(dir.join("data.db"), proxy.clone()));
 
@@ -2222,15 +2181,6 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
         match event {
             Event::WindowEvent { window_id: id, event, .. } if Some(id) == window_id => {
                 handle_window_event(&shared, event, control_flow)
-            }
-            Event::UserEvent(AppMessage::Ipc(source, raw)) => {
-                let reply = {
-                    let mut s = shared.borrow_mut();
-                    s.dispatch(source, &raw)
-                };
-                if let Some(reply) = reply {
-                    shared.borrow_mut().reply(source, reply);
-                }
             }
             Event::UserEvent(AppMessage::ApiRequest(request)) => {
                 shared.borrow_mut().wv_api_external(request);
@@ -2642,16 +2592,13 @@ fn shut_down(shared: &Shared) {
 
 fn build_shell(shared: &Shared) {
     let mut s = shared.borrow_mut();
-    let proxy = s.proxy();
     let builder = WebViewBuilder::new()
         .with_id("shell")
         .with_bounds(layout::rect(0, 0, 1280, 820))
         .with_visible(true)
         .with_focused(false)
         .with_custom_protocol("asset".into(), asset_handler())
-        .with_ipc_handler(move |req: HttpRequest<String>| {
-            let _ = proxy.send_event(AppMessage::Ipc(Surface::Shell, req.body().clone()));
-        })
+        .with_initialization_script(s.wv_ui_bootstrap(Surface::Shell))
         .with_navigation_handler(|url| is_asset_origin(&url))
         .with_url(ui::SHELL_URL);
     let builder = platform::configure(builder, s.environment.as_ref(), true);
@@ -2694,16 +2641,13 @@ impl AppState {
     /// overlay is live is refused by the caller, not attempted here, because a
     /// second webview would double the very cost being measured.
     fn build_overlay_webview(&mut self) {
-        let proxy = self.proxy();
         let builder = WebViewBuilder::new()
             .with_id("overlay")
             .with_bounds(layout::rect(0, 0, 0, 0))
             .with_visible(false)
             .with_transparent(true)
             .with_custom_protocol("asset".into(), asset_handler())
-            .with_ipc_handler(move |req: HttpRequest<String>| {
-                let _ = proxy.send_event(AppMessage::Ipc(Surface::Overlay, req.body().clone()));
-            })
+            .with_initialization_script(self.wv_ui_bootstrap(Surface::Overlay))
             .with_navigation_handler(|url| is_asset_origin(&url))
             .with_url("asset://shell/overlay.html");
         let builder = platform::configure(builder, self.environment.as_ref(), true);

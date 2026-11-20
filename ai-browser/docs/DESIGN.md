@@ -416,46 +416,40 @@ No code. Three surfaces: (a) host → UI events, (b) UI → host commands, (c) p
 
 ### 6.1 Transport
 
-- Shell/overlay webviews call `window.__native.invoke(cmd, payload)` → JSON over the WRY IPC bridge (`ipc_handler`), returns a JSON promise. All payloads are JSON-serializable, snake_case.
-- Host → UI: `window.__native.emit(event, payload)` via `evaluate_script`. UI subscribes with `window.__native.on(event, fn)`.
+- Shell, sidebar, overlay and Settings use the same authenticated MCP Streamable HTTP service as browser-control agents. The shared UI client exposes `window.__shell.invoke(name, arguments)` and `window.__shell.on(event, listener)`; neither command IPC nor host-injected JavaScript delivers public commands or events.
+- MCP tools execute commands; resources expose current state; `resources/subscribe` and authenticated `GET /mcp` deliver standard `notifications/resources/updated`. A notification identifies a changed resource, not its contents: clients then use `resources/read`.
 - **One-way state**: the host owns `Tab`, `Group`, `Download`, `History`, `Settings`. The UI never mutates its own copies; it sends a command and waits for the resulting `state.*` event. Optimistic rendering is allowed **only** for hover/focus/selection, never for tab order or existence.
-- IPC is plain JSON; no binary. A `state.tabs` payload for 100 tabs must be ≤ 8 KB — send diffs (`state.tab_updated`) in addition to full snapshots.
+- The service starts with the browser, even without an AI worker. The profile's `shell-api.json` exports the external endpoint and credential. Embedded surfaces receive separate, unexported, surface-scoped credentials only in trusted bundled top-level documents. Native page probes and the AI utility's private execution protocol remain implementation details, not parallel public browser APIs.
 
 ### 6.2 Commands (UI → host)
 
-| Command | Payload | Result event |
+The authoritative tool names, descriptions, operations and schemas live in `ai_platform_contract::browser::definitions()` and are discoverable through MCP `tools/list` and `shell://interface`. The table below replaces the historical dotted command names; there are no compatibility aliases. Replies complete their MCP request directly, including asynchronous agent-management operations.
+
+| Tool | Representative arguments | Result / related update |
 |---|---|---|
-| `nav.open` | `{ url, disposition: "current"\|"new_tab"\|"new_tab_background" }` | `tab.created` / `tab.navigated` |
-| `nav.back` / `nav.forward` / `nav.reload` / `nav.reload_ignoring_cache` / `nav.stop` | `{ tab_id }` | `tab.navigated` or `tab.loading` |
-| `tab.select` | `{ tab_id }` | `tab.activated` |
-| `tab.close` | `{ tab_id }` | `tab.closed` |
-| `tab.move` | `{ tab_id, before_tab_id \| after_tab_id, group_id \| null }` | `state.tabs` |
-| `tab.pin` / `tab.unpin` | `{ tab_id }` | `state.tabs` |
-| `tab.reopen_closed` | `{}` | `tab.created` |
-| `group.create` | `{ name, color, tab_ids }` | `state.groups` |
-| `group.rename` / `group.set_color` / `group.collapse` / `group.delete` | `{ group_id, … }` | `state.groups` |
-| `find.start` / `find.query` / `find.next` / `find.prev` / `find.stop` | `{ tab_id, query, case_sensitive, regex_or_whole_word }` | `find.result { active, total, supported_flags }` |
-| `zoom.set` / `zoom.reset` | `{ tab_id, factor }` | `tab.zoom_changed` |
-| `omnibox.query` | `{ text, limit }` | `omnibox.results { mode, rows[] }` — **host** performs history search and URL normalization so the ranking lives Rust-side and is unit-testable |
-| `history.query` | `{ tokens, limit, offset }` | `history.results` |
-| `history.forget` | `{ entry_ids[] \| { site } }` | `state.history_meta` |
-| `history.clear` | `{ scope: "all"\|"range", range? }` | `state.history_meta` |
-| `download.action` | `{ download_id, action: "open"\|"reveal"\|"pause"\|"resume"\|"cancel"\|"retry"\|"remove" }` | `state.downloads` |
-| `download.clear_list` | `{}` | `state.downloads` |
-| `settings.update` | `{ key, value }` | `state.settings` |
-| `shell.focus_omnibox` / `shell.toggle_rail` / `shell.open_palette` / `shell.close_top_overlay` | `{}` | `shell.focus_changed` |
-| `window.minimize` / `window.toggle_maximize` / `window.close` | `{}` | — |
-| `diagnostics.self_test` | `{}` | `diagnostics.report { startup_ms, tabs, process_list, egress_log }` — backs W7/W10 |
+| `shell_tab` | `{ operation: "open", url, background }` or `{ operation: "activate", tab_id }` | `tab.created`, `tab.activated`, `state.tabs` |
+| `shell_page_navigate` | `{ url, tab_id? }` | `tab.navigated` |
+| `shell_canvas` | `{ operation: "open", rows, cols }` | canvas state in `state.tabs` |
+| `shell_group` | `{ operation: "create", name, color }` | `state.groups` |
+| `shell_omnibox` | `{ operation: "query", text, limit }` | ranked rows returned directly |
+| `shell_download` | `{ operation: "open", download_id }` | `state.downloads` |
+| `shell_settings` | `{ operation: "set", key, value }` | `state.settings` |
+| `shell_ui` | `{ operation: "omnibox_focus" }` | scoped UI event |
+| `shell_window` | `{ operation: "state_get" }` | window state / `state.window` |
+| `shell_agent` | `{ operation: "context_get" }` | current context / `context.changed` |
+| `shell_diagnostics` | `{ operation: "self_test" }` | diagnostics result |
 
 `Ctrl+W`-style shortcuts that originate in the **page** webview are intercepted host-side (accelerator) and delivered to the UI as `shell.shortcut { name }` before the page sees them, except those explicitly allowed to the page (see `data-intercept` rule §3.5).
 
 ### 6.3 Events (host → UI)
 
-`tab.created`, `tab.closed`, `tab.activated`, `tab.navigated { url, title, can_go_back, can_go_forward, is_loading }`, `tab.loading`, `tab.crashed`, `tab.sleeping_changed`, `tab.zoom_changed`, `tab.favicon_changed`, `state.tabs`, `state.groups`, `state.downloads`, `state.history_meta`, `state.settings`, `omnibox.results`, `find.result`, `nav.failed { code, url, navigation_id }`, `shell.focus_changed`, `shell.shortcut`, `diagnostics.report`, `app.ready`.
+Read `shell://interface` for the event catalog, descriptions and public/private visibility. Current-state resources are `shell://context`, `shell://tabs`, `shell://groups`, `shell://window`, `shell://settings`, `shell://downloads` and `shell://chat`. `resources/list` and `resources/templates/list` discover these contracts.
 
-`tab.navigated` is coalesced: at most one per 100 ms per tab; the UI renders the latest.
+For example, subscribe to `shell://context`; an ordinary user selection change publishes `notifications/resources/updated` with `{ "uri": "shell://context" }`. Read the resource to obtain the latest selection and page context. API-driven changes publish through the same path. Unsubscribed sessions receive no corresponding updates; connecting alone does not subscribe or trigger an external agent run.
 
-**Favicons:** host provides `tab.favicon_changed { tab_id, data_url }` with a ≤ 4 KB `data:` URL. UI never fetches favicons itself (no extra network).
+For ordered event payloads, first read `shell://events` to establish its current `sequence`, subscribe to that resource, open the authenticated SSE stream, then read `shell://events?after=<sequence>` whenever notified. The bounded journal returns ordered `{ sequence, event, payload }` entries and advances its cursor over invisible events. `reset: true` means history was evicted: restore current-state resources instead of applying an incomplete replay. Each new stream receives initial subscribed-resource notifications, closing the subscribe/open race. Trusted UI bootstraps include an earlier cursor so events emitted while the document loads are not lost. Reconnection replays events, never browser writes.
+
+UI-only commands such as focus, overlays and clipboard actions stay scoped to trusted surfaces and never leak to external subscribers. Settings retains its restricted command allowlist and filtered events. HTTP reads, native replies and SSE writes use asynchronous I/O on one event loop, with no polling delay or blocked request workers. Publications wake subscribed streams immediately. UI and agent calls have separate bounded in-flight budgets, so pending agent operations cannot exhaust UI command capacity; excess calls fail without being dispatched or retried. HTTP connections are reused, approved-origin preflights are cached, and pipelined requests retain their framing. Connections, request sizes, reads and writes remain bounded, and shutdown cancels outstanding transport tasks.
 
 ### 6.4 Persisted state
 
@@ -471,7 +465,7 @@ One `session.json` (sub-second writes debounced 500 ms, atomic replace) + one `h
 
 **Startup path:** read settings → open main window → create shell webview (paint header + rail skeleton from `session.json` before any tab webview is created) → create active tab webview. This ordering is what makes W1 reachable.
 
-**Security:** the shell/overlay webviews load only bundled `asset://` content; no remote navigation is permitted in them (host rejects any navigation whose origin is not the asset origin). The page webviews are unprivileged. IPC is available **only** on shell/overlay webviews; page webviews get no `__native` and no host objects.
+**Security:** trusted UI loads only bundled `asset://` content (mapped to `https://asset.shell` on Windows). Ordinary page WebViews receive no Shell MCP credential or client. Settings alone gets a restricted, document-bound UI credential. Browser-origin requests require a trusted UI credential and an exact approved origin; external agents use their separate bearer credential without browser CORS authority. Tokens never travel in URLs or model context.
 
 ---
 

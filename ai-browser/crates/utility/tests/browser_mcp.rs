@@ -1,5 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod tabs { pub use ai_platform_contract::identity::TabId; }
+#[cfg_attr(windows, path = r"..\..\shell\src\ipc.rs")]
+#[cfg_attr(not(windows), path = "../../shell/src/ipc.rs")]
+#[allow(dead_code)]
+mod ipc;
+
 #[cfg_attr(windows, path = r"..\..\shell\src\api_server.rs")]
 #[cfg_attr(not(windows), path = "../../shell/src/api_server.rs")]
 mod api_server;

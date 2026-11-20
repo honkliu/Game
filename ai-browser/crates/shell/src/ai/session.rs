@@ -151,8 +151,8 @@ pub enum Pending {
     Models,
     /// An `agent.run` acknowledgement.
     AgentRun(u64),
-    /// An `agent.control` reply for the UI request with this id (0: nobody waits).
-    Control(crate::ipc::Surface, u64),
+    /// An `agent.control` reply for an MCP request, or an internal update.
+    Control(Option<u64>),
 }
 
 pub struct AiSession {

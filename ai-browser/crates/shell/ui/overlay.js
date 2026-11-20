@@ -1,3 +1,5 @@
+import { bridge } from './sidebar/mcp.js';
+
 // Overlay surface: the command palette (§3.4) and the history panel (§4.5).
 //
 // Same bridge shape as app.js. The overlay is only focusable when the host has
@@ -6,49 +8,11 @@
 (() => {
   'use strict';
 
-  const pending = new Map();
-  const listeners = new Map();
-  let nextId = 1;
-
-  function invoke(cmd, payload) {
-    const id = nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (pending.delete(id)) reject(new Error(cmd + ' timed out'));
-      }, 150000);
-      pending.set(id, { resolve, reject, timer });
-      try {
-        window.ipc.postMessage(JSON.stringify({ id, cmd, payload: payload || {} }));
-      } catch (e) {
-        pending.delete(id);
-        clearTimeout(timer);
-        reject(e);
-      }
-    });
-  }
-
-  function on(event, fn) {
-    if (!listeners.has(event)) listeners.set(event, new Set());
-    listeners.get(event).add(fn);
-  }
-
-  window.__native = {
-    invoke,
-    on,
-    _dispatch(env) {
-      const set = listeners.get(env && env.event);
-      if (!set) return;
-      for (const fn of set) fn(env.payload);
-    },
-    _reply(reply) {
-      const entry = pending.get(reply.id);
-      if (!entry) return;
-      pending.delete(reply.id);
-      clearTimeout(entry.timer);
-      if (reply.ok) entry.resolve(reply.data);
-      else entry.reject(new Error(reply.error || 'command failed'));
-    },
-  };
+  const shell = bridge();
+  const invoke = shell.invoke.bind(shell);
+  const on = shell.on.bind(shell);
+  on('mcp.connected', () => void invoke('shell_ui', { operation: 'ready' }));
+  on('mcp.resync', () => void invoke('shell_ui', { operation: 'ready' }));
 
   const root = document.getElementById('root');
   const assistantName = /^zh(?:-|$)/i.test(navigator.language) ? '洛' : 'River';
@@ -997,4 +961,5 @@
   });
 
   on('ai.focus', () => { const i = document.getElementById('ask-input'); if (i) i.focus(); });
+  void shell.ready.catch(error => console.error('Overlay MCP connection failed', error));
 })();

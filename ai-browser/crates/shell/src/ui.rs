@@ -141,7 +141,7 @@ pub const SHELL_URL: &str = "asset://shell/index.html";
 
 /// Pages rendered inside page webviews (new tab, error, settings). These are
 /// served by the same protocol but loaded in unprivileged page webviews, which
-/// receive no `__native` bridge.
+/// receive no MCP credentials, except the explicitly trusted Settings surface.
 pub fn internal_page(kind: InternalPage) -> &'static str {
     match kind {
         InternalPage::NewTab => "asset://shell/pages/newtab.html",

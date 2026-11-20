@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
+use tokio::sync::oneshot::Sender;
 
 use ai_platform_contract::contract::{ActionLevel, ActionRequest};
 use ai_platform_contract::identity::DocumentKey;
@@ -8,10 +8,9 @@ use serde_json::{json, Value};
 
 use super::{AppState, TabId};
 use crate::api_server::{ApiCaller, ApiRequest, ApiServer};
-use crate::ipc::{Reply, Request, Surface};
+use crate::ipc::{Request, Surface};
 
 pub(super) enum ReplyTarget {
-    Ui(Surface, Option<u64>),
     External(Sender<Result<Value, String>>),
 }
 
@@ -49,7 +48,48 @@ impl AppState {
             .unwrap_or(ApiCaller {
                 id: 0,
                 builtin: true,
+                surface: None,
             })
+    }
+
+    pub(super) fn wv_ui_bootstrap(&self, surface: Surface) -> String {
+        let connection = self
+            .api
+            .server
+            .as_ref()
+            .ok_or_else(|| "MCP server unavailable".to_string())
+            .and_then(|server| server.ui_connection(surface));
+        let Ok(connection) = connection else {
+            return "console.error('Shell MCP connection unavailable')".to_string();
+        };
+        let path = match surface {
+            Surface::Shell => "/index.html",
+            Surface::Overlay => "/overlay.html",
+            Surface::Sidebar => "/sidebar/sidebar.html",
+            Surface::Settings(_) => "/pages/settings.html",
+            Surface::ApiCall(_) => return String::new(),
+        };
+        let Ok(encoded) = serde_json::to_string(&connection) else {
+            return String::new();
+        };
+        format!("(()=>{{if(window.top!==window)return;const u=new URL(location.href);if(!['asset:','http:','https:'].includes(u.protocol)||!['shell','asset.shell'].includes(u.hostname)||u.pathname!=={path:?})return;Object.defineProperty(window,'__shellMcpBootstrap',{{value:{encoded},configurable:true}});}})()")
+    }
+
+    fn wv_resource_read(&mut self, uri: &str) -> Result<Value, String> {
+        match uri {
+            "shell://context" => Ok(self.wv_agent_context_get()),
+            "shell://tabs" => Ok(self.tabs_payload()),
+            "shell://groups" => Ok(self.groups_json()),
+            "shell://window" => Ok(self.wv_window_state_get()),
+            "shell://settings" => Ok(self.wv_settings_state_get()),
+            "shell://downloads" => Ok(serde_json::json!({"downloads": self.downloads})),
+            "shell://chat" => Ok(serde_json::json!({
+                "session": self.ai.ui.snapshot(),
+                "status": self.wv_ai_status_get(),
+                "models": self.ai.models,
+            })),
+            _ => Err(format!("unknown shell resource: {uri}")),
+        }
     }
 
     pub(super) fn wv_api_begin(&mut self, caller: ApiCaller, target: ReplyTarget) -> u64 {
@@ -112,6 +152,27 @@ impl AppState {
     }
 
     pub(super) fn wv_api_external(&mut self, request: ApiRequest) {
+        if request.name == "resources/read" {
+            let result = request.args["uri"]
+                .as_str()
+                .ok_or_else(|| "resource URI required".to_string())
+                .and_then(|uri| self.wv_resource_read(uri));
+            let _ = request.reply.send(result);
+            return;
+        }
+        if let Some(Surface::Settings(tab)) = request.caller.surface {
+            let req = Request {
+                id: None,
+                cmd: request.name.clone(),
+                payload: request.args.clone(),
+            };
+            if self.settings_view(tab).is_none() || !super::settings_page::allowed(&req) {
+                let _ = request
+                    .reply
+                    .send(Err("command not available in Settings".into()));
+                return;
+            }
+        }
         if self.api.pending.len() >= 128 {
             let _ = request.reply.send(Err("the browser is busy".into()));
             return;
@@ -138,7 +199,10 @@ impl AppState {
             .api
             .pending
             .iter()
-            .filter(|(_, p)| p.started.elapsed() > Duration::from_secs(60))
+            .filter(|(_, p)| {
+                p.started.elapsed()
+                    > Duration::from_secs(if p.caller.surface.is_some() { 150 } else { 60 })
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in expired {
@@ -197,7 +261,6 @@ impl AppState {
             };
         }
         match pending.target {
-            ReplyTarget::Ui(source, request) => self.reply(source, Reply::ok(request, value)),
             ReplyTarget::External(reply) => {
                 let _ = reply.send(Ok(value));
             }
@@ -209,7 +272,6 @@ impl AppState {
             return;
         };
         match pending.target {
-            ReplyTarget::Ui(source, request) => self.reply(source, Reply::err(request, message)),
             ReplyTarget::External(reply) => {
                 let _ = reply.send(Err(message.into()));
             }

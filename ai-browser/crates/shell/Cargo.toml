@@ -37,6 +37,7 @@ percent-encoding = "2"
 url = "2"
 httparse = "1"
 getrandom = "0.3"
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "macros"] }
 # The PDF viewer fetches documents for pages (same TLS stack as the AI utility).
 ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
 

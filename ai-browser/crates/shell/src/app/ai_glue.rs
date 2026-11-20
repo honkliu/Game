@@ -484,7 +484,7 @@ impl AppState {
             }
             (Pending::AgentRun(run), ResponsePayload::Failure(f)) => self.agent_run_failed(run, &f),
             (Pending::AgentRun(_), ResponsePayload::Ok(_)) => {}
-            (Pending::Control(source, req), payload) => self.agent_control_reply(source, req, payload),
+            (Pending::Control(req), payload) => self.agent_control_reply(req, payload),
         }
     }
 
@@ -1114,15 +1114,12 @@ impl AppState {
     }
 
     fn ai_build_sidebar(&mut self) {
-        let proxy = self.proxy();
         let builder = wry::WebViewBuilder::new()
             .with_id("sidebar")
             .with_bounds(layout::rect(0, 0, 0, 0))
             .with_visible(false)
             .with_custom_protocol("asset".into(), super::asset_handler())
-            .with_ipc_handler(move |req: wry::http::Request<String>| {
-                let _ = proxy.send_event(AppMessage::Ipc(crate::ipc::Surface::Sidebar, req.body().clone()));
-            })
+            .with_initialization_script(self.wv_ui_bootstrap(crate::ipc::Surface::Sidebar))
             .with_navigation_handler(|url| super::is_asset_origin(&url))
             .with_url("asset://shell/sidebar/sidebar.html");
         let builder = crate::platform::configure(builder, self.environment.as_ref(), true);

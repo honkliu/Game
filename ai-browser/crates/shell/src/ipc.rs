@@ -1,19 +1,6 @@
-//! The IPC contract (DESIGN §6.2 / §6.3).
-//!
-//! The WebView transport for the shared `ai_platform_contract::browser` catalog.
-//! MCP calls use the same names, arguments and native dispatcher. Existing UI
-//! events are separate from API calls and retain their event names.
-//!
-//! Wire shape (UI → host), sent with `window.ipc.postMessage(JSON)`:
-//! ```json
-//! {"id": 12, "cmd": "shell_page_navigate", "payload": {"url": "..."}}
-//! ```
-//! Host → UI (delivered by `window.__native._dispatch(json)` via evaluate_script):
-//! ```json
-//! {"id": 12, "ok": true, "data": {...}}          // command reply
-//! {"event": "tab.navigated", "payload": {...}}   // state event
-//! {"id": 12, "ok": false, "error": "message"}    // command failure
-//! ```
+//! Native dispatch values and UI surface identities. Public commands, resource
+//! reads and event subscriptions all travel through the MCP server; these types
+//! are not a second WebView command transport.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -39,7 +26,7 @@ impl Surface {
     }
 }
 
-/// A command from the UI shell.
+/// A command passed to the native dispatcher.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
     /// Correlates the reply with the pending promise. `null` for fire-and-forget.
@@ -88,19 +75,6 @@ impl Reply {
             data: None,
             error: Some(error.into()),
         }
-    }
-}
-
-/// A host → UI event.
-#[derive(Debug, Clone, Serialize)]
-pub struct Event<'a> {
-    pub event: &'a str,
-    pub payload: Value,
-}
-
-impl<'a> Event<'a> {
-    pub fn new(event: &'a str, payload: Value) -> Self {
-        Self { event, payload }
     }
 }
 

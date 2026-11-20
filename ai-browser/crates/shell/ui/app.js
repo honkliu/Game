@@ -1,72 +1,12 @@
-// native-browser shell.
-//
-// Mirrors the Rust-side envelope (src/ipc.rs) by hand. Comments name the
-// exact Rust counterpart for each piece so the two cannot drift silently.
-//
-// Host → UI:  window.__native._dispatch({"event": "...", "payload": {...}})
-// UI → host:  ipc.postMessage({"id": n, "cmd": "...", "payload": {...}})
-// Host reply: window.__native._reply({"id": n, "ok": true, "data": ...})
+import { bridge } from './sidebar/mcp.js';
 
 (() => {
   'use strict';
 
-  // ── bridge ───────────────────────────────────────────────────────────
-  const pending = new Map();
-  let nextId = 1;
-  const listeners = new Map();
-
-  function invoke(cmd, payload) {
-    const id = nextId++;
-    const body = JSON.stringify({ id, cmd, payload: payload || {} });
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (pending.delete(id)) reject(new Error(cmd + ' timed out'));
-      }, 150000);
-      pending.set(id, { resolve, reject, timer });
-      if (window.ipc && typeof window.ipc.postMessage === 'function') {
-        try { window.ipc.postMessage(body); }
-        catch (error) {
-          pending.delete(id); clearTimeout(timer); reject(error);
-        }
-      } else {
-        pending.delete(id);
-        clearTimeout(timer);
-        reject(new Error('ipc bridge unavailable'));
-      }
-    });
-  }
-
-  function on(event, fn) {
-    if (!listeners.has(event)) listeners.set(event, new Set());
-    listeners.get(event).add(fn);
-    return () => listeners.get(event).delete(fn);
-  }
-
-  function emitLocal(event, payload) {
-    const set = listeners.get(event);
-    if (!set) return;
-    for (const fn of set) {
-      try { fn(payload); } catch (e) { console.error(event, e); }
-    }
-  }
-
-  window.__native = {
-    invoke,
-    on,
-    _dispatch(env) {
-      if (!env || typeof env.event !== 'string') return;
-      emitLocal(env.event, env.payload);
-    },
-    _reply(reply) {
-      if (!reply) return;
-      const entry = pending.get(reply.id);
-      if (!entry) return;
-      pending.delete(reply.id);
-      clearTimeout(entry.timer);
-      if (reply.ok) entry.resolve(reply.data);
-      else entry.reject(new Error(reply.error || 'command failed'));
-    },
-  };
+  const shell = bridge();
+  const invoke = shell.invoke.bind(shell);
+  const on = shell.on.bind(shell);
+  on('mcp.resync', () => void invoke('shell_ui', { operation: 'ready' }));
 
   // ── state (host-owned; never mutated locally except hover/focus) ─────
   const state = {
@@ -602,7 +542,7 @@
     el.omnibox.blur();
     // The host moves OS focus back to the active page webview.
     invoke('shell_ui', { operation: 'page_focus' }).catch(() => {});
-    if (window.__native && window.__native.focusPage) window.__native.focusPage();
+    void invoke('shell_ui', { operation: 'page_focus' });
   }
 
   function focusOmnibox(selectAll = true) {
@@ -1194,13 +1134,14 @@
 
   // ── boot ─────────────────────────────────────────────────────────────
   applyTheme();
-  invoke('shell_ui', { operation: 'ready' }).then(() => {
+  on('mcp.connected', () => void invoke('shell_ui', { operation: 'ready' }).then(() => {
     // W1: report the first animation frame after the shell has painted.
     requestAnimationFrame(() => {
       const t = performance.now();
       invoke('shell_diagnostics', { operation: 'self_test' }).then(() => console.info(`[shell] first paint at ${t.toFixed(1)} ms (document)`)).catch(() => {});
     });
-  }).catch((e) => console.error('shell_ui ready', e));
+  }).catch((e) => console.error('shell_ui ready', e)));
+  void shell.ready.catch((e) => console.error('shell MCP connection', e));
 
   window.addEventListener('resize', () => {
     // The host owns geometry; this listener exists only so the dropdown

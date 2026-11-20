@@ -3,6 +3,12 @@
 
 mod common;
 
+mod tabs { pub use ai_platform_contract::identity::TabId; }
+#[cfg_attr(windows, path = r"..\..\shell\src\ipc.rs")]
+#[cfg_attr(not(windows), path = "../../shell/src/ipc.rs")]
+#[allow(dead_code)]
+mod ipc;
+
 #[cfg_attr(windows, path = r"..\..\shell\src\api_server.rs")]
 #[cfg_attr(not(windows), path = "../../shell/src/api_server.rs")]
 #[allow(dead_code)]
@@ -162,7 +168,7 @@ impl Shell {
         }))
     }
 
-    fn answer_snapshot(&mut self, request: &ApiRequest) {
+    fn answer_snapshot(&mut self, request: ApiRequest) {
         assert_eq!(request.name, "shell_page_snapshot");
         assert_eq!(request.args["document"], json!(self.document.document_token()));
         let ResponsePayload::Ok(payload) = self.snapshot_payload() else { panic!() };
@@ -170,12 +176,12 @@ impl Shell {
     }
 
     /// Serves utility requests until `task.finish`, then waits for stragglers.
-    fn run_until_finish(&mut self, mut on_request: impl FnMut(&mut Shell, &ApiRequest)) -> (Vec<Frame>, Vec<TaskOutcome>) {
+    fn run_until_finish(&mut self, mut on_request: impl FnMut(&mut Shell, ApiRequest)) -> (Vec<Frame>, Vec<TaskOutcome>) {
         let mut seen = Vec::new();
         let mut finishes = Vec::new();
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {
-            while let Ok(request) = self.api_requests.try_recv() { on_request(self, &request); }
+            while let Ok(request) = self.api_requests.try_recv() { on_request(self, request); }
             assert!(std::time::Instant::now() < deadline, "no task.finish");
             let Some(frame) = self.recv(Duration::from_millis(25)) else { continue };
             match &frame {
@@ -296,7 +302,7 @@ fn cancel_over_stdio_acks_and_the_task_still_finishes_once() {
 
     // Serve the snapshot, then cancel while the model is stalled.
     let snapshot_request = shell.next_request();
-    shell.answer_snapshot(&snapshot_request);
+    shell.answer_snapshot(snapshot_request);
     std::thread::sleep(Duration::from_millis(500));
     let cancel = serde_json::to_value(CancellationRequest { task, reason: CancelReason::UserStopped }).unwrap();
     let id = shell.request(Method::CancelTask, &cancel);
@@ -335,7 +341,7 @@ fn navigation_event_makes_the_running_task_stale() {
     let id = shell.request(Method::CompleteModel, &params);
     shell.response_to(id);
     let snapshot_request = shell.next_request();
-    shell.answer_snapshot(&snapshot_request);
+    shell.answer_snapshot(snapshot_request);
     std::thread::sleep(Duration::from_millis(300));
 
     let event = serde_json::to_value(BrowserEvent::NavigationCommitted {
@@ -363,7 +369,7 @@ fn user_stopped_event_cancels_and_closing_stdin_ends_running_tasks() {
     let id = shell.request(Method::CompleteModel, &params);
     shell.response_to(id);
     let snapshot_request = shell.next_request();
-    shell.answer_snapshot(&snapshot_request);
+    shell.answer_snapshot(snapshot_request);
     std::thread::sleep(Duration::from_millis(300));
     let event = serde_json::to_value(BrowserEvent::UserStopped { task }).unwrap();
     shell.send(&Frame::notification(Method::BrowserEvent, &event));
@@ -377,7 +383,7 @@ fn user_stopped_event_cancels_and_closing_stdin_ends_running_tasks() {
     let id = shell.request(Method::CompleteModel, &params);
     shell.response_to(id);
     let snapshot_request = shell.next_request();
-    shell.answer_snapshot(&snapshot_request);
+    shell.answer_snapshot(snapshot_request);
     std::thread::sleep(Duration::from_millis(200));
     drop(shell.stdin.take());
     let mut finishes = 0;

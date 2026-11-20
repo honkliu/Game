@@ -67,11 +67,8 @@ const ask = async (text) => {
   return ui(() => window.__agentUi.messages.at(-1));
 };
 const toolMsg = (messages) => messages.filter((m) => m.role === 'tool');
-const mgmt = (resource, operation, params = {}) => ui(([resource, operation, p]) => new Promise((resolve, reject) => {
-  const req = 5000000 + Math.floor(Math.random() * 1e6);
-  const off = window.__native.on('agent.reply', r => { if (r.req === req) { off(); r.ok ? resolve(r.value) : reject(new Error(r.error)); } });
-  window.__native.invoke(resource, { ...p, operation, req }).catch(error => { off(); reject(error); });
-}), [resource, operation, params]);
+const mgmt = (resource, operation, params = {}) => ui(([resource, operation, p]) =>
+  window.__shell.invoke(resource, { ...p, operation }), [resource, operation, params]);
 
 const cases = [
   ['setup: article tab, agent mode', async () => {
@@ -270,7 +267,7 @@ const cases = [
     await waitFor(() => ui((n0) => window.__agentUi.messages.length >= n0 + 2, n));
     assert.match(calls[0].messages[0].content, /Navigation mode: MANUAL/);
     await side.waitForSelector('.ag-link');
-    const tabs = await ui(() => window.__native.invoke('shell_agent', { operation: 'context_get' }));
+    const tabs = await ui(() => window.__shell.invoke('shell_agent', { operation: 'context_get' }));
     assert.ok(!tabs.tabs.some((t) => /\/live/.test(t.url)), 'nothing was opened yet');
     await side.click('.ag-link');
     await app.pageWith(/127\.0\.0\.1:\d+\/live/);
@@ -311,7 +308,7 @@ const cases = [
     const page = await app.pageWith(/127\.0\.0\.1:\d+\/live/);
     await page.waitForSelector('#nm');
     await sleep(800);
-    await ui(() => { window.__ctxEvents = []; window.__native.on('context.changed', (c) => window.__ctxEvents.push(c)); });
+    await ui(() => { window.__ctxEvents = []; window.__shell.on('context.changed', (c) => window.__ctxEvents.push(c)); });
     await page.fill('#nm', 'Ada Lovelace');
     await page.fill('#pw', 'hunter2-secret');
     await waitFor(() => ui(() => window.__ctxEvents.some((c) => c.content && c.content.filled >= 1)));
@@ -335,7 +332,7 @@ const cases = [
     calls.length = 0;
     script = () => ({ text: 'ok' });
     const n = await ui(() => window.__agentUi.messages.length);
-    await ui(() => window.__native.invoke('shell_agent', { operation: 'run', messages: [{ role: 'user', content: 'hi' }], context_override: 'USER-EDITED-CONTEXT-77' }));
+    await ui(() => window.__shell.invoke('shell_agent', { operation: 'run', messages: [{ role: 'user', content: 'hi' }], context_override: 'USER-EDITED-CONTEXT-77' }));
     await waitFor(() => calls.length > 0);
     const system = calls[0].messages[0].content;
     assert.match(system, /USER-EDITED-CONTEXT-77/);
@@ -405,14 +402,14 @@ const cases = [
 
   ['pane resize: width follows the request and is clamped', async () => {
     const w0 = await ui(() => window.innerWidth);
-    const r = await ui(() => window.__native.invoke('shell_ai', { operation: 'pane_resize', width: 600 }));
+    const r = await ui(() => window.__shell.invoke('shell_ai', { operation: 'pane_resize', width: 600 }));
     assert.equal(r.width, 600);
     await waitFor(() => ui(() => Math.abs(window.innerWidth - 600) <= 1));
-    const small = await ui(() => window.__native.invoke('shell_ai', { operation: 'pane_resize', width: 10 }));
+    const small = await ui(() => window.__shell.invoke('shell_ai', { operation: 'pane_resize', width: 10 }));
     assert.equal(small.width, 320);
-    const big = await ui(() => window.__native.invoke('shell_ai', { operation: 'pane_resize', width: 5000 }));
+    const big = await ui(() => window.__shell.invoke('shell_ai', { operation: 'pane_resize', width: 5000 }));
     assert.ok(big.width > 900, 'no fixed maximum');
-    await ui(() => window.__native.invoke('shell_ai', { operation: 'pane_resize', width: 420 }));
+    await ui(() => window.__shell.invoke('shell_ai', { operation: 'pane_resize', width: 420 }));
     await waitFor(() => ui(() => Math.abs(window.innerWidth - 420) <= 1));
     assert.ok(w0 > 0);
     assert.ok(await side.locator('#resize-grip').count());

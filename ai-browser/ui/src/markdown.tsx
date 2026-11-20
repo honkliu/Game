@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import { useMemo } from 'preact/hooks';
-import { bridge } from './ipc';
+import { bridge } from './mcp';
 
 const SAFE_URL = /^https?:\/\/[^\s<>"']+$/i;
 const purifier = DOMPurify(window);

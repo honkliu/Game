@@ -208,16 +208,7 @@ async function engineSelection(page, { selectAll = false } = {}) {
 }
 
 async function preview() {
-  return app.shell.evaluate(() => new Promise((resolve, reject) => {
-    const req = 980001;
-    const timeout = setTimeout(() => { off(); reject(new Error('context preview timed out')); }, 15000);
-    const off = window.__native.on('agent.reply', result => {
-      if (result.req !== req) return;
-      clearTimeout(timeout); off();
-      result.ok ? resolve(result.value) : reject(new Error(result.error));
-    });
-    window.__native.invoke('shell_agent', { operation: 'context_preview', req }).catch(reject);
-  }));
+  return app.invoke('shell_agent', { operation: 'context_preview' });
 }
 
 async function assertRiverSelection(marker, { alreadyOpen = false } = {}) {
@@ -271,7 +262,7 @@ failed = await run([
   ['selecting PDF text reaches the AI selection pipeline', async () => {
     const result = await nativePdfText(app.child.pid, 'Quarterly revenue', 'Quarterly revenue');
     assert.equal(result.selected, 'Quarterly revenue');
-    await app.shell.waitForFunction(async () => (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === 'Quarterly revenue');
+    await app.shell.waitForFunction(async () => (await window.__shell.invoke('shell_agent', { operation: 'context_get' })).page.selection === 'Quarterly revenue');
     const ctx = await app.invoke('shell_agent', { operation: 'context_get' });
     assert.match(ctx.page.selection || '', /Quarterly/, JSON.stringify(ctx.page));
   }],
@@ -287,12 +278,12 @@ failed = await run([
       assert.ok(actual.trim(), 'native selection exists');
       assert.notEqual(actual, accessibility.selected, 'fixture reproduces the accessibility offset mismatch');
       await app.shell.waitForFunction(async expected =>
-        (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === expected, actual);
+        (await window.__shell.invoke('shell_agent', { operation: 'context_get' })).page.selection === expected, actual);
       await assertRiverSelection(actual);
       const multiline = await engineSelection(page, { selectAll: true });
       assert.match(multiline, /Example authors[\r\n]+Abstract[\r\n]+Quarterly revenue/);
       await app.shell.waitForFunction(async expected =>
-        (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === expected, multiline);
+        (await window.__shell.invoke('shell_agent', { operation: 'context_get' })).page.selection === expected, multiline);
       await assertRiverSelection(multiline);
     } finally {
       await app.invoke('shell_page_navigate', { url: `${base}/doc.pdf` });
@@ -347,12 +338,12 @@ failed = await run([
   ['native selection clears when clicking away from text', async () => {
     const page = await app.pageWith(/\/doc\.pdf$/);
     await page.mouse.click(50, 400);
-    await app.shell.waitForFunction(async () => !(await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection);
+    await app.shell.waitForFunction(async () => !(await window.__shell.invoke('shell_agent', { operation: 'context_get' })).page.selection);
   }],
   ['PDF find reports and navigates document text', async () => {
     await app.shell.evaluate(() => {
       window.__pdfFindResults = [];
-      window.__native.on('find.result', result => window.__pdfFindResults.push(result));
+      window.__shell.on('find.result', result => window.__pdfFindResults.push(result));
     });
     await app.invoke('shell_page_find', { operation: 'start', query: 'revenue' });
     await app.shell.waitForFunction(() => window.__pdfFindResults.at(-1)?.total === 1);
@@ -397,7 +388,7 @@ failed = await run([
     for (const marker of ['FIRST-PAGE', 'SECOND-PAGE', 'THIRD-PAGE']) assert.ok(content.includes(marker), marker);
     await nativePdfText(app.child.pid, 'FIRST-PAGE', true);
     await app.shell.waitForFunction(async () =>
-      (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection?.includes('THIRD-PAGE'));
+      (await window.__shell.invoke('shell_agent', { operation: 'context_get' })).page.selection?.includes('THIRD-PAGE'));
     const selected = (await app.invoke('shell_agent', { operation: 'context_get' })).page.selection;
     for (const marker of ['FIRST-PAGE', 'SECOND-PAGE', 'THIRD-PAGE']) {
       assert.equal(selected.split(marker).length - 1, 1, 'multi-page selections are not duplicated');
@@ -660,7 +651,7 @@ failed = await run([
     assert.match(JSON.stringify(await preview()), /Local dropped PDF document/);
     await nativePdfText(app.child.pid, 'Local dropped PDF', 'Local dropped PDF');
     await app.shell.waitForFunction(async () =>
-      (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === 'Local dropped PDF');
+      (await window.__shell.invoke('shell_agent', { operation: 'context_get' })).page.selection === 'Local dropped PDF');
     await assertRiverSelection('Local dropped PDF');
     const after = await app.invoke('shell_agent', { operation: 'context_get' });
     assert.equal(after.page.tab_id, before.page.tab_id, 'opens in the same page, not another tab');
@@ -729,7 +720,7 @@ failed = await run([
       assert.ok(!content.includes(other), content);
       await nativePdfText(app.child.pid, marker, marker);
       await app.shell.waitForFunction(async expected =>
-        (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === expected, marker);
+        (await window.__shell.invoke('shell_agent', { operation: 'context_get' })).page.selection === expected, marker);
     }
   }],
   ['Ctrl+scroll in another PDF canvas cell focuses and zooms only that cell', async () => {
@@ -741,14 +732,14 @@ failed = await run([
     await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 1 });
     await app.shell.evaluate(() => {
       window.__canvasZoomEvents = [];
-      window.__native.on('tab.zoom_changed', value => window.__canvasZoomEvents.push(value));
+      window.__shell.on('tab.zoom_changed', value => window.__canvasZoomEvents.push(value));
     });
     const left = await app.pageWith(/\/left\.pdf$/);
     await left.mouse.move(160, 240);
     await left.keyboard.down('Control');
     try { await left.mouse.wheel(0, -120); } finally { await left.keyboard.up('Control'); }
     await app.shell.waitForFunction(async () =>
-      (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.url.endsWith('/left.pdf'));
+      (await window.__shell.invoke('shell_agent', { operation: 'context_get' })).page.url.endsWith('/left.pdf'));
     const afterLeft = await height('LEFT-NATIVE-PDF');
     const afterRight = await height('RIGHT-NATIVE-PDF');
     const label = await app.shell.locator('#zoom-label').textContent();
@@ -788,7 +779,7 @@ failed = await run([
     for (const [cell, expected] of [[selected, 'revenue'], [other, full], [selected, 'revenue']]) {
       await app.invoke('shell_canvas', { operation: 'cell_focus', cell });
       await app.shell.waitForFunction(async text =>
-        (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === text, expected);
+        (await window.__shell.invoke('shell_agent', { operation: 'context_get' })).page.selection === text, expected);
     }
   }],
   ['an unavailable native selection protocol clears River rather than using inaccurate UIA text', async () => {
@@ -796,20 +787,20 @@ failed = await run([
     const page = await app.pageWith(/\/unavailable\.pdf$/);
     await nativePdfText(app.child.pid, 'Quarterly revenue', 'revenue');
     await app.shell.waitForFunction(async () =>
-      (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === 'revenue');
+      (await window.__shell.invoke('shell_agent', { operation: 'context_get' })).page.selection === 'revenue');
     await nativePdfEvaluate(page, `globalThis.__savedPdfPort = viewer.pluginController_.messagePort_;
       viewer.pluginController_.messagePort_ = null; 'unavailable'`);
     try {
       await nativePdfText(app.child.pid, 'Quarterly revenue', 'twelve percent');
       await app.shell.waitForFunction(async () =>
-        (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === null);
+        (await window.__shell.invoke('shell_agent', { operation: 'context_get' })).page.selection === null);
     } finally {
       await nativePdfEvaluate(page, `viewer.pluginController_.messagePort_ = globalThis.__savedPdfPort;
         delete globalThis.__savedPdfPort; 'restored'`);
     }
     await nativePdfText(app.child.pid, 'Quarterly revenue', 'revenue grew');
     await app.shell.waitForFunction(async () =>
-      (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === 'revenue grew');
+      (await window.__shell.invoke('shell_agent', { operation: 'context_get' })).page.selection === 'revenue grew');
   }],
   ['a delayed native PDF selection reply cannot repopulate River after navigation', async () => {
     const page = await app.pageWith(/\/unavailable\.pdf$/);

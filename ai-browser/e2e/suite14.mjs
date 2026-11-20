@@ -53,7 +53,7 @@ const send = async (question, marker) => {
 };
 let failed = 0;
 try {
-  await app.shell.waitForFunction(() => !!window.__native);
+  await app.shell.waitForFunction(() => !!window.__shell);
   await app.invoke('shell_page_navigate', { url: `http://127.0.0.1:${fixtures.port}/` });
   await app.pageWith(/127\.0\.0\.1:\d+\/$/);
   workingId = (await app.invoke('shell_agent', { operation: 'context_get' })).page.tab_id;
@@ -63,18 +63,10 @@ try {
       settings = await app.pageWith(/pages\/settings\.html/);
       await settings.getByRole('heading', { name: 'Saved chats', exact: true }).waitFor();
       assert.equal(app.ctx.pages().some(page => /sidebar\.html/.test(page.url())), false);
-      await settings.evaluate(() => new Promise((resolve, reject) => {
-        const req = 777;
-        const stop = window.__native.on('agent.reply', result => {
-          if (result.req !== req) return;
-          stop();
-          result.ok ? resolve(result.value) : reject(new Error(result.error));
-        });
-        window.__native.invoke('shell_conversation', { operation: 'save', req, id: 'unified-fixture', doc: {
+      await settings.evaluate(() => window.__shell.invoke('shell_conversation', { operation: 'save', id: 'unified-fixture', doc: {
           title: 'Reopen fixture chat', updated: Date.now(),
           messages: [{ role: 'user', content: 'Saved question' }, { role: 'assistant', content: 'Saved answer fixture' }],
-        } }).catch(reject);
-      }));
+        } }));
       await settings.getByRole('tab', { name: 'General', exact: true }).click();
       await settings.getByRole('tab', { name: 'Saved chats', exact: true }).click();
       await settings.getByRole('button', { name: /Reopen fixture chat/ }).click();

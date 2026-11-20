@@ -424,14 +424,31 @@ impl AppState {
 
 impl AppState {
     pub(super) fn wv_ui_ready(&mut self) -> Result<Option<Value>, String> {
-        self.shell_ready_ms = Some(elapsed_ms(self.start_tick));
+        if self.wv_api_caller().surface == Some(Surface::Overlay) {
+            let kind = match self.overlay_rect {
+                Overlay::Closed if self.panel == Panel::History => Some("full_page"),
+                Overlay::Closed => None,
+                Overlay::Dropdown { .. } => Some("dropdown"),
+                Overlay::Palette => Some("palette"),
+                Overlay::Ask => Some("ask"),
+                Overlay::Anchored { .. } => Some(if self.ai.toolbar_open { "toolbar" } else { "card" }),
+            };
+            self.emit_raw("overlay", "overlay.state", json!({ "open": kind.is_some(), "kind": kind }));
+            return Ok(None);
+        }
+        let first_ready = self.shell_ready_ms.is_none();
+        self.shell_ready_ms.get_or_insert(elapsed_ms(self.start_tick));
         self.note("shell ready");
         self.emit_tabs();
         self.emit("state.settings", self.wv_settings_state_get());
         self.emit("state.downloads", json!({ "downloads": self.downloads }));
-        self.emit("app.ready", json!({}));
+        self.emit("shell.panel", json!({ "panel": panel_str(self.panel) }));
+        if first_ready { self.emit("app.ready", json!({})); }
         self.emit_window_state();
         self.apply_layout();
+        if !first_ready {
+            return Ok(None);
+        }
         // The shell is painted, so the rail is already on screen (W1).
         // Now create the active tab's webview and load its URL: this is
         // the ordering §6.4 prescribes, and it is why navigation is not

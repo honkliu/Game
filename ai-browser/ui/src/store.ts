@@ -4,7 +4,7 @@
 // selection, content); this module only mirrors them and decides what the user sees.
 
 import { batch, computed, signal } from '@preact/signals';
-import { bridge, createAgentCalls } from './ipc';
+import { bridge, createAgentCalls } from './mcp';
 import { contextSignature, echoOf, reconcileEdit, type ContextEdit } from './context';
 import { modelCommand } from './model_commands';
 import {
@@ -537,6 +537,16 @@ export function startStore() {
     } catch (e) { setStatus(errText(e), 'error'); }
   };
   on('conversation.open', () => void pendingConversation());
+  let restoring: Promise<void> | undefined;
+  const restore = () => {
+    restoring ??= (async () => {
+      await Promise.all([refreshContext(), refreshStatus(), refreshAgentState(), syncSession()]);
+      await native.invoke('shell_ai', { operation: 'models_list' });
+      await pendingConversation();
+    })().catch(e => setStatus(errText(e), 'error')).finally(() => { restoring = undefined; });
+  };
+  on('mcp.resync', restore);
+  on('mcp.connected', restore);
   on('state.settings', (p) => {
     const s = p || {};
     document.documentElement.dataset.theme = (s.theme || 'system') === 'system' ? (s.system_dark ? 'dark' : 'light') : s.theme;
@@ -560,9 +570,5 @@ export function startStore() {
     },
   };
 
-  void (async () => {
-    await Promise.all([refreshContext(), refreshStatus(), refreshAgentState(), syncSession()]);
-    native.invoke('shell_ai', { operation: 'models_list' }).catch(() => undefined);
-    await pendingConversation();
-  })();
+  void native.ready.then(restore).catch(e => setStatus(errText(e), 'error'));
 }

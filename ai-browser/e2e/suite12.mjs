@@ -24,7 +24,7 @@ const searchTemplate = `${base}/search?q=%s&source=a+b`;
 const app = await launch({ debugPort: await debugPort(), withProvider: false });
 let failed = 0;
 try {
-  await app.shell.waitForFunction(() => !!window.__native);
+  await app.shell.waitForFunction(() => !!window.__shell);
   failed += await run([
     ['the executable embeds multi-resolution icons and sets native window and taskbar icons', async () => {
       const icons = nativeAppIcons(app.child.pid);
@@ -73,7 +73,7 @@ try {
       await working.locator('#nm').fill('Unsaved work beside River');
       await app.shell.evaluate(() => {
         window.__settingsPanel = '';
-        window.__native.on('shell.panel', p => { window.__settingsPanel = p.panel; });
+        window.__shell.on('shell.panel', p => { window.__settingsPanel = p.panel; });
       });
       await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
       const pane = await app.pageWith(/sidebar/);
@@ -236,7 +236,7 @@ try {
       await page.setContent('<p>Alpha alpha alphabet <b>alpha</b></p>');
       await app.shell.evaluate(() => {
         window.__findResults = [];
-        window.__native.on('find.result', result => window.__findResults.push(result));
+        window.__shell.on('find.result', result => window.__findResults.push(result));
       });
       assert.deepEqual(await app.shell.evaluate(() => {
         const input = document.querySelector('#find-input');

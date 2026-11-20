@@ -12,6 +12,142 @@ pub struct ShellApi {
     pub agent_default: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ShellResource {
+    pub uri: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    #[serde(rename = "mimeType")]
+    pub mime_type: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ShellResourceTemplate {
+    #[serde(rename = "uriTemplate")]
+    pub uri_template: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    #[serde(rename = "mimeType")]
+    pub mime_type: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ShellEvent {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub public: bool,
+}
+
+pub fn resources() -> Vec<ShellResource> {
+    [
+        ("shell://context", "context", "Current active page, selection and workspace context."),
+        ("shell://tabs", "tabs", "Current tabs, active tab and page loading state."),
+        ("shell://groups", "groups", "Current tab groups, ordering and collapsed state."),
+        ("shell://window", "window", "Native window, monitor and layout state."),
+        ("shell://settings", "settings", "Current browser and assistant settings; secrets remain redacted."),
+        ("shell://downloads", "downloads", "Current download entries and progress."),
+        ("shell://chat", "chat", "Current assistant conversation and agent execution state."),
+        ("shell://interface", "interface", "Canonical tool, resource, resource-template and event catalogs."),
+        ("shell://events", "events", "Current global event cursor without historical events. Read shell://events?after=N to replay visible retained events; reset signals a history gap."),
+    ].into_iter().map(|(uri, name, description)| ShellResource { uri, name, description, mime_type: "application/json" }).collect()
+}
+
+pub fn resource_templates() -> Vec<ShellResourceTemplate> {
+    vec![ShellResourceTemplate {
+        uri_template: "shell://events{?after}", name: "event replay",
+        description: "Ordered visible events after a nonnegative global sequence. Returns sequence, oldest_sequence, reset and events. Future or malformed cursors are rejected; sequence advances over private events too.",
+        mime_type: "application/json",
+    }]
+}
+
+pub fn events() -> Vec<ShellEvent> {
+    [
+        ("agent.event", "Agent lifecycle event: start, round, delta, tool_start, approval, tool_end, link, compacted, context, done or error.", true),
+        ("ai.answer", "Completed assistant answer.", true),
+        ("ai.answer.stale", "Assistant answer no longer matches the current page context.", true),
+        ("ai.candidate", "Assistant candidate answer or action.", true),
+        ("ai.context", "Assistant page and selection context updated.", true),
+        ("ai.delta", "Streaming assistant answer fragment.", true),
+        ("ai.focus", "Focus the assistant input.", false),
+        ("ai.history.cleared", "Assistant conversation history cleared.", true),
+        ("ai.link", "Assistant citation or source link.", true),
+        ("ai.models", "Available assistant models updated.", true),
+        ("ai.notice", "Assistant status or user-facing notice.", true),
+        ("ai.stage", "Assistant processing stage updated.", true),
+        ("app.ready", "Trusted UI initialization handshake completed.", false),
+        ("context.changed", "Active page, workspace or selection context changed.", true),
+        ("conversation.open", "Open a stored conversation in the UI.", false),
+        ("diagnostics.report", "Native diagnostic report available.", true),
+        ("find.result", "Page find match count and current match.", true),
+        ("history.results", "Browsing history query results.", true),
+        ("nav.failed", "Page navigation failed.", true),
+        ("overlay.state", "Overlay visibility and content state changed.", false),
+        ("page.popups_dismissed", "Page popup dismissal result.", true),
+        ("settings.section", "Select a settings UI section.", false),
+        ("shell.command_done", "UI command completed.", false),
+        ("shell.copy", "Copy selection through the trusted UI.", false),
+        ("shell.ctrl_w", "Apply close-tab keyboard handling in the UI.", false),
+        ("shell.escape", "Apply Escape keyboard handling in the UI.", false),
+        ("shell.find_action", "Apply a find-bar UI action.", false),
+        ("shell.focus_changed", "Trusted UI focus changed.", false),
+        ("shell.focus_find", "Focus the find UI.", false),
+        ("shell.item_menu", "Show a contextual item menu.", false),
+        ("shell.layout", "Shell UI layout changed.", false),
+        ("shell.overlay", "Shell overlay state changed.", false),
+        ("shell.panel", "Shell panel state changed.", false),
+        ("shell.shortcut", "Execute a trusted UI shortcut.", false),
+        ("shell.toast", "Display a UI toast notification.", false),
+        ("shell.ui_scale", "Shell UI scale changed.", false),
+        ("sidebar.selection", "Sidebar selection changed.", false),
+        ("state.downloads", "Download state snapshot changed.", true),
+        ("state.groups", "Tab-group state snapshot changed.", true),
+        ("state.history_meta", "Browsing history metadata changed.", true),
+        ("state.settings", "Browser settings snapshot changed.", true),
+        ("state.tabs", "Tab state snapshot changed.", true),
+        ("state.window", "Native window state snapshot changed.", true),
+        ("tab.activated", "Active tab changed.", true),
+        ("tab.closed", "A tab closed.", true),
+        ("tab.created", "A tab was created.", true),
+        ("tab.loading", "Tab loading progress changed.", true),
+        ("tab.navigated", "Tab navigation committed.", true),
+        ("tab.updated", "Tab metadata changed.", true),
+        ("tab.zoom_changed", "Tab page zoom changed.", true),
+    ].into_iter().map(|(name, description, public)| ShellEvent { name, description, public }).collect()
+}
+
+/// Unknown events are private by default; only the documented public families escape the UI.
+pub fn event_is_public(event: &str) -> bool {
+    event != "ai.focus"
+        && (event.starts_with("ai.")
+            || event.starts_with("tab.")
+            || event.starts_with("state.")
+            || matches!(
+                event,
+                "context.changed"
+                    | "agent.event"
+                    | "nav.failed"
+                    | "find.result"
+                    | "history.results"
+                    | "page.popups_dismissed"
+                    | "diagnostics.report"
+            ))
+}
+
+pub fn event_resource(event: &str) -> Option<&'static str> {
+    match event {
+        "context.changed" => Some("shell://context"),
+        "state.tabs" => Some("shell://tabs"),
+        "state.groups" => Some("shell://groups"),
+        "state.window" => Some("shell://window"),
+        "state.settings" => Some("shell://settings"),
+        "state.downloads" => Some("shell://downloads"),
+        "agent.event" => Some("shell://chat"),
+        _ if event.starts_with("tab.") => Some("shell://tabs"),
+        _ if event.starts_with("ai.") => Some("shell://chat"),
+        _ => None,
+    }
+}
+
 fn api(
     name: &str,
     description: &str,
@@ -366,5 +502,39 @@ mod tests {
         assert!(!mutates("shell_page_read", &json!({})));
         assert!(mutates("shell_page_navigate", &json!({})));
         assert!(mutates("unknown", &json!({})));
+    }
+
+    #[test]
+    fn resource_and_event_contracts_match_visibility_and_state_invalidation() {
+        let definitions = resources();
+        let uris: std::collections::HashSet<_> =
+            definitions.iter().map(|resource| resource.uri).collect();
+        assert_eq!(uris.len(), definitions.len());
+        let events = events();
+        let names: std::collections::HashSet<_> = events.iter().map(|event| event.name).collect();
+        assert_eq!(names.len(), events.len());
+        for event in events {
+            assert!(!event.description.is_empty());
+            assert_eq!(event.public, event_is_public(event.name), "{}", event.name);
+            if let Some(uri) = event_resource(event.name) {
+                assert!(uris.contains(uri));
+            }
+        }
+        for (event, uri) in [
+            ("tab.updated", "shell://tabs"),
+            ("state.tabs", "shell://tabs"),
+            ("state.groups", "shell://groups"),
+            ("state.settings", "shell://settings"),
+            ("state.window", "shell://window"),
+            ("state.downloads", "shell://downloads"),
+            ("context.changed", "shell://context"),
+            ("ai.delta", "shell://chat"),
+            ("agent.event", "shell://chat"),
+        ] {
+            assert_eq!(event_resource(event), Some(uri));
+        }
+        assert!(!event_is_public("unknown.event"));
+        assert!(!event_is_public("shell.command_done"));
+        assert!(!event_is_public("ai.focus"));
     }
 }
