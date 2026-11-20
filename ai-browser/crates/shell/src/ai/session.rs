@@ -182,10 +182,6 @@ pub struct AiSession {
     /// The agent run in progress (0 when none) and the counter for new ones.
     pub agent_run: u64,
     pub agent_seq: u64,
-    /// Browser tool calls that wait for a page script: utility request id → the call.
-    pub agent_evals: HashMap<u64, AgentEval>,
-    pub(crate) devtools_calls: HashMap<u64, crate::app::devtools::PendingCall>,
-    pub agent_documents: HashMap<u64, DocumentKey>,
     /// Runs and previews waiting for the active page's content before they are sent
     /// to the engine: job id → what to send.
     pub agent_jobs: HashMap<u64, AgentJob>,
@@ -205,28 +201,6 @@ pub struct AgentJob {
     pub pending: Pending,
     /// The run this job starts, so a Stop during the read can cancel it.
     pub run: Option<u64>,
-}
-
-/// A browser tool call that runs a script in a tab and answers when it returns.
-#[derive(Debug, Clone)]
-pub struct AgentEval {
-    pub tab: u64,
-    pub document: Option<DocumentKey>,
-    pub run: Option<u64>,
-    pub script: String,
-    pub attempts: u8,
-    /// A page read is retried while the page is still empty (a freshly woken tab).
-    pub is_read: bool,
-    /// A popup sweep over several pages: the pages still to do and what each answered.
-    pub chain: Option<Chain>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Chain {
-    pub rest: Vec<u64>,
-    pub results: Vec<serde_json::Value>,
-    /// Answer the agent's request at the end (otherwise announce it to the shell UI).
-    pub reply: bool,
 }
 
 impl Default for AiSession {
@@ -259,9 +233,6 @@ impl AiSession {
             extra_docs: HashMap::new(),
             agent_run: 0,
             agent_seq: 0,
-            agent_evals: HashMap::new(),
-            devtools_calls: HashMap::new(),
-            agent_documents: HashMap::new(),
             agent_jobs: HashMap::new(),
             agent_job_seq: 0,
             page_snaps: HashMap::new(),

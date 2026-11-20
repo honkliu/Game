@@ -10,7 +10,7 @@ export function BrowserPreferences({ settings }: { settings: BrowserSettings }) 
     setDraft(current => ({ ...current, [key]: value }));
     setMessage('Saving...');
     try {
-      preferences.value = await native.invoke<BrowserSettings>('settings.update', { key, value });
+      preferences.value = await native.invoke<BrowserSettings>('shell_settings', { operation: 'set', key, value });
       setMessage('Saved.');
     } catch (error) {
       setDraft(settings);
@@ -53,7 +53,7 @@ export function BrowserPreferences({ settings }: { settings: BrowserSettings }) 
       <p class="ag-help">Stored history entries: <span id="history_count">{settings.history_count}</span></p>
       {number('sleep_after_minutes', 'Sleep inactive tabs after minutes')}
       {text('download_dir', 'Download folder')}
-      <button id="open_folder" type="button" class="chip-btn" onClick={() => void native.invoke('settings.open_folder').catch(error => setMessage(String(error)))}>Open data folder</button>
+      <button id="open_folder" type="button" class="chip-btn" onClick={() => void native.invoke('shell_settings', { operation: 'profile_folder_open' }).catch(error => setMessage(String(error)))}>Open data folder</button>
       <p id="data_note" class="ag-help">{settings.data_dir}</p>
       <p id="build" class="ag-help">{settings.engine_name} runtime: {settings.engine_version}</p>
     </section>

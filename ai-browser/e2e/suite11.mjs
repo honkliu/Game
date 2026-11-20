@@ -11,7 +11,7 @@ await new Promise(resolve => reservation.server.close(resolve));
 const app = await launch({ debugPort: reservation.port, withProvider: false });
 let failed;
 try {
-  await app.invoke('nav.open', { url: `http://127.0.0.1:${fixture.port}/`, disposition: 'current' });
+  await app.invoke('shell_page_navigate', { url: `http://127.0.0.1:${fixture.port}/` });
   const page = await app.pageWith(/127\.0\.0\.1/);
   await page.waitForSelector('#p1');
   const snapshot = async () => JSON.parse(await page.evaluate(script));

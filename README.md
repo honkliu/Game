@@ -130,3 +130,37 @@ node test/bench.js      # frame-time benchmark
 - No sound or music
 - Map generation is random rather than hand-authored scenarios
 - Art is stylised and procedural, not a pixel-for-pixel reproduction of the original
+
+## AI-native browser: canonical shell API
+
+The separate `ai-browser` application shares one canonical API catalog between the
+sidebar, built-in agents and external MCP clients. Public operations use `shell_`
+names; private native host operations use `wv_`. This is a breaking rewrite:
+previous method names, dotted commands and browser-tool aliases are not accepted.
+Grouped APIs use `operation`, for example `shell_tab` with `operation: "list"`.
+Built-in and external agents use the same MCP endpoint, not private browser RPCs.
+
+While a profile is running, its `shell-api.json` contains the loopback endpoint
+`url` and external bearer `token`. Treat this file as a credential: do not commit,
+publish or log it. The built-in runtime has a separate, unexported credential.
+Each external MCP session has its own caller identity, observed documents and
+owned tabs; sharing an endpoint does not share that state.
+
+Send each JSON object below as a separate HTTP POST to the descriptor's URL with
+`Authorization: Bearer <TOKEN>`, `Content-Type: application/json` and
+`Accept: application/json, text/event-stream`. Initialize first; copy the returned
+`Mcp-Session-Id: <SESSION>` header into every subsequent request, including the
+initialized notification (which returns HTTP 202):
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"external-agent","version":"1"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"shell_tab","arguments":{"operation":"list"}}}
+```
+
+Use the discovered schemas for other calls. Canvas cells are independent live
+pages layered beneath shell/sidebar overlays, not text embedded in a container.
+A canvas container is not a page: page APIs default to its focused cell; use a
+concrete page `tab_id`, or `shell_canvas` with `operation: "cell_open"` and
+`cell` (or `row`/`col`), to target another cell explicitly.

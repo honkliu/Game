@@ -98,7 +98,7 @@ export interface ListedModel {
 }
 
 export interface Citation {
-  citation_id: number | string;
+  citation_id: number;
   ordinal: number;
   quote?: string;
 }

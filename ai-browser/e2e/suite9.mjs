@@ -11,7 +11,7 @@ const server = http.createServer((req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${server.address().port}`;
 const app = await launch({ debugPort: 9454, withProvider: false });
-const state = async () => app.invoke('canvas.state');
+const state = async () => app.invoke('shell_canvas', { operation: 'state_get' });
 const waitFor = async (fn, timeout = 15000) => {
   const end = Date.now() + timeout;
   while (Date.now() < end) { const v = await fn(); if (v) return v; await sleep(150); }
@@ -30,7 +30,7 @@ $b.Save('${file}')`;
 
 await run([
   ['a 1x2 canvas exposes one vertical divider between two touching, 4 px apart panes', async () => {
-    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [`${base}/a`, `${base}/b`] });
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 1, urls: [`${base}/a`, `${base}/b`] });
     const s = await waitFor(async () => { const c = await state(); return c.cells?.length === 2 && c.dividers?.length === 1 && c; });
     const [a, b] = s.cells;
     assert.equal(b.body.x - (a.body.x + a.body.w), 4, JSON.stringify([a.body, b.body]));
@@ -39,13 +39,13 @@ await run([
   ['canvas.resize moves the boundary and keeps a minimum width', async () => {
     const before = await state();
     const x = before.cells[0].body.x + before.cells[0].body.w + 2;
-    await app.invoke('canvas.resize', { vertical: true, index: 0, pos: x + 200 });
+    await app.invoke('shell_canvas', { operation: 'resize', vertical: true, index: 0, pos: x + 200 });
     const after = await waitFor(async () => { const c = await state(); return c.cells[0].body.w > before.cells[0].body.w + 150 && c; });
     assert.equal(after.cells[1].body.x - (after.cells[0].body.x + after.cells[0].body.w), 4);
-    await app.invoke('canvas.resize', { vertical: true, index: 0, pos: 0 });
+    await app.invoke('shell_canvas', { operation: 'resize', vertical: true, index: 0, pos: 0 });
     const tiny = await waitFor(async () => { const c = await state(); return c.cells[0].body.w < before.cells[0].body.w / 2 && c; });
     assert.ok(tiny.cells[0].body.w > 50);
-    await app.invoke('canvas.resize', { reset: true });
+    await app.invoke('shell_canvas', { operation: 'resize', reset: true });
     await waitFor(async () => Math.abs((await state()).cells[0].body.w - before.cells[0].body.w) <= 1);
   }],
   ['dragging the divider with the mouse resizes the panes (pointer events on the shell)', async () => {
@@ -76,17 +76,17 @@ await run([
     await waitFor(async () => (await state()).cells?.length === 4);
   }],
   ['in a 2x2 each row resizes its columns independently', async () => {
-    await app.invoke('canvas.create', { cols: 2, rows: 2, urls: [`/a`, `/b`, `/a`, `/b`] });
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 2, urls: [`/a`, `/b`, `/a`, `/b`] });
     const s = await waitFor(async () => { const c = await state(); return c.cells?.length === 4 && c.dividers.filter((d) => d.vertical).length === 2 && c; });
     const top = s.dividers.find((d) => d.vertical && d.row === 0);
-    await app.invoke('canvas.resize', { vertical: true, index: 0, row: 0, pos: top.rect.x + 250 });
+    await app.invoke('shell_canvas', { operation: 'resize', vertical: true, index: 0, row: 0, pos: top.rect.x + 250 });
     const a = await waitFor(async () => { const c = await state(); return c.cells[0].body.w > s.cells[0].body.w + 150 && c; });
     assert.equal(a.cells[2].body.w, s.cells[2].body.w, 'bottom-left unchanged');
     assert.equal(a.cells[3].body.w, s.cells[3].body.w, 'bottom-right unchanged');
   }],
   ['every tab header has its own colour', async () => {
-    await app.invoke('tab.new', { url: base + '/c' });
-    await app.invoke('tab.new', { url: base + '/d' });
+    await app.invoke('shell_tab', { operation: 'open', url: base + '/c' });
+    await app.invoke('shell_tab', { operation: 'open', url: base + '/d' });
     const cols = await waitFor(async () => { const c = await app.shell.evaluate(() => [...document.querySelectorAll('.tab-row')].map((r) => getComputedStyle(r).backgroundColor)); return c.length >= 3 && c; });
     assert.equal(new Set(cols).size, cols.length, JSON.stringify(cols));
   }],

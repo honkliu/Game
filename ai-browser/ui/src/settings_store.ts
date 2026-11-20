@@ -55,7 +55,7 @@ export function startSettingsStore() {
   native.on('agent.event', () => void refreshStatus());
   native.on('ai.answer', () => void refreshStatus());
   window.addEventListener('focus', () => { void refreshStatus(); void refreshAgentState(); });
-  void native.invoke<{ section: SettingsTab; settings: BrowserSettings; downloads: Download[]; skill_draft?: unknown }>('settings.state')
+  void native.invoke<{ section: SettingsTab; settings: BrowserSettings; downloads: Download[]; skill_draft?: unknown }>('shell_settings', { operation: 'state_get' })
     .then(snapshot => {
       applyPreferences(snapshot.settings);
       downloads.value = snapshot.downloads;
@@ -63,5 +63,5 @@ export function startSettingsStore() {
     }).catch(error => { settingsError.value = String(error); });
   void refreshStatus();
   void refreshAgentState();
-  void native.invoke('ai.models').catch(() => undefined);
+  void native.invoke('shell_ai', { operation: 'models_list' }).catch(() => undefined);
 }

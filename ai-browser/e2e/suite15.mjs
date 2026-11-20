@@ -91,7 +91,7 @@ if (![StorageKeys]::PostMessageW($info.focus, 257, [IntPtr]123, [IntPtr](-106797
 };
 let failed = 0;
 try {
-  await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [`${base}/left`, `${base}/right`] });
+  await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 1, urls: [`${base}/left`, `${base}/right`] });
   const left = await app.pageWith(/\/left$/);
   const right = await app.pageWith(/\/right$/);
   await Promise.all([left.waitForSelector('h1'), right.waitForSelector('h1')]);
@@ -118,18 +118,18 @@ try {
       db.close();
     }, value);
   }
-  await app.invoke('canvas.focus', { cell: 0 });
-  await app.invoke('shortcut', { name: 'ask_ai' });
+  await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 0 });
+  await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
   side = await app.pageWith(/sidebar\.html/);
   await side.waitForSelector('#ag-input');
   failed += await run([
     ['cookie and storage tools are enabled and read the focused cell, including HttpOnly cookies', async () => {
       const values = await ask([
-        ['read_cookies', { name: 'member_cookie' }],
-        ['read_storage', { storage: 'session', key: 'member' }],
-        ['read_storage', { storage: 'session', row: 0, col: 1, key: 'member' }],
+        ['shell_cookie', { operation: 'list', name: 'member_cookie' }],
+        ['shell_storage', { operation: 'read', storage: 'session', key: 'member' }],
+        ['shell_storage', { operation: 'read', storage: 'session', row: 0, col: 1, key: 'member' }],
       ]);
-      for (const name of ['read_cookies', 'write_cookie', 'read_storage', 'write_storage']) assert.ok(advertised.includes(name));
+      for (const name of ['shell_cookie', 'shell_storage']) assert.ok(advertised.includes(name));
       assert.equal(values[0].cookies[0].value, 'original');
       assert.equal(values[0].cookies[0].httpOnly, true);
       assert.equal(await left.evaluate(() => document.cookie.includes('member_cookie')), false);
@@ -139,8 +139,8 @@ try {
     }],
     ['a read tool cannot perform a write, and missing keys return an empty result', async () => {
       const values = await ask([
-        ['read_storage', { storage: 'local', key: 'member', action: 'set', value: 'injected' }],
-        ['read_storage', { storage: 'local', key: 'missing' }],
+        ['shell_storage', { operation: 'read', storage: 'local', key: 'member', action: 'set', value: 'injected' }],
+        ['shell_storage', { operation: 'read', storage: 'local', key: 'missing' }],
       ]);
       assert.equal(values[0].entries[0].value, 'original');
       assert.deepEqual(values[1].entries, []);
@@ -148,42 +148,42 @@ try {
     }],
     ['invalid explicit targets fail instead of falling back to the focused cell', async () => {
       const values = await ask([
-        ['read_storage', { storage: 'session', row: 9007199254740991, col: 0 }],
-        ['read_storage', { storage: 'session', row: 0 }],
-        ['read_storage', { storage: 'session', tab_id: 999999, cell: 0 }],
-        ['read_cookies', { tab_id: 'invalid' }],
+        ['shell_storage', { operation: 'read', storage: 'session', row: 9007199254740991, col: 0 }],
+        ['shell_storage', { operation: 'read', storage: 'session', row: 0 }],
+        ['shell_storage', { operation: 'read', storage: 'session', tab_id: 999999, cell: 0 }],
+        ['shell_cookie', { operation: 'list', tab_id: 'invalid' }],
       ]);
       assert.match(values[0], /invalid cell row/);
       assert.match(values[1], /invalid cell column/);
       assert.match(values[2], /does not exist/);
-      assert.match(values[3], /tab_id must/);
+      assert.match(values[3], /invalid type for `tab_id`/);
     }],
     ['approved storage writes remain pinned to the original cell after focus changes', async () => {
       const done = await start([
-        ['read_storage', { storage: 'session', key: 'member' }],
-        ['write_storage', values => ({ ...target(values[0]), storage: 'session', action: 'set', key: 'member', value: '{"displayName":"Alice"}' })],
+        ['shell_storage', { operation: 'read', storage: 'session', key: 'member' }],
+        ['shell_storage', values => ({ ...target(values[0]), storage: 'session', operation: 'set', key: 'member', value: '{"displayName":"Alice"}' })],
       ]);
       await side.getByRole('button', { name: 'Allow', exact: true }).last().waitFor();
       assert.equal(JSON.parse(await left.evaluate(() => sessionStorage.getItem('member'))).displayName, 'left');
-      await app.invoke('canvas.focus', { cell: 1 });
+      await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 1 });
       await allow();
       const values = await done();
       assert.equal(values[1].verified, true);
       assert.equal(JSON.parse(await left.evaluate(() => sessionStorage.getItem('member'))).displayName, 'Alice');
       assert.equal(JSON.parse(await right.evaluate(() => sessionStorage.getItem('member'))).displayName, 'right');
-      await app.invoke('canvas.focus', { cell: 0 });
+      await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 0 });
     }],
     ['denied writes do nothing and navigation invalidates approved document tokens', async () => {
       let done = await start([
-        ['read_storage', { storage: 'local', key: 'member' }],
-        ['write_storage', values => ({ ...target(values[0]), storage: 'local', action: 'set', key: 'member', value: 'denied' })],
+        ['shell_storage', { operation: 'read', storage: 'local', key: 'member' }],
+        ['shell_storage', values => ({ ...target(values[0]), storage: 'local', operation: 'set', key: 'member', value: 'denied' })],
       ]);
       await side.getByRole('button', { name: 'Deny', exact: true }).last().click();
       assert.match((await done())[1], /rejected/i);
       assert.equal(await left.evaluate(() => localStorage.getItem('member')), 'original');
       done = await start([
-        ['read_storage', { storage: 'local', key: 'member' }],
-        ['write_storage', values => ({ ...target(values[0]), storage: 'local', action: 'set', key: 'member', value: 'stale' })],
+        ['shell_storage', { operation: 'read', storage: 'local', key: 'member' }],
+        ['shell_storage', values => ({ ...target(values[0]), storage: 'local', operation: 'set', key: 'member', value: 'stale' })],
       ]);
       await side.getByRole('button', { name: 'Allow', exact: true }).last().waitFor();
       await left.reload();
@@ -194,12 +194,12 @@ try {
     }],
     ['IndexedDB discovery and committed record updates work for inline and out-of-line keys', async () => {
       const done = await start([
-        ['read_storage', { storage: 'indexeddb' }],
-        ['read_storage', { storage: 'indexeddb', database: 'members' }],
-        ['read_storage', { storage: 'indexeddb', database: 'members', object_store: 'records', key: 'member' }],
-        ['write_storage', values => ({ ...target(values[2]), storage: 'indexeddb', database: 'members', object_store: 'records', action: 'set', key: 'member', value: { id: 'member', displayName: 'Alice' } })],
-        ['write_storage', values => ({ ...target(values[2]), storage: 'indexeddb', database: 'members', object_store: 'keyed', action: 'set', key: 'member', value: { displayName: 'Keyed Alice' } })],
-        ['read_storage', { storage: 'indexeddb', database: 'members', object_store: 'records', key: 'member' }],
+        ['shell_storage', { operation: 'read', storage: 'indexeddb' }],
+        ['shell_storage', { operation: 'read', storage: 'indexeddb', database: 'members' }],
+        ['shell_storage', { operation: 'read', storage: 'indexeddb', database: 'members', object_store: 'records', key: 'member' }],
+        ['shell_storage', values => ({ ...target(values[2]), storage: 'indexeddb', database: 'members', object_store: 'records', operation: 'set', key: 'member', value: { id: 'member', displayName: 'Alice' } })],
+        ['shell_storage', values => ({ ...target(values[2]), storage: 'indexeddb', database: 'members', object_store: 'keyed', operation: 'set', key: 'member', value: { displayName: 'Keyed Alice' } })],
+        ['shell_storage', { operation: 'read', storage: 'indexeddb', database: 'members', object_store: 'records', key: 'member' }],
       ]);
       await allow();
       await allow();
@@ -213,10 +213,10 @@ try {
     }],
     ['cookies can be modified and deleted with approval and verified read-back', async () => {
       const done = await start([
-        ['read_cookies', { name: 'member_cookie' }],
-        ['write_cookie', values => ({ ...target(values[0]), action: 'set', name: 'member_cookie', value: 'Alice', path: '/', httpOnly: true, sameSite: 'Lax' })],
-        ['write_cookie', values => ({ ...target(values[0]), action: 'delete', name: 'member_cookie', path: '/' })],
-        ['read_cookies', { name: 'member_cookie' }],
+        ['shell_cookie', { operation: 'list', name: 'member_cookie' }],
+        ['shell_cookie', values => ({ ...target(values[0]), operation: 'set', name: 'member_cookie', value: 'Alice', path: '/', httpOnly: true, sameSite: 'Lax' })],
+        ['shell_cookie', values => ({ ...target(values[0]), operation: 'delete', name: 'member_cookie', path: '/' })],
+        ['shell_cookie', { operation: 'list', name: 'member_cookie' }],
       ]);
       await allow();
       await allow();
@@ -229,11 +229,11 @@ try {
     }],
     ['storage deletes are committed and missing IndexedDB databases are not created', async () => {
       const done = await start([
-        ['read_storage', { storage: 'local', key: 'member' }],
-        ['write_storage', values => ({ ...target(values[0]), storage: 'local', action: 'delete', key: 'member' })],
-        ['write_storage', values => ({ ...target(values[0]), storage: 'indexeddb', database: 'members', object_store: 'records', action: 'delete', key: 'member' })],
-        ['read_storage', { storage: 'indexeddb', database: 'missing-database' }],
-        ['read_storage', { storage: 'indexeddb' }],
+        ['shell_storage', { operation: 'read', storage: 'local', key: 'member' }],
+        ['shell_storage', values => ({ ...target(values[0]), storage: 'local', operation: 'delete', key: 'member' })],
+        ['shell_storage', values => ({ ...target(values[0]), storage: 'indexeddb', database: 'members', object_store: 'records', operation: 'delete', key: 'member' })],
+        ['shell_storage', { operation: 'read', storage: 'indexeddb', database: 'missing-database' }],
+        ['shell_storage', { operation: 'read', storage: 'indexeddb' }],
       ]);
       await allow();
       await allow();
@@ -250,7 +250,7 @@ try {
         for (const [cell, suffix, focus] of [[0, '/left', () => left.locator('h1').click()],
           [1, '/right', () => app.shell.locator('#omnibox').focus()],
           [0, '/left', () => side.locator('textarea').focus()]]) {
-          await app.invoke('canvas.focus', { cell });
+          await app.invoke('shell_canvas', { operation: 'cell_focus', cell });
           await focus();
           pressF12(app.child.pid);
           const inspector = await waitFor(async () => (await session.send('Target.getTargets')).targetInfos.find(target =>

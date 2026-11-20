@@ -43,7 +43,7 @@ const waitFor = async (fn, timeout = 20000) => {
   while (Date.now() < end) { const v = await fn(); if (v) return v; await sleep(150); }
   throw new Error('timed out');
 };
-const selection = async () => (await app.invoke('agent.context', {})).page.selection || '';
+const selection = async () => (await app.invoke('shell_agent', { operation: 'context_get' })).page.selection || '';
 const desktopInputAvailable = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
   'Add-Type -MemberDefinition \'[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();\' -Name PdfDesktop -Namespace Native; [Native.PdfDesktop]::GetForegroundWindow() -ne [IntPtr]::Zero'],
   { encoding: 'utf8' }).trim() === 'True';
@@ -65,7 +65,7 @@ async function dragNativeText(marker) {
 try {
 process.exitCode = await run([
   ['2x2 canvas: a web page and a PDF', async () => {
-    await app.invoke('canvas.create', { cols: 2, rows: 2, urls: [`${base}/`, `${base}/doc.pdf`] });
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 2, urls: [`${base}/`, `${base}/doc.pdf`] });
     const v = await waitFor(() => viewer());
     await nativePdfText(app.child.pid, 'Quarterly revenue');
     assert.equal(await v.locator('.textLayer, .page canvas').count(), 0, 'native rendering, not PDF.js');
@@ -79,17 +79,17 @@ process.exitCode = await run([
   ...(desktopInputAvailable ? [['PDF cell: an OS pointer drag selects native text and the context shows it', async () => {
     await dragNativeText('Quarterly revenue');
     await waitFor(async () => /Quarterly/.test(await selection()));
-    const ctx = await app.invoke('agent.context', {});
+    const ctx = await app.invoke('shell_agent', { operation: 'context_get' });
     assert.match(ctx.page.selection || '', /Quarterly/, JSON.stringify(ctx.page));
   }]] : []),
   ['PDF cell: zoom buttons and ctrl+wheel really scale the pages', async () => {
-    await app.invoke('canvas.focus', { cell: 1 });
-    await app.invoke('shortcut', { name: 'zoom_reset' });
+    await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 1 });
+    await app.invoke('shell_ui', { operation: 'shortcut', name: 'zoom_reset' });
     const v = viewer();
     const height = async () => (await nativePdfText(app.child.pid, 'Quarterly revenue', 'Quarterly revenue')).bounds[0].height;
     const h0 = await height();
-    await app.invoke('shortcut', { name: 'zoom_in' });
-    await app.invoke('shortcut', { name: 'zoom_in' });
+    await app.invoke('shell_ui', { operation: 'shortcut', name: 'zoom_in' });
+    await app.invoke('shell_ui', { operation: 'shortcut', name: 'zoom_in' });
     assert.ok(await height() > h0 * 1.05);
     await v.mouse.move(160, 200);
     await v.keyboard.down('Control');
@@ -97,30 +97,30 @@ process.exitCode = await run([
     await sleep(500);
     assert.ok(await height() > h0 * 1.12);
     assert.ok(parseInt(await app.shell.locator('#zoom-label').textContent(), 10) > 120);
-    await app.invoke('shortcut', { name: 'zoom_reset' });
+    await app.invoke('shell_ui', { operation: 'shortcut', name: 'zoom_reset' });
     await sleep(500);
     assert.ok(Math.abs(await height() - h0) < 1, 'Reset restores native text geometry');
   }],
   ['extensionless PDF url (like arxiv.org/pdf/ID) also gets the viewer and a selectable text', async () => {
-    await app.invoke('canvas.set', { cell: 2, url: `${base}/pdf/1234` });
+    await app.invoke('shell_canvas', { operation: 'cell_open', cell: 2, url: `${base}/pdf/1234` });
     const v = await app.pageWith(/\/pdf\/1234$/);
     assert.ok(v, 'second viewer');
     await nativePdfText(app.child.pid, 'Extensionless PDF');
-    await app.invoke('canvas.focus', { cell: 2 });
+    await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 2 });
     await nativePdfText(app.child.pid, 'Extensionless PDF', 'Extensionless PDF');
     await waitFor(async () => /Extensionless/.test(await selection()));
     assert.match(await selection(), /Extensionless/);
-    assert.ok(JSON.stringify(await app.invoke('agent.context', {})).includes('/pdf/1234'), 'tab keeps the real url');
+    assert.ok(JSON.stringify(await app.invoke('shell_agent', { operation: 'context_get' })).includes('/pdf/1234'), 'tab keeps the real url');
   }],
   ['local file:// PDF: the inner native provider supplies document text and selection', async () => {
     const file = path.join(app.profile, 'ab-local-test.pdf');
     fs.writeFileSync(file, makePdf('Local PDF revenue report'));
-    await app.invoke('canvas.set', { cell: 3, url: pathToFileURL(file).href });
+    await app.invoke('shell_canvas', { operation: 'cell_open', cell: 3, url: pathToFileURL(file).href });
     const v = await app.pageWith(/ab-local-test\.pdf$/);
     await nativePdfText(app.child.pid, 'Local PDF');
-    await app.invoke('canvas.focus', { cell: 3 });
+    await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 3 });
     assert.ok(v);
-    await waitFor(async () => (await app.invoke('agent.context')).content?.preview?.includes('Local PDF'));
+    await waitFor(async () => (await app.invoke('shell_agent', { operation: 'context_get' })).content?.preview?.includes('Local PDF'));
     await nativePdfText(app.child.pid, 'Local PDF', 'Local PDF');
     await waitFor(async () => /Local PDF/.test(await selection()));
   }],

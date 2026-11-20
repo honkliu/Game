@@ -16,7 +16,7 @@ const sections: [SettingsTab, string][] = [
 export function SettingsPage() {
   const section = settingsTab.value;
   useEffect(() => {
-    void native.invoke('settings.section', { section }).catch(error => { settingsError.value = String(error); });
+    void native.invoke('shell_settings', { operation: 'section_set', section }).catch(error => { settingsError.value = String(error); });
   }, [section]);
   return <div class="settings-page">
     <nav class="settings-nav" aria-label="Settings"><h1>Settings</h1><div role="tablist" aria-label="Settings sections" aria-orientation="vertical">

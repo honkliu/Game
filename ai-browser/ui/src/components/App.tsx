@@ -18,7 +18,7 @@ function ResizeGrip() {
     let wanted = startW;
     const move = (m: PointerEvent) => {
       wanted = startW + (startX - m.screenX);
-      if (!raf) raf = requestAnimationFrame(() => { raf = 0; void native.invoke('ai.pane.resize', { width: wanted }); });
+      if (!raf) raf = requestAnimationFrame(() => { raf = 0; void native.invoke('shell_ai', { operation: 'pane_resize', width: wanted }); });
     };
     const up = () => {
       grip.removeEventListener('pointermove', move);

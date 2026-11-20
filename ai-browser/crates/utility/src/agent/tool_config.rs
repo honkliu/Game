@@ -78,17 +78,7 @@ fn json_format() -> String {
 pub fn load(store: &Store, hub: &Hub) -> Result<ToolConfig, String> {
     let mut config = store.load_config()?;
     if let Some(mut tools) = config.tools.clone() {
-        let mut changed = false;
-        if let Some(read_enabled) = tools.enabled.get("read_page").copied() {
-            let write_enabled = read_enabled && tools.enabled.get("fill").copied().unwrap_or(false);
-            for (id, enabled) in [("read_cookies", read_enabled), ("read_storage", read_enabled),
-                ("write_cookie", write_enabled), ("write_storage", write_enabled)] {
-                if let std::collections::btree_map::Entry::Vacant(entry) = tools.enabled.entry(id.into()) {
-                    entry.insert(enabled);
-                    changed = true;
-                }
-            }
-        }
+        let changed = migrate_browser_selection(&mut tools);
         if changed {
             config.tools = Some(tools.clone());
             store.save_config(&config)?;
@@ -99,8 +89,10 @@ pub fn load(store: &Store, hub: &Hub) -> Result<ToolConfig, String> {
     hub.sync(&config.mcp_servers);
     let mut selection = ToolConfig::default();
     for tool in tools::builtins().into_iter().chain(hub.tools()) {
-        selection.enabled.insert(tool.id, true);
+        let enabled = ai_platform_contract::browser::find(&tool.id).is_none_or(|api| api.agent_default);
+        selection.enabled.insert(tool.id, enabled);
     }
+
     selection.enabled.insert("web_search".into(), true);
     selection.http.push(HttpTool {
         id: "web_search".into(),
@@ -120,6 +112,27 @@ pub fn load(store: &Store, hub: &Hub) -> Result<ToolConfig, String> {
     config.tools = Some(selection.clone());
     store.save_config(&config)?;
     Ok(selection)
+}
+
+/// Data migration only: no old request names survive in the runtime registry.
+fn migrate_browser_selection(config: &mut ToolConfig) -> bool {
+    let groups: &[(&str, &[&str])] = &[
+        ("shell_tab", &["list_tabs", "open_tab", "switch_tab", "close_tab"]),
+        ("shell_canvas", &["canvas"]), ("shell_page_read", &["read_page"]),
+        ("shell_page_navigate", &["navigate"]), ("shell_page_click", &["click"]),
+        ("shell_page_fill", &["fill"]), ("shell_page_popups_dismiss", &["dismiss_popups"]),
+        ("shell_cookie", &["read_cookies", "write_cookie"]),
+        ("shell_storage", &["read_storage", "write_storage"]),
+    ];
+    let mut changed = false;
+    for (canonical, old) in groups {
+        if !old.iter().any(|id| config.enabled.contains_key(*id) || config.overrides.contains_key(*id)) { continue; }
+        let enabled = old.iter().all(|id| config.enabled.get(*id).copied().unwrap_or(false));
+        config.enabled.entry((*canonical).into()).or_insert(enabled);
+        for id in *old { config.enabled.remove(*id); config.overrides.remove(*id); }
+        changed = true;
+    }
+    changed
 }
 
 impl HttpTool {
@@ -176,7 +189,7 @@ impl HttpTool {
 pub fn definitions(config: &ToolConfig, hub: &Hub) -> Vec<ToolDef> {
     tools::builtins().into_iter().chain(hub.tools()).map(|mut tool| {
         if let Some(edit) = config.overrides.get(&tool.id) {
-            tool.name = edit.name.clone();
+            if tool.kind != Kind::Browser { tool.name = edit.name.clone(); }
             tool.description = edit.description.clone();
             tool.parameters = edit.parameters.clone();
         }
@@ -446,7 +459,8 @@ mod tests {
         let (dir, store) = profile("migration");
         let hub = Hub::default();
         let migrated = load(&store, &hub).unwrap();
-        assert!(migrated.enabled.values().all(|enabled| *enabled));
+        assert!(migrated.enabled["shell_tab"]);
+        assert!(!migrated.enabled["shell_window"]);
         assert_eq!(migrated.http[0].id, "web_search");
         assert!(migrated.http[0].url.contains("duckduckgo"));
         let state = super::super::admin::state(&store, &hub);
@@ -462,7 +476,7 @@ mod tests {
             &store,
             &hub,
             &models,
-            &json!({"op":"tools.enable","id":"web_search","enabled":false}),
+            &json!({"method":"shell_agent_tool","operation":"enabled_set","id":"web_search","enabled":false}),
         )
         .unwrap();
         let reloaded = Store::new(&dir);
@@ -502,19 +516,22 @@ mod tests {
         tools.enabled.insert("read_page".into(), true);
         tools.enabled.insert("fill".into(), true);
         tools.enabled.insert("read_cookies".into(), false);
+        tools.enabled.insert("write_cookie".into(), true);
+        tools.enabled.insert("read_storage".into(), true);
+        tools.enabled.insert("write_storage".into(), true);
+        tools.enabled.insert("list_tabs".into(), true);
+        tools.enabled.insert("open_tab".into(), false);
         config.tools = Some(tools);
         store.save_config(&config).unwrap();
         let migrated = load(&store, &hub).unwrap();
-        assert!(!migrated.enabled["read_cookies"]);
-        assert!(migrated.enabled["read_storage"]);
-        assert!(migrated.enabled["write_storage"]);
-        assert!(migrated.enabled["write_cookie"]);
+        assert!(!migrated.enabled["shell_cookie"]);
+        assert!(migrated.enabled["shell_storage"]);
+        assert!(!migrated.enabled["shell_tab"]);
+        assert!(migrated.enabled["shell_page_read"]);
+        assert!(migrated.enabled.keys().all(|key| key.starts_with("shell_")));
         assert_eq!(load(&Store::new(&dir), &hub).unwrap(), migrated);
-        for tool in definitions(&migrated, &hub).into_iter().filter(|tool| matches!(tool.id.as_str(), "write_storage" | "write_cookie")) {
-            assert!(tool.write);
-            assert!(!tool.trusted);
-            assert_eq!(tool.kind, Kind::Browser);
-        }
+        assert!(!ai_platform_contract::browser::mutates("shell_storage", &json!({"operation":"read"})));
+        assert!(ai_platform_contract::browser::mutates("shell_storage", &json!({"operation":"set"})));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -567,37 +584,37 @@ mod tests {
         let models = crate::provider::Catalog::from_config(&ai_platform_contract::config::AiConfig::default());
         load(&store, &hub).unwrap();
         super::super::admin::handle(&store, &hub, &models,
-            &json!({"op":"tools.enable","id":"read_page","enabled":false})).unwrap();
+            &json!({"method":"shell_agent_tool","operation":"enabled_set","id":"shell_page_read","enabled":false})).unwrap();
         let edit = json!({
-            "name":"ReadCurrentPage", "title":"Read the current page",
+            "name":"shell_page_read", "title":"Read the current page",
             "description":"Edited page reader description.",
             "parameters":{"type":"object","properties":{"tab_id":{"type":"integer","description":"Edited target tab."}}}
         });
         let result = super::super::admin::handle(&store, &hub, &models,
-            &json!({"op":"tools.definition.save","id":"read_page","definition":edit})).unwrap();
-        let row = result["tools"].as_array().unwrap().iter().find(|row| row["id"] == "read_page").unwrap();
+            &json!({"method":"shell_agent_tool","operation":"definition_save","id":"shell_page_read","definition":edit})).unwrap();
+        let row = result["tools"].as_array().unwrap().iter().find(|row| row["id"] == "shell_page_read").unwrap();
         assert_eq!(row["enabled"], false);
-        assert_eq!(row["model_definition"]["function"]["name"], "ReadCurrentPage");
+        assert_eq!(row["model_definition"]["function"]["name"], "shell_page_read");
         let selected = load(&store, &hub).unwrap();
-        let definition = definitions(&selected, &hub).into_iter().find(|tool| tool.id == "read_page").unwrap();
-        assert_eq!(definition.name, "ReadCurrentPage");
+        let definition = definitions(&selected, &hub).into_iter().find(|tool| tool.id == "shell_page_read").unwrap();
+        assert_eq!(definition.name, "shell_page_read");
         assert_eq!(definition.kind, Kind::Browser);
         assert_eq!(definition.parameters["properties"]["tab_id"]["description"], "Edited target tab.");
         assert!(super::super::admin::handle(&store, &hub, &models,
-            &json!({"op":"tools.definition.save","id":"fetch_url","definition":edit})).is_err());
+            &json!({"method":"shell_agent_tool","operation":"definition_save","id":"fetch_url","definition":edit})).is_err());
         let mut http = search();
-        http.name = "ReadCurrentPage".into();
+        http.name = "shell_page_read".into();
         assert!(super::super::admin::handle(&store, &hub, &models,
-            &json!({"op":"tools.http.save","tool":http,"editing":true,"enabled":true})).is_err());
+            &json!({"method":"shell_agent_tool","operation":"http_save","tool":http,"editing":true,"enabled":true})).is_err());
         let stored = load(&store, &hub).unwrap();
         assert!(!stored.overrides.contains_key("fetch_url"));
         assert!(stored.http[0].url.contains("duckduckgo"));
         super::super::admin::handle(&store, &hub, &models,
-            &json!({"op":"tools.definition.reset","id":"read_page"})).unwrap();
+            &json!({"method":"shell_agent_tool","operation":"definition_reset","id":"shell_page_read"})).unwrap();
         let restored = load(&store, &hub).unwrap();
-        assert!(!restored.enabled["read_page"]);
-        assert!(!restored.overrides.contains_key("read_page"));
-        assert_eq!(definitions(&restored, &hub).into_iter().find(|tool| tool.id == "read_page").unwrap().name, "read_page");
+        assert!(!restored.enabled["shell_page_read"]);
+        assert!(!restored.overrides.contains_key("shell_page_read"));
+        assert_eq!(definitions(&restored, &hub).into_iter().find(|tool| tool.id == "shell_page_read").unwrap().name, "shell_page_read");
         fs::remove_dir_all(dir).unwrap();
     }
 

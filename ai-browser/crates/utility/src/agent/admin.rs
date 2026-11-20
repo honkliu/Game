@@ -99,9 +99,9 @@ fn distill(store: &Store, catalog: &Catalog, p: &Value) -> Result<Value, String>
 }
 
 pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<Value, String> {
-    match s(p, "op") {
-        "state" => Ok(state(store, hub)),
-        "tools.enable" => {
+    match (s(p, "method"), s(p, "operation")) {
+        ("shell_agent", "state_get") => Ok(state(store, hub)),
+        ("shell_agent_tool", "enabled_set") => {
             let id = s(p, "id");
             let enabled = p["enabled"].as_bool().ok_or("Enabled must be a boolean.")?;
             let mut tools = tool_config::load(store, hub)?;
@@ -114,7 +114,7 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             store.save_config(&config)?;
             Ok(state(store, hub))
         }
-        "tools.http.save" => {
+        ("shell_agent_tool", "http_save") => {
             let tool: HttpTool = serde_json::from_value(p["tool"].clone()).map_err(|error| error.to_string())?;
             tool.validate()?;
             let mut tools = tool_config::load(store, hub)?;
@@ -131,16 +131,19 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             store.save_config(&config)?;
             Ok(state(store, hub))
         }
-        "tools.definition.save" | "tools.definition.reset" => {
+        ("shell_agent_tool", "definition_save" | "definition_reset") => {
             let id = s(p, "id");
             let mut tools = tool_config::load(store, hub)?;
             let known = tool_config::catalog(store, hub).0.into_iter().any(|tool| tool["id"] == id && tool["source"] != "http");
             if !known { return Err("Unknown non-HTTP tool.".into()); }
-            if s(p, "op") == "tools.definition.reset" {
+            if s(p, "operation") == "definition_reset" {
                 tools.overrides.remove(id);
             } else {
                 let edit: ToolOverride = serde_json::from_value(p["definition"].clone()).map_err(|error| error.to_string())?;
                 edit.validate()?;
+                if ai_platform_contract::browser::find(id).is_some() && edit.name != id {
+                    return Err("Browser tool names must remain canonical shell API names.".into());
+                }
                 tools.overrides.insert(id.to_string(), edit);
             }
             tool_config::validate_names(&tools, hub)?;
@@ -149,7 +152,7 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             store.save_config(&config)?;
             Ok(state(store, hub))
         }
-        "tools.http.delete" => {
+        ("shell_agent_tool", "http_delete") => {
             let mut tools = tool_config::load(store, hub)?;
             let id = s(p, "id");
             tools.http.retain(|tool| tool.id != id);
@@ -159,7 +162,7 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             store.save_config(&config)?;
             Ok(state(store, hub))
         }
-        "config.set" => {
+        ("shell_agent", "config_set") => {
             let mut c = store.config();
             if let Some(v) = p.get("auto_approve").and_then(Value::as_bool) {
                 c.auto_approve = v;
@@ -173,16 +176,16 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             store.save_config(&c)?;
             Ok(state(store, hub))
         }
-        "prompt.save" => {
+        ("shell_agent_prompt", "save") => {
             store.save_prompt(s(p, "name"), s(p, "text"))?;
             Ok(state(store, hub))
         }
-        "prompt.reset" => {
+        ("shell_agent_prompt", "reset") => {
             store.reset_prompt(s(p, "name"))?;
             Ok(state(store, hub))
         }
-        "skill.get" => store.skill(s(p, "id")).map(|k| k.to_json(true)).ok_or_else(|| "no such skill".into()),
-        "skill.save" => {
+        ("shell_agent_skill", "get") => store.skill(s(p, "id")).map(|k| k.to_json(true)).ok_or_else(|| "no such skill".into()),
+        ("shell_agent_skill", "save") => {
             let name = s(p, "name");
             let id = match s(p, "id") {
                 "" => slug(name),
@@ -199,11 +202,11 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             }
             Ok(state(store, hub))
         }
-        "skill.delete" => {
+        ("shell_agent_skill", "delete") => {
             store.delete_skill(s(p, "id"))?;
             Ok(state(store, hub))
         }
-        "skill.mode" => {
+        ("shell_agent_skill", "mode_set") => {
             let mode = s(p, "mode");
             if !super::store::valid_mode(mode) || store.skill(s(p, "id")).is_none() {
                 return Err("bad skill or mode".into());
@@ -213,13 +216,13 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             store.save_config(&c)?;
             Ok(state(store, hub))
         }
-        "skill.distill" => distill(store, catalog, p),
+        ("shell_agent_skill", "distill") => distill(store, catalog, p),
         // What the model will be told right now, rendered from the editable prompts.
-        "context.preview" => Ok(json!({
+        ("shell_agent", "context_preview") => Ok(json!({
             "context": super::browser_context(store, p),
             "system": super::system_prompt(store, p, &strings(p, "loaded_skills")),
         })),
-        "mcp.save" => {
+        ("shell_agent_mcp", "save") => {
             let name = s(p, "name").trim();
             if name.is_empty() {
                 return Err("give the server a name".into());
@@ -269,32 +272,32 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             store.save_config(&c)?;
             Ok(state(store, hub))
         }
-        "mcp.delete" => {
+        ("shell_agent_mcp", "delete") => {
             let mut c = store.config();
             c.mcp_servers.retain(|m| m.id != s(p, "id"));
             store.save_config(&c)?;
             hub.sync(&c.mcp_servers);
             Ok(state(store, hub))
         }
-        "mcp.sync" => {
+        ("shell_agent_mcp", "sync") => {
             hub.sync(&store.config().mcp_servers);
             Ok(state(store, hub))
         }
-        "mcp.retry" => {
+        ("shell_agent_mcp", "retry") => {
             hub.sync(&store.config().mcp_servers);
             hub.reconnect(s(p, "id"));
             Ok(state(store, hub))
         }
-        "conv.save" => {
+        ("shell_conversation", "save") => {
             store.save_conversation(s(p, "id"), p.get("doc").unwrap_or(&Value::Null))?;
             Ok(json!({ "saved": true }))
         }
-        "conv.list" => Ok(json!({ "conversations": store.list_conversations(s(p, "query")) })),
-        "conv.load" => store.load_conversation(s(p, "id")),
-        "conv.delete" => {
+        ("shell_conversation", "list") => Ok(json!({ "conversations": store.list_conversations(s(p, "query")) })),
+        ("shell_conversation", "load") => store.load_conversation(s(p, "id")),
+        ("shell_conversation", "delete") => {
             store.delete_conversation(s(p, "id"))?;
             Ok(json!({ "deleted": true }))
         }
-        other => Err(format!("unknown agent operation `{other}`")),
+        (method, operation) => Err(format!("unknown agent operation `{method}` / `{operation}`")),
     }
 }

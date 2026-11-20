@@ -15,8 +15,8 @@ const waitFor = async (fn, timeout = 15000) => {
 
 await run([
   ['horizontal tabs by default: strip on top, page uses the full width', async () => {
-    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
-    await app.invoke('nav.open', { url: `${base}/other`, disposition: 'new_tab' });
+    await app.invoke('shell_page_navigate', { url: `${base}/` });
+    await app.invoke('shell_tab', { operation: 'open', url: `${base}/other`, background: false });
     const g = await waitFor(async () => {
       const r = await shell().evaluate(() => {
         const rail = document.querySelector('#rail').getBoundingClientRect();
@@ -30,7 +30,7 @@ await run([
     assert.ok(g.rail[3] <= 40, 'strip height');
     assert.ok(g.rows[1][0] > g.rows[0][0] + 50, 'tabs laid out in a row');
     assert.equal(g.rows[0][1], g.rows[1][1], 'same top');
-    const l = await app.invoke('shell.layout', {}).catch(() => null);
+    const l = await app.invoke('shell_window', { operation: 'state_get' }).catch(() => null);
     const page = await app.pageWith(/\/other$/);
     const px = await page.evaluate(() => ({ x: window.screenX, y: window.screenY }));
     const sh = await shell().evaluate(() => ({ x: window.screenX, y: window.screenY }));
@@ -44,7 +44,7 @@ await run([
       return { sx: window.screenX, sy: window.screenY, dpr: devicePixelRatio, x: r.left + 40, y: r.top + r.height / 2 };
     });
     await osClick((g.sx + g.x) * g.dpr, (g.sy + g.y) * g.dpr, app.child.pid);
-    await waitFor(async () => (await app.invoke('agent.context', {})).page.url.endsWith('/'));
+    await waitFor(async () => (await app.invoke('shell_agent', { operation: 'context_get' })).page.url.endsWith('/'));
   }],
   ['zoom buttons change page zoom and the label follows', async () => {
     await shell().click('#zoom-in');
@@ -68,9 +68,9 @@ await run([
     await shell().screenshot({ path: process.env.TEMP + '\\shell-strip.png' });
   }],
   ['vertical tabs remain available as a setting', async () => {
-    await app.invoke('settings.update', { key: 'vertical_tabs', value: true });
+    await app.invoke('shell_settings', { operation: 'set', key: 'vertical_tabs', value: true });
     await waitFor(() => shell().evaluate(() => document.documentElement.dataset.tabs === 'vertical'));
-    await app.invoke('settings.update', { key: 'vertical_tabs', value: false });
+    await app.invoke('shell_settings', { operation: 'set', key: 'vertical_tabs', value: false });
     await waitFor(() => shell().evaluate(() => document.documentElement.dataset.tabs === 'horizontal'));
   }],
 ]);

@@ -39,6 +39,7 @@
 //! `src/bin/stub_utility.rs` is the process the supervision tests drive. It is a
 //! test double, not a provider implementation.
 
+pub mod browser;
 pub mod config;
 pub mod contract;
 pub mod failure;

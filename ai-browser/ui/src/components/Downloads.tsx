@@ -5,11 +5,11 @@ import { useState } from 'preact/hooks';
 export function Downloads() {
   const [error, setError] = useState('');
   const action = async (id: number, kind: string) => {
-    try { await native.invoke('download.action', { download_id: id, action: kind }); }
+    try { await native.invoke('shell_download', { download_id: id, operation: kind }); }
     catch (e) { setError(String(e)); }
   };
   return <>
-    <button type="button" class="chip-btn" onClick={() => void native.invoke('download.clear_list').catch(e => setError(String(e)))}>Clear finished downloads</button>
+    <button type="button" class="chip-btn" onClick={() => void native.invoke('shell_download', { operation: 'list_clear' }).catch(e => setError(String(e)))}>Clear finished downloads</button>
     {error ? <p class="ag-error" role="alert">{error}</p> : null}
     {!downloads.value.length ? <p class="overlay-empty">No downloads yet.</p> : null}
     {downloads.value.map(download => <section class="ag-card" key={download.id}>
@@ -19,7 +19,7 @@ export function Downloads() {
       <div class="settings-actions">
         <button type="button" class="chip-btn" disabled={download.state !== 'completed'} onClick={() => void action(download.id, 'open')}>Open</button>
         <button type="button" class="chip-btn" disabled={!download.path} onClick={() => void action(download.id, 'reveal')}>Show in folder</button>
-        <button type="button" class="chip-btn" onClick={() => void action(download.id, 'remove')}>Remove from list</button>
+        <button type="button" class="chip-btn" onClick={() => void action(download.id, 'entry_remove')}>Remove from list</button>
       </div>
     </section>)}
   </>;

@@ -110,7 +110,7 @@ function CitationChip({ t, c }: { t: AskTurn; c: AskTurn['citations'][number] })
   const click = async () => {
     setStatus('');
     try {
-      const res = await native.invoke<{ scrolled?: boolean }>('ai.citation.scroll', { turn_id: t.turnId, citation_id: c.citation_id });
+      const res = await native.invoke<{ scrolled?: boolean }>('shell_ai', { operation: 'citation_reveal', turn_id: t.turnId, citation_id: c.citation_id });
       if (res?.scrolled) setStatus(`Scrolled to citation ${c.ordinal}.`);
     } catch (e) {
       // The host refuses to scroll a document this citation no longer describes.

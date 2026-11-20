@@ -13,7 +13,7 @@ export function BrowserHistory() {
   const load = async () => {
     const current = ++sequence.current;
     try {
-      const result = await native.invoke<{ rows: Entry[] }>('history.query', { tokens: query });
+      const result = await native.invoke<{ rows: Entry[] }>('shell_history', { operation: 'query', tokens: query });
       if (current === sequence.current) { setRows(result.rows); setError(''); setSelected([]); }
     } catch (e) { if (current === sequence.current) setError(String(e)); }
   };
@@ -23,14 +23,14 @@ export function BrowserHistory() {
     return () => { clearTimeout(timeout); stop(); sequence.current++; };
   }, [query]);
   const remove = async (payload: object) => {
-    try { await native.invoke('history.forget', payload); }
+    try { await native.invoke('shell_history', { ...payload, operation: 'delete' }); }
     catch (e) { setError(String(e)); }
   };
   const clear = async () => {
     if (!confirm('Clear this browsing history?')) return;
     try {
       const to = Math.floor(Date.now() / 1000);
-      await native.invoke('history.clear', range === 'all' ? { scope: 'all' } : { scope: 'range', from: to - Number(range), to });
+      await native.invoke('shell_history', { ...range === 'all' ? { scope: 'all' } : { scope: 'range', from: to - Number(range), to }, operation: 'clear' });
     } catch (e) { setError(String(e)); }
   };
   return <>
@@ -52,7 +52,7 @@ export function BrowserHistory() {
         <div class="ag-row browser-history-entry">
           <input type="checkbox" aria-label={`Select ${entry.title}`} checked={selected.includes(entry.id)}
             onChange={event => setSelected(current => event.currentTarget.checked ? [...current, entry.id] : current.filter(id => id !== entry.id))} />
-          <button type="button" class="ag-row-main" title={entry.url} onClick={() => void native.invoke('nav.open', { url: entry.url, disposition: 'new_tab' }).catch(e => setError(String(e)))}>
+          <button type="button" class="ag-row-main" title={entry.url} onClick={() => void native.invoke('shell_tab', { operation: 'open', url: entry.url, background: false }).catch(e => setError(String(e)))}>
             <b>{entry.title || entry.host}</b>
           </button>
           <button type="button" class="chip-btn" onClick={() => void remove({ site: entry.host })}>Forget site</button>

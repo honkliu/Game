@@ -3,6 +3,11 @@
 
 mod common;
 
+#[cfg_attr(windows, path = r"..\..\shell\src\api_server.rs")]
+#[cfg_attr(not(windows), path = "../../shell/src/api_server.rs")]
+#[allow(dead_code)]
+mod api_server;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -14,16 +19,19 @@ use ai_platform_contract::contract::{
     TaskRequest, TaskRequestView,
 };
 use ai_platform_contract::failure::{Failure, FailureKind};
-use ai_platform_contract::frame::{self, Frame, Method, Peer, Request, ResponsePayload};
+use ai_platform_contract::frame::{self, Frame, Method, Peer, ResponsePayload};
 use ai_platform_contract::identity::{DocumentIdentityRegistry, DocumentToken, RequestScope, TaskId};
 use ai_platform_contract::model::{BrowserEvent, TaskOptions};
 use ai_utility::control::now_ms;
 use common::*;
 use serde_json::{json, Value};
+use api_server::{ApiRequest, ApiServer};
 
 const URL: &str = "https://shop.example/returns";
 
 struct Shell {
+    api: ApiServer,
+    api_requests: Receiver<ApiRequest>,
     child: Child,
     stdin: Option<ChildStdin>,
     rx: Receiver<String>,
@@ -45,6 +53,10 @@ impl Shell {
                 let _ = std::fs::remove_file(&path);
             }
         }
+        let (api_send, api_requests) = channel();
+        let api = ApiServer::start(path.parent().unwrap().join(format!("{name}-mcp")).as_path(), move |request| {
+            api_send.send(request).map_err(|_| "closed".into())
+        }).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_ai-utility"))
             .env("AI_BROWSER_CONFIG", &path)
             .stdin(Stdio::piped())
@@ -76,7 +88,7 @@ impl Shell {
         let document = registry.on_document_committed(tab, 0, None, URL).unwrap();
         let scope = RequestScope { profile_id: profile, workspace_id: workspace };
         let version = registry.next_snapshot_version(document.document_token(), &scope).unwrap();
-        Shell { child, stdin, rx, stderr, next_id: 100, registry, scope, document, version, tab }
+        Shell { api, api_requests, child, stdin, rx, stderr, next_id: 100, registry, scope, document, version, tab }
     }
 
     fn send(&mut self, frame: &Frame) {
@@ -104,13 +116,9 @@ impl Shell {
         Some(frame::decode(&line, Peer::Utility).unwrap_or_else(|e| panic!("utility sent an invalid frame {line}: {e:?}")))
     }
 
-    /// The next request from the utility, skipping progress notifications.
-    fn next_request(&self) -> Request {
-        loop {
-            if let Frame::Request(request) = self.recv(Duration::from_secs(10)).expect("timed out waiting for a request") {
-                return request;
-            }
-        }
+    /// Browser requests use MCP, never the utility's NDJSON control pipe.
+    fn next_request(&self) -> ApiRequest {
+        self.api_requests.recv_timeout(Duration::from_secs(10)).expect("timed out waiting for MCP request")
     }
 
     /// Next response to `id`; other frames seen meanwhile are returned too.
@@ -135,7 +143,9 @@ impl Shell {
             cancel: CancellationToken { task, deadline_ms_since_epoch: now_ms() + 30_000 },
             options,
         };
-        (task, TaskRequestView::of(&request).to_params().unwrap())
+        let mut params = TaskRequestView::of(&request).to_params().unwrap();
+        params["browser_api"] = serde_json::to_value(self.api.builtin_connection()).unwrap();
+        (task, params)
     }
 
     fn snapshot_payload(&self) -> ResponsePayload {
@@ -152,21 +162,24 @@ impl Shell {
         }))
     }
 
-    fn answer_snapshot(&mut self, request: &Request) {
-        assert_eq!(request.method, Method::GetSnapshot);
-        assert_eq!(request.params["document"], json!(self.document.document_token()));
-        let payload = self.snapshot_payload();
-        self.send(&Frame::ok(request.id, payload));
+    fn answer_snapshot(&mut self, request: &ApiRequest) {
+        assert_eq!(request.name, "shell_page_snapshot");
+        assert_eq!(request.args["document"], json!(self.document.document_token()));
+        let ResponsePayload::Ok(payload) = self.snapshot_payload() else { panic!() };
+        request.reply.send(Ok(payload)).unwrap();
     }
 
     /// Serves utility requests until `task.finish`, then waits for stragglers.
-    fn run_until_finish(&mut self, mut on_request: impl FnMut(&mut Shell, &Request)) -> (Vec<Frame>, Vec<TaskOutcome>) {
+    fn run_until_finish(&mut self, mut on_request: impl FnMut(&mut Shell, &ApiRequest)) -> (Vec<Frame>, Vec<TaskOutcome>) {
         let mut seen = Vec::new();
         let mut finishes = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {
-            let frame = self.recv(Duration::from_secs(15)).expect("no task.finish");
+            while let Ok(request) = self.api_requests.try_recv() { on_request(self, &request); }
+            assert!(std::time::Instant::now() < deadline, "no task.finish");
+            let Some(frame) = self.recv(Duration::from_millis(25)) else { continue };
             match &frame {
-                Frame::Request(request) => on_request(self, request),
+                Frame::Request(request) => panic!("private browser RPC must not be used: {request:?}"),
                 Frame::Notification(n) if n.method == Method::FinishTask => {
                     finishes.push(serde_json::from_value(n.params.clone()).unwrap());
                     seen.push(frame);
@@ -227,7 +240,7 @@ fn ping_list_and_wrong_direction_frames() {
     assert_eq!(first["available"], true);
 
     // A method only the utility may issue, sent by the "shell", is refused with the same id.
-    shell.send_raw(r#"{"kind":"request","schema_version":{"major":1,"minor":0},"id":777,"method":"context.get_snapshot","params":{}}"#);
+    shell.send_raw(r#"{"kind":"request","schema_version":{"major":1,"minor":0},"id":777,"method":"task.finish","params":{}}"#);
     // Garbage is dropped without killing the loop.
     shell.send_raw("this is not json");
     let id = shell.request(Method::Ping, &json!({}));
@@ -338,7 +351,7 @@ fn navigation_event_makes_the_running_task_stale() {
     assert_eq!(finishes.len(), 1, "exactly one task.finish");
     let TaskOutcome::Failed(failed) = &finishes[0] else { panic!("{:?}", finishes[0]) };
     assert_eq!((failed.failure.kind, failed.failure.code.as_str()), (FailureKind::Stale, "task.document_replaced"));
-    assert!(frames.iter().all(|f| !matches!(f, Frame::Request(r) if r.method == Method::DispatchAction)));
+    assert!(frames.iter().all(|f| !matches!(f, Frame::Request(_))));
     shell.shutdown();
 }
 

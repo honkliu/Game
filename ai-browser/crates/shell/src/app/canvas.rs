@@ -56,7 +56,7 @@ impl AppState {
         (self.canvas_area(), None)
     }
 
-    pub(super) fn canvas_payload(&self) -> Value {
+    pub(super) fn wv_canvas_state_get(&self) -> Value {
         let Some(id) = self.canvas_shown else { return Value::Null };
         let Some((cv, geoms)) = self.canvas_geoms() else { return Value::Null };
         let rc = |r: Rc| json!({ "x": r.x, "y": r.y, "w": r.w, "h": r.h });
@@ -102,7 +102,7 @@ impl AppState {
 
     /// `canvas.resize {vertical, index, pos}` drags a boundary (`pos` in window units);
     /// `canvas.resize {reset: true}` restores equal shares.
-    pub(super) fn canvas_resize(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_canvas_resize(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let canvas = self.canvas_arg(p)?;
         let area = self.canvas_area();
         let cv = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()).ok_or("no canvas")?;
@@ -132,7 +132,7 @@ impl AppState {
     }
 
     /// What an agent needs to see after a canvas action: which pages sit in which cell.
-    pub(super) fn canvas_payload_brief(&self) -> Value {
+    pub(super) fn wv_canvas_state_brief(&self) -> Value {
         let Some(id) = self.canvas_shown else { return Value::Null };
         let Some(cv) = self.canvas_of(id) else { return Value::Null };
         let cells: Vec<Value> = cv
@@ -189,7 +189,7 @@ impl AppState {
         self.active = focused;
         let members = cv.members();
         for m in &members {
-            self.build_webview(*m);
+            self.wv_webview_create(*m);
         }
         let others: Vec<TabId> = self.live.keys().copied().filter(|k| !members.contains(k)).collect();
         for o in others {
@@ -198,7 +198,7 @@ impl AppState {
             }
         }
         self.apply_layout();
-        self.sleep_background_tabs(&cv.all_members());
+        self.wv_webviews_suspend_background(&cv.all_members());
         if let Some(f) = focused {
             if let Some(live) = self.live.get(&f) {
                 let _ = live.webview.focus();
@@ -214,7 +214,7 @@ impl AppState {
                 let _ = shell.focus();
             }
             self.ai_hide_toolbar();
-            let status = self.ai_status();
+            let status = self.wv_ai_status_get();
             self.emit("ai.context", status);
         }
         self.agent_context_changed();
@@ -233,7 +233,7 @@ impl AppState {
     // ---- editing --------------------------------------------------------
 
     /// Create the page for a cell (not shown yet; `canvas_refresh` builds it).
-    fn canvas_add_page(&mut self, canvas: TabId, cell: usize, url: &str) -> TabId {
+    fn wv_canvas_page_open(&mut self, canvas: TabId, cell: usize, url: &str) -> TabId {
         let id = self.tabs.alloc_id();
         let mut page = Tab::new(id, url);
         page.member_of = Some(canvas);
@@ -248,8 +248,8 @@ impl AppState {
         id
     }
 
-    pub(super) fn canvas_add_popup(&mut self, canvas: TabId, cell: usize, url: &str) {
-        self.canvas_add_page(canvas, cell, url);
+    pub(super) fn wv_canvas_popup_open(&mut self, canvas: TabId, cell: usize, url: &str) {
+        self.wv_canvas_page_open(canvas, cell, url);
         if let Some(cv) = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()) {
             cv.focus = cell;
         }
@@ -257,7 +257,7 @@ impl AppState {
     }
 
     /// Forget a page: its webview, AI state and tab entry.
-    fn canvas_drop_page(&mut self, id: TabId) {
+    fn wv_canvas_page_destroy(&mut self, id: TabId) {
         self.live.remove(&id);
         self.ai_on_tab_closed(id);
         self.last_nav_emit.remove(&id);
@@ -266,10 +266,10 @@ impl AppState {
         }
     }
 
-    pub(super) fn canvas_close(&mut self, canvas: TabId) {
+    pub(super) fn wv_canvas_close(&mut self, canvas: TabId) {
         let members = self.canvas_of(canvas).map(Canvas::all_members).unwrap_or_default();
         for m in members {
-            self.canvas_drop_page(m);
+            self.wv_canvas_page_destroy(m);
         }
     }
 
@@ -296,7 +296,7 @@ impl AppState {
     }
 
     /// `canvas.create {cols?, rows?, urls?}` — a new canvas tab, shown at once.
-    pub(super) fn canvas_create(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_canvas_open(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let dim = |k: &str, d: usize| p.get(k).and_then(Value::as_u64).map_or(d, |v| v as usize);
         let (cols, rows) = (dim("cols", tabs::CANVAS_DEFAULT.0), dim("rows", tabs::CANVAS_DEFAULT.1));
         if !(1..=tabs::CANVAS_MAX_COLS).contains(&cols) || !(1..=tabs::CANVAS_MAX_ROWS).contains(&rows) {
@@ -320,7 +320,7 @@ impl AppState {
         let anchor = self.active.map(|a| self.tabs.get(a).and_then(|t| t.member_of).unwrap_or(a));
         self.tabs.insert_after(anchor, tab);
         for (i, u) in urls.iter().enumerate() {
-            self.canvas_add_page(id, i, u);
+            self.wv_canvas_page_open(id, i, u);
         }
         self.canvas_retitle(id);
         if let Some(t) = self.tabs.get(id) {
@@ -334,7 +334,7 @@ impl AppState {
 
     /// `canvas.set {url, cell?, canvas_id?}` — load a page into a cell (the first empty
     /// one by default), creating it if the cell is empty, and focus it.
-    pub(super) fn canvas_set(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_canvas_cell_open(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let canvas = self.canvas_arg(p)?;
         let url = self.resolve_typed(p.get("url").and_then(Value::as_str).unwrap_or(""));
         let cv = self.canvas_of(canvas).ok_or("no canvas")?;
@@ -351,12 +351,12 @@ impl AppState {
         let page = match slot {
             Some(existing) => {
                 if self.shown_canvas_of(existing).is_some() {
-                    self.build_webview(existing);
+                    self.wv_webview_create(existing);
                 }
-                self.navigate(existing, &url, true);
+                self.wv_page_navigate(existing, &url, true);
                 existing
             }
-            None => self.canvas_add_page(canvas, cell, &url),
+            None => self.wv_canvas_page_open(canvas, cell, &url),
         };
         if let Some(cv) = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()) {
             if p.get("focus").and_then(Value::as_bool).unwrap_or(true) {
@@ -373,7 +373,7 @@ impl AppState {
     }
 
     /// Focus a page in the canvas on screen (a click, a title strip, the agent).
-    pub(super) fn canvas_focus_tab(&mut self, id: TabId) {
+    pub(super) fn wv_canvas_page_focus(&mut self, id: TabId) {
         let Some(canvas) = self.shown_canvas_of(id) else { return };
         let Some(cell) = self.canvas_of(canvas).and_then(|cv| cv.cell_of(id)) else { return };
         let (changed, zoomed) = match self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()) {
@@ -402,7 +402,7 @@ impl AppState {
     }
 
     /// `canvas.focus {tab_id | cell | step}`.
-    pub(super) fn canvas_focus(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_canvas_cell_focus(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let canvas = self.canvas_arg(p)?;
         if self.canvas_shown != Some(canvas) {
             self.show_canvas(canvas, None);
@@ -410,7 +410,7 @@ impl AppState {
         if let Some(step) = p.get("step").and_then(Value::as_i64) {
             let cv = self.canvas_of(canvas).ok_or("no canvas")?;
             let cell = (cv.focus as i64 + step).rem_euclid(cv.capacity() as i64) as usize;
-            return self.canvas_focus(&json!({ "canvas_id": canvas.0, "cell": cell }));
+            return self.wv_canvas_cell_focus(&json!({ "canvas_id": canvas.0, "cell": cell }));
         }
         if let Some(c) = self.cell_arg(canvas, p) {
             let empty = self.canvas_of(canvas).is_some_and(|cv| c < cv.cells.len() && cv.cells[c].is_none());
@@ -428,12 +428,12 @@ impl AppState {
             None => None,
         };
         let id = target.ok_or("that cell has no page")?;
-        self.canvas_focus_tab(id);
+        self.wv_canvas_page_focus(id);
         Ok(Some(json!({ "tab_id": id.0 })))
     }
 
     /// `canvas.zoom {zoomed?}` — the focused page fills the canvas; again to go back.
-    pub(super) fn canvas_zoom(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_canvas_zoom(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let canvas = self.canvas_arg(p)?;
         let want = p.get("zoomed").and_then(Value::as_bool);
         let Some(cv) = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()) else { return Err("no canvas".into()) };
@@ -447,7 +447,7 @@ impl AppState {
     }
 
     /// `canvas.layout {cols, rows}` — reshape the grid; pages that no longer fit close.
-    pub(super) fn canvas_layout(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_canvas_layout_set(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let canvas = self.canvas_arg(p)?;
         let cv = self.canvas_of(canvas).ok_or("no canvas")?;
         let get = |k: &str, d: usize| p.get(k).and_then(Value::as_u64).map_or(d, |v| v as usize);
@@ -464,14 +464,14 @@ impl AppState {
             None => Vec::new(),
         };
         for d in &dropped {
-            self.canvas_drop_page(*d);
+            self.wv_canvas_page_destroy(*d);
         }
         self.canvas_refresh(canvas);
         Ok(Some(json!({ "cols": cols, "rows": rows, "closed": dropped.len() })))
     }
 
     /// Close the top page, revealing its predecessor or leaving the cell empty.
-    pub(super) fn canvas_clear(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_canvas_cell_close(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let canvas = self.canvas_arg(p)?;
         let cell = self.cell_arg(canvas, p).ok_or("canvas.clear: say which cell")?;
         let cv = self.canvas_of(canvas).ok_or("no canvas")?;
@@ -479,22 +479,22 @@ impl AppState {
         if let Some(cv) = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()) {
             cv.uncover(cell);
         }
-        self.canvas_drop_page(page);
+        self.wv_canvas_page_destroy(page);
         self.canvas_refresh(canvas);
         Ok(Some(json!({ "closed": page.0 })))
     }
 
     /// Closing a page (Ctrl+W, the rail) inside a canvas clears its cell.
-    pub(super) fn canvas_close_member(&mut self, canvas: TabId, page: TabId) {
+    pub(super) fn wv_canvas_member_close(&mut self, canvas: TabId, page: TabId) {
         let cell = self.canvas_of(canvas).and_then(|cv| cv.cell_of(page));
         if let Some(cell) = cell {
-            let _ = self.canvas_clear(&json!({ "canvas_id": canvas.0, "cell": cell }));
+            let _ = self.wv_canvas_cell_close(&json!({ "canvas_id": canvas.0, "cell": cell }));
         } else if let Some(cv) = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()) {
             for stack in &mut cv.layers {
                 stack.retain(|id| *id != page);
             }
             cv.popup_next.remove(&page);
-            self.canvas_drop_page(page);
+            self.wv_canvas_page_destroy(page);
             self.canvas_refresh(canvas);
         }
     }
@@ -570,7 +570,7 @@ impl AppState {
         };
         let hit = geoms.iter().enumerate().filter(|(_, g)| !g.hidden).min_by_key(|(_, g)| dist(g)).map(|(i, _)| i);
         if let Some(i) = hit.filter(|i| *i != cv.focus) {
-            let _ = self.canvas_focus(&json!({ "cell": i }));
+            let _ = self.wv_canvas_cell_focus(&json!({ "cell": i }));
         }
     }
 
@@ -587,7 +587,7 @@ impl AppState {
         }
         match Self::probe_kind(raw).as_deref() {
             Some("focus") => {
-                self.canvas_focus_tab(tab);
+                self.wv_canvas_page_focus(tab);
                 true
             }
             // Selections and open requests can come from scripts; only real input

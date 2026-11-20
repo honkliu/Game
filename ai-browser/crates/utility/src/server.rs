@@ -7,11 +7,8 @@
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use ai_platform_contract::contract::{
     CancelReason, CancelledAt, CancellationRequest, CancellationResult, TaskRequestView,
@@ -32,7 +29,6 @@ use crate::task::{self, TaskEnv};
 const MAX_CONCURRENT_TASKS: usize = 8;
 /// An agent turn may run long (many tools); this is the backstop, the user can stop any time.
 const AGENT_DEADLINE_MS: i64 = 30 * 60 * 1000;
-const POLL: Duration = Duration::from_millis(50);
 
 struct TaskEntry {
     control: Arc<TaskControl>,
@@ -43,8 +39,7 @@ struct TaskEntry {
 struct Shared {
     credentials: HashMap<String, String>,
     out: Mutex<Box<dyn Write + Send>>,
-    pending: Mutex<HashMap<u64, Sender<ResponsePayload>>>,
-    next_id: AtomicU64,
+    browser: Mutex<Option<crate::browser::Client>>,
     tasks: Mutex<HashMap<u64, TaskEntry>>,
     tabs: Tabs,
     config_path: PathBuf,
@@ -55,6 +50,17 @@ struct Shared {
 }
 
 impl Shared {
+    fn configure_browser(&self, params: &serde_json::Value) -> Result<(), Failure> {
+        let Some(info) = params.get("browser_api") else { return Ok(()) };
+        let info: crate::browser::ConnectionInfo = serde_json::from_value(info.clone())
+            .map_err(|_| Failure::unsupported("browser.invalid_connection"))?;
+        let mut browser = lock(&self.browser);
+        if browser.as_ref().is_none_or(|client| client.connection() != &info) {
+            *browser = Some(crate::browser::Client::new(info)?);
+        }
+        Ok(())
+    }
+
     fn write(&self, frame: &Frame) {
         let Ok(line) = frame::encode(frame) else { return };
         let mut out = lock(&self.out);
@@ -72,28 +78,12 @@ impl ShellLink for Shared {
 
     fn call(
         &self,
-        method: Method,
+        name: &str,
         params: &serde_json::Value,
         control: &TaskControl,
     ) -> Result<ResponsePayload, Failure> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = channel();
-        lock(&self.pending).insert(id, tx);
-        self.write(&Frame::request(id, method, params));
-        loop {
-            match rx.recv_timeout(POLL) {
-                Ok(payload) => return Ok(payload),
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(Failure::unavailable("shell.pipe_closed"));
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if let Some(failure) = control.failure() {
-                        lock(&self.pending).remove(&id);
-                        return Err(failure);
-                    }
-                }
-            }
-        }
+        let client = lock(&self.browser).clone().ok_or_else(|| Failure::unavailable("browser.not_connected"))?;
+        client.call_response(name, params, control)
     }
 }
 
@@ -114,6 +104,7 @@ fn respond<T: serde::Serialize>(shared: &Shared, id: u64, value: &T) {
 }
 
 fn handle_complete(shared: &Arc<Shared>, workers: &mut Vec<JoinHandle<()>>, id: u64, params: serde_json::Value) {
+    if let Err(failure) = shared.configure_browser(&params) { return shared.write(&Frame::failure(id, failure)); }
     let view: TaskRequestView = match serde_json::from_value(params) {
         Ok(view) => view,
         Err(_) => return shared.write(&Frame::failure(id, Failure::unsupported("request.invalid"))),
@@ -158,6 +149,7 @@ fn handle_complete(shared: &Arc<Shared>, workers: &mut Vec<JoinHandle<()>>, id: 
 }
 
 fn handle_agent_run(shared: &Arc<Shared>, workers: &mut Vec<JoinHandle<()>>, id: u64, params: serde_json::Value) {
+    if let Err(failure) = shared.configure_browser(&params) { return shared.write(&Frame::failure(id, failure)); }
     let Some(run_id) = params.get("run_id").and_then(serde_json::Value::as_u64) else {
         return shared.write(&Frame::failure(id, Failure::unsupported("request.invalid")));
     };
@@ -197,6 +189,7 @@ fn handle_agent_run(shared: &Arc<Shared>, workers: &mut Vec<JoinHandle<()>>, id:
 /// Cancel, approve, and the management operations. Management can block on a network
 /// connect (MCP), so it runs on its own thread and the reader keeps going.
 fn handle_agent_control(shared: &Arc<Shared>, workers: &mut Vec<JoinHandle<()>>, id: u64, params: serde_json::Value) {
+    if let Err(failure) = shared.configure_browser(&params) { return shared.write(&Frame::failure(id, failure)); }
     let op = params.get("op").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
     let run = params.get("run_id").and_then(serde_json::Value::as_u64).unwrap_or(0);
     match op.as_str() {
@@ -292,11 +285,7 @@ fn handle_event(shared: &Shared, params: serde_json::Value) {
 
 fn handle_frame(shared: &Arc<Shared>, workers: &mut Vec<JoinHandle<()>>, frame: Frame) {
     match frame {
-        Frame::Response(response) => {
-            if let Some(tx) = lock(&shared.pending).remove(&response.id) {
-                let _ = tx.send(response.payload);
-            }
-        }
+        Frame::Response(_) => {}
         Frame::Notification(note) => {
             if note.method == Method::BrowserEvent {
                 handle_event(shared, note.params);
@@ -328,8 +317,7 @@ pub fn run_with_credentials(input: impl BufRead, output: Box<dyn Write + Send>, 
     let shared = Arc::new(Shared {
         credentials,
         out: Mutex::new(output),
-        pending: Mutex::new(HashMap::new()),
-        next_id: AtomicU64::new(1),
+        browser: Mutex::new(None),
         tasks: Mutex::new(HashMap::new()),
         tabs: Tabs::default(),
         config_path: config_path.to_path_buf(),
@@ -361,7 +349,6 @@ pub fn run_with_credentials(input: impl BufRead, output: Box<dyn Write + Send>, 
     for control in lock(&shared.agent_runs).values() {
         control.stop(StopReason::Shutdown);
     }
-    lock(&shared.pending).clear();
     for worker in workers {
         let _ = worker.join();
     }

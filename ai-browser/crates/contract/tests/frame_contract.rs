@@ -4,7 +4,7 @@
 #![allow(clippy::unwrap_used)]
 
 use ai_platform_contract::failure::{Failure, FailureKind, WIRE_FAILURE_KINDS};
-use ai_platform_contract::frame::{self, Frame, Method, Notification, Peer, Request, ResponsePayload};
+use ai_platform_contract::frame::{self, Frame, Method, Notification, Peer, ResponsePayload};
 
 fn decode_json(json: serde_json::Value, from: Peer) -> Result<Frame, Failure> {
     frame::decode(&json.to_string(), from)
@@ -54,9 +54,7 @@ fn the_utility_cannot_issue_a_shell_only_method() {
 
 #[test]
 fn the_shell_cannot_issue_a_utility_only_method() {
-    // In particular the shell must never hand itself an `action.dispatch`: dispatch
-    // authority lives in the shell's policy layer, not in a frame.
-    for method in [Method::GetSnapshot, Method::DispatchAction] {
+    for method in [Method::PublishProgress, Method::FinishTask, Method::AgentEvent] {
         assert_eq!(method.issuer(), Peer::Utility);
         let error = decode_json(request(method), Peer::Shell).unwrap_err();
         assert_eq!(error.code, "transport.method_from_wrong_side");
@@ -66,12 +64,11 @@ fn the_shell_cannot_issue_a_utility_only_method() {
 #[test]
 fn a_method_issued_from_its_own_side_decodes() {
     // Guards against the side gate being written so it rejects everything.
-    let decoded = decode_json(request(Method::DispatchAction), Peer::Utility).unwrap();
-    let Frame::Request(Request { method, id, .. }) = decoded else {
-        panic!("expected a request");
+    let decoded = decode_json(notification(Method::AgentEvent), Peer::Utility).unwrap();
+    let Frame::Notification(note) = decoded else {
+        panic!("expected a notification");
     };
-    assert_eq!(method, Method::DispatchAction);
-    assert_eq!(id, 3);
+    assert_eq!(note.method, Method::AgentEvent);
 
     let decoded = decode_json(request(Method::CompleteModel), Peer::Shell).unwrap();
     assert!(matches!(decoded, Frame::Request(_)));
@@ -89,9 +86,7 @@ fn notification_only_methods_must_arrive_as_notifications() {
 
 #[test]
 fn request_only_methods_must_not_arrive_as_notifications() {
-    // A peer that could turn `action.dispatch` into a notification could send actions
-    // it never has to be answered for, and could stall a reply by replying to nothing.
-    let error = decode_json(notification(Method::DispatchAction), Peer::Utility).unwrap_err();
+    let error = decode_json(notification(Method::CompleteModel), Peer::Shell).unwrap_err();
     assert_eq!(error.kind, FailureKind::Blocked);
     assert_eq!(error.code, "transport.frame_kind_mismatch");
 }

@@ -117,7 +117,7 @@ export function Composer() {
           <div id="ask-cands" class="ask-cands">
             {candidates.value.map((c) => (
               <button type="button" class="ask-chip ask-cand" key={c.tab_id} title={(c.reason ? c.reason + ' — ' : '') + (c.url || '')}
-                onClick={() => native.invoke('tab.select', { tab_id: c.tab_id }).catch(() => undefined)}>
+                onClick={() => native.invoke('shell_tab', { operation: 'activate', tab_id: c.tab_id }).catch(() => undefined)}>
                 {(c.title || c.url || 'candidate').slice(0, 40)}
               </button>
             ))}

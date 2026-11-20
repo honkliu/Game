@@ -37,9 +37,9 @@ try {
       assert.ok(page);
       assert.equal(await page.locator('.mirror').count(), 0);
       assert.equal(await page.locator('#recent').count(), 1);
-      await app.invoke('nav.open', { url: base + '/other' });
+      await app.invoke('shell_page_navigate', { url: base + '/other' });
       await app.pageWith(/\/other$/);
-      await app.invoke('nav.open', { url: 'native://newtab' });
+      await app.invoke('shell_page_navigate', { url: 'native://newtab' });
       const restored = await app.pageWith(/pages\/newtab\.html/);
       assert.ok(restored, 'new tab also loads in an existing view');
       await restored.locator('#recent a').first().waitFor();
@@ -61,21 +61,21 @@ try {
       await page.locator('#sleep_after_minutes').fill('7');
       await page.locator('#sleep_after_minutes').dispatchEvent('change');
       await waitFor(() => JSON.parse(fs.readFileSync(file, 'utf8')).sleep_after_minutes === 7);
-      await app.invoke('settings.open');
+      await app.invoke('shell_settings', { operation: 'open' });
       assert.equal(app.ctx.pages().filter(p => /pages\/settings\.html/.test(p.url())).length, 1, 'reuses Settings tab');
     }],
     ['Settings stays accessible with River open on another working tab', async () => {
       const settings = await app.pageWith(/pages\/settings\.html/);
-      const settingsId = (await app.invoke('agent.context')).page.tab_id;
-      await app.invoke('nav.open', { url: base + '/live?settings=river', disposition: 'new_tab' });
+      const settingsId = (await app.invoke('shell_agent', { operation: 'context_get' })).page.tab_id;
+      await app.invoke('shell_tab', { operation: 'open', url: base + '/live?settings=river', background: false });
       const working = await app.pageWith(/settings=river/);
-      const workingId = (await app.invoke('agent.context')).page.tab_id;
+      const workingId = (await app.invoke('shell_agent', { operation: 'context_get' })).page.tab_id;
       await working.locator('#nm').fill('Unsaved work beside River');
       await app.shell.evaluate(() => {
         window.__settingsPanel = '';
         window.__native.on('shell.panel', p => { window.__settingsPanel = p.panel; });
       });
-      await app.invoke('shortcut', { name: 'ask_ai' });
+      await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
       const pane = await app.pageWith(/sidebar/);
       try {
         await pane.waitForFunction(() => !!window.__agentUi);
@@ -85,9 +85,9 @@ try {
         const hit = await nativeHitBounds(app.shell, '#btn-settings', app.child.pid);
         assert.deepEqual([hit.x, hit.y, hit.w, hit.h], [0, 0, hit.clientW, hit.clientH], 'native input reaches the full-window shell, not River');
         await app.shell.getByRole('button', { name: 'Settings', exact: true }).click();
-        await waitFor(async () => (await app.invoke('agent.context')).page.tab_id === settingsId, 5000);
+        await waitFor(async () => (await app.invoke('shell_agent', { operation: 'context_get' })).page.tab_id === settingsId, 5000);
         assert.equal(await app.shell.evaluate(() => window.__settingsPanel), 'ai', 'River remains open');
-        assert.equal((await app.invoke('agent.context')).page.tab_id, settingsId, 'reuses the existing Settings tab');
+        assert.equal((await app.invoke('shell_agent', { operation: 'context_get' })).page.tab_id, settingsId, 'reuses the existing Settings tab');
         assert.equal(await pane.locator('textarea').inputValue(), 'Keep this River draft');
         await settings.locator('#density').focus();
         const focused = await settings.evaluate(() => document.hasFocus());
@@ -99,12 +99,12 @@ try {
         await settings.reload();
         await settings.locator('#density').waitFor();
         assert.equal(await settings.locator('#density').inputValue(), 'comfortable');
-        await app.invoke('tab.select', { tab_id: workingId });
+        await app.invoke('shell_tab', { operation: 'activate', tab_id: workingId });
         assert.equal(await working.locator('#nm').inputValue(), 'Unsaved work beside River');
         assert.equal(await pane.locator('textarea').inputValue(), 'Keep this River draft');
       } finally {
-        await app.invoke('shortcut', { name: 'ask_ai' });
-        await app.invoke('tab.select', { tab_id: settingsId });
+        await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
+        await app.invoke('shell_tab', { operation: 'activate', tab_id: settingsId });
       }
     }],
     ['Settings reports a failed save without applying an unpersisted value', async () => {
@@ -116,7 +116,7 @@ try {
         await page.locator('#search_template').dispatchEvent('change');
         await page.getByRole('status').filter({ hasText: 'Could not save setting:' }).waitFor();
         assert.equal(JSON.parse(fs.readFileSync(path.join(app.data, 'settings.json'), 'utf8')).search_template, searchTemplate);
-        const result = await app.invoke('omnibox.query', { text: 'save failure probe' });
+        const result = await app.invoke('shell_omnibox', { operation: 'query', text: 'save failure probe' });
         assert.ok(result.rows.some(row => row.kind === 'search' && row.url.startsWith(`${base}/search?`)));
       } finally {
         fs.rmdirSync(blocked);
@@ -125,9 +125,9 @@ try {
       await page.waitForFunction(expected => document.querySelector('#search_template').value === expected, searchTemplate);
     }],
     ['ordinary web pages cannot change settings through page IPC', async () => {
-      await app.invoke('nav.open', { url: base + '/listen', disposition: 'new_tab' });
+      await app.invoke('shell_tab', { operation: 'open', url: base + '/listen', background: false });
       assert.ok(await app.pageWith(/\/listen$/));
-      await app.invoke('nav.open', { url: base + '/live', disposition: 'new_tab' });
+      await app.invoke('shell_tab', { operation: 'open', url: base + '/live', background: false });
       const page = await app.pageWith(/\/live$/);
       await page.waitForSelector('#nm');
       await page.evaluate(() => window.ipc.postMessage(JSON.stringify({
@@ -148,7 +148,7 @@ try {
       await page.locator('#search_template').waitFor();
       assert.equal(JSON.parse(fs.readFileSync(path.join(app.data, 'settings.json'), 'utf8')).search_template,
         searchTemplate, 'following a settings URL does not apply fragment-based writes');
-      await app.invoke('nav.open', { url: base + '/live' });
+      await app.invoke('shell_page_navigate', { url: base + '/live' });
       await page.locator('#nm').waitFor();
     }],
     ['visited URLs autocomplete in URL mode and complete inline without losing typed characters', async () => {
@@ -156,7 +156,7 @@ try {
       assert.ok(current);
       await current.evaluate(() => { window.__selectionMarker = true; });
       const prefix = base + '/li';
-      const result = await app.invoke('omnibox.query', { text: prefix });
+      const result = await app.invoke('shell_omnibox', { operation: 'query', text: prefix });
       const completion = result.completion;
       assert.ok([base + '/live', base + '/listen'].includes(completion));
       const alternative = completion === base + '/live' ? base + '/listen' : base + '/live';
@@ -195,42 +195,42 @@ try {
     }],
     ['every canvas cell zooms and returns through toolbar and command palette', async () => {
       const urls = Array.from({ length: 6 }, (_, index) => `${base}/?cell=${index}`);
-      await app.invoke('canvas.create', { cols: 3, rows: 2, urls });
+      await app.invoke('shell_canvas', { operation: 'open', cols: 3, rows: 2, urls });
       await waitFor(() => urls.every(url => app.ctx.pages().some(page => page.url() === url)));
       for (let cell = 0; cell < 6; cell++) {
-        await app.invoke('canvas.focus', { cell });
+        await app.invoke('shell_canvas', { operation: 'cell_focus', cell });
         await app.shell.locator('#cv-zoom').click();
         const zoomed = await waitFor(async () => {
-          const state = await app.invoke('canvas.state');
+          const state = await app.invoke('shell_canvas', { operation: 'state_get' });
           return state.zoomed && state.focus === cell ? state : null;
         });
         assert.deepEqual(zoomed.cells.filter(c => !c.hidden).map(c => c.index), [cell]);
         const page = app.ctx.pages().find(page => page.url() === urls[cell]);
         await waitFor(async () => Math.abs(await page.evaluate(() => innerWidth) - zoomed.cells[cell].body.w) <= 2);
-        await app.invoke('shell.open_palette');
+        await app.invoke('shell_ui', { operation: 'palette_open' });
         const overlay = await app.pageWith(/overlay\.html/);
         await overlay.locator('#pal-input').fill('> canvas-zoom');
         await overlay.getByRole('option').filter({ hasText: 'canvas-zoom' }).first().waitFor();
         await overlay.locator('#pal-input').press('Enter');
-        await waitFor(async () => !(await app.invoke('canvas.state')).zoomed);
-        const restored = await app.invoke('canvas.state');
+        await waitFor(async () => !(await app.invoke('shell_canvas', { operation: 'state_get' })).zoomed);
+        const restored = await app.invoke('shell_canvas', { operation: 'state_get' });
         assert.equal(restored.focus, cell);
         assert.equal(restored.cells.filter(c => !c.hidden).length, 6);
       }
     }],
     ['warm tabs preserve edited forms and JavaScript state', async () => {
-      await app.invoke('nav.open', { url: base + '/live?warm=1', disposition: 'new_tab' });
+      await app.invoke('shell_tab', { operation: 'open', url: base + '/live?warm=1', background: false });
       const page = await app.pageWith(/warm=1/);
       await page.locator('#nm').fill('Keep this unsaved value');
       await page.evaluate(() => { window.__warmMarker = 123; });
-      const original = (await app.invoke('agent.context')).page.tab_id;
-      for (let n = 0; n < 5; n++) await app.invoke('nav.open', { url: `${base}/other?warm=${n}`, disposition: 'new_tab' });
-      await app.invoke('tab.select', { tab_id: original });
+      const original = (await app.invoke('shell_agent', { operation: 'context_get' })).page.tab_id;
+      for (let n = 0; n < 5; n++) await app.invoke('shell_tab', { operation: 'open', url: `${base}/other?warm=${n}`, background: false });
+      await app.invoke('shell_tab', { operation: 'activate', tab_id: original });
       assert.equal(await page.locator('#nm').inputValue(), 'Keep this unsaved value');
       assert.equal(await page.evaluate(() => window.__warmMarker), 123);
     }],
     ['plain toolbar find searches live without another row or advanced controls', async () => {
-      await app.invoke('nav.open', { url: base + '/?find=1', disposition: 'new_tab' });
+      await app.invoke('shell_tab', { operation: 'open', url: base + '/?find=1', background: false });
       const page = await app.pageWith(/find=1/);
       await page.waitForSelector('#p1');
       await page.setContent('<p>Alpha alpha alphabet <b>alpha</b></p>');
@@ -246,7 +246,7 @@ try {
       const bounds = await nativeHitBounds(app.shell, '#find-input', app.child.pid);
       assert.deepEqual([bounds.x, bounds.y, bounds.w, bounds.h], [0, 0, bounds.clientW, bounds.clientH]);
       const before = await page.evaluate(() => ({ height: innerHeight, width: innerWidth }));
-      await app.invoke('shortcut', { name: 'find' });
+      await app.invoke('shell_ui', { operation: 'shortcut', name: 'find' });
       await app.shell.waitForFunction(() => document.activeElement?.id === 'find-input');
       await app.shell.locator('#find-input').fill('alpha');
       await app.shell.waitForFunction(() => window.__findResults.at(-1)?.total === 4);
@@ -265,18 +265,18 @@ try {
       assert.deepEqual(await page.evaluate(() => ({ height: innerHeight, width: innerWidth })), before);
     }],
     ['inline find keeps River open and follows the active page', async () => {
-      const firstId = (await app.invoke('agent.context')).page.tab_id;
+      const firstId = (await app.invoke('shell_agent', { operation: 'context_get' })).page.tab_id;
       const first = await app.pageWith(/find=1/);
-      await app.invoke('shortcut', { name: 'ask_ai' });
+      await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
       const river = await app.pageWith(/sidebar/);
       await river.locator('textarea').fill('Preserve this search draft');
       const before = await first.evaluate(() => ({ height: innerHeight, width: innerWidth }));
-      await app.invoke('shortcut', { name: 'find' });
+      await app.invoke('shell_ui', { operation: 'shortcut', name: 'find' });
       await app.shell.locator('#find-input').fill('alpha');
       await first.waitForFunction(() => CSS.highlights.get('browser-find')?.size === 4);
       assert.deepEqual(await first.evaluate(() => ({ height: innerHeight, width: innerWidth })), before, 'find does not replace River or shift the page');
       assert.equal(await river.locator('textarea').inputValue(), 'Preserve this search draft');
-      await app.invoke('nav.open', { url: base + '/?find=2', disposition: 'new_tab' });
+      await app.invoke('shell_tab', { operation: 'open', url: base + '/?find=2', background: false });
       const second = await app.pageWith(/find=2/);
       await second.waitForSelector('#p1');
       await app.shell.waitForFunction(id => {
@@ -286,14 +286,14 @@ try {
         const results = await app.shell.evaluate(() => window.__findResults.slice(-6));
         throw new Error(`${error.message}; recent find results: ${JSON.stringify(results)}`);
       });
-      await app.invoke('tab.select', { tab_id: firstId });
+      await app.invoke('shell_tab', { operation: 'activate', tab_id: firstId });
       const restored = await app.pageWith(/find=1/);
       await app.shell.waitForFunction(id => window.__findResults.at(-1)?.tab_id === id, firstId);
       const matches = await restored.evaluate(() => (document.body.innerText.match(/alpha/gi) || []).length);
       assert.equal(await app.shell.evaluate(() => window.__findResults.at(-1).total), matches);
       await app.shell.locator('#find-input').fill('');
       await restored.waitForFunction(() => !CSS.highlights.has('browser-find-active'));
-      await app.invoke('shortcut', { name: 'ask_ai' });
+      await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
     }],
   ]);
 } finally {
@@ -312,17 +312,17 @@ const ai = await launch({ modelPort: model.port, debugPort: await debugPort() })
 try {
   failed += await run([
     ['AI completion survives closing and reloading the sidebar', async () => {
-      await ai.invoke('shortcut', { name: 'ask_ai' });
+      await ai.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
       let pane = await ai.pageWith(/sidebar/);
       await pane.waitForFunction(() => !!window.__agentUi);
       await pane.evaluate(() => window.__agentUi.send('Give a brief greeting.'));
       await waitFor(() => model.calls.length > 0);
-      await ai.invoke('shortcut', { name: 'ask_ai' });
+      await ai.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
       await sleep(1600);
-      await ai.invoke('shortcut', { name: 'ask_ai' });
+      await ai.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
       await pane.reload();
       await pane.waitForFunction(() => document.body.textContent.includes('RECOVERED_RESULT_1'));
-      const state = await ai.invoke('ai.session');
+      const state = await ai.invoke('shell_ai', { operation: 'session_get' });
       assert.ok(state.turns.some(turn => turn.status === 'done'));
       assert.equal(await pane.getByRole('button', { name: 'Stop', exact: true }).count(), 0);
     }],
@@ -343,7 +343,7 @@ try {
       await link.locator('strong').click();
       const destination = await ai.pageWith(/markdown-link=1/);
       await destination.waitForSelector('#p1');
-      assert.equal((await ai.invoke('agent.context')).page.url, replyUrl);
+      assert.equal((await ai.invoke('shell_agent', { operation: 'context_get' })).page.url, replyUrl);
       assert.equal(pane.url(), paneUrl);
       assert.equal(await link.count(), 1);
     }],

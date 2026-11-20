@@ -1,12 +1,12 @@
 //! The IPC contract (DESIGN §6.2 / §6.3).
 //!
-//! One envelope in, one envelope out. Mirrored by hand in `ui/app.js` — the
-//! mirror is a small set of string literals for command names and event names,
-//! which is cheaper to keep honest than a codegen step for ~40 strings.
+//! The WebView transport for the shared `ai_platform_contract::browser` catalog.
+//! MCP calls use the same names, arguments and native dispatcher. Existing UI
+//! events are separate from API calls and retain their event names.
 //!
 //! Wire shape (UI → host), sent with `window.ipc.postMessage(JSON)`:
 //! ```json
-//! {"id": 12, "cmd": "nav.open", "payload": {"url": "...", "disposition": "current"}}
+//! {"id": 12, "cmd": "shell_page_navigate", "payload": {"url": "..."}}
 //! ```
 //! Host → UI (delivered by `window.__native._dispatch(json)` via evaluate_script):
 //! ```json
@@ -24,6 +24,7 @@ pub enum Surface {
     Overlay,
     Sidebar,
     Settings(crate::tabs::TabId),
+    ApiCall(u64),
 }
 
 impl Surface {
@@ -33,6 +34,7 @@ impl Surface {
             Self::Overlay => "overlay",
             Self::Sidebar => "sidebar",
             Self::Settings(_) => "settings",
+            Self::ApiCall(_) => "api",
         }
     }
 }
@@ -102,71 +104,9 @@ impl<'a> Event<'a> {
     }
 }
 
-/// Every command name the host accepts. An exhaustive match in `app.rs` means
-/// adding a command here forces an implementation.
-pub const COMMANDS: &[&str] = &[
-    "ai.session",
-    "nav.open",
-    "nav.back",
-    "nav.forward",
-    "nav.reload",
-    "nav.reload_ignoring_cache",
-    "nav.stop",
-    "tab.select",
-    "tab.close",
-    "tab.move",
-    "tab.pin",
-    "tab.unpin",
-    "tab.reopen_closed",
-    "tab.new",
-    "tab.duplicate",
-    "tab.bookmark",
-    "tab.bookmark_all",
-    "tab.zoom_set",
-    "tab.zoom_reset",
-    "group.create",
-    "group.rename",
-    "group.set_color",
-    "group.collapse",
-    "group.delete",
-    "find.start",
-    "find.query",
-    "find.next",
-    "find.prev",
-    "find.stop",
-    "omnibox.query",
-    "omnibox.activate",
-    "history.query",
-    "history.forget",
-    "history.clear",
-    "bookmark.toggle",
-    "bookmark.remove",
-    "download.action",
-    "download.clear_list",
-    "settings.update",
-    "settings.open_folder",
-    "settings.open",
-    "shell.focus_omnibox",
-    "shell.toggle_rail",
-    "shell.open_palette",
-    "shell.close_top_overlay",
-    "shell.ready",
-    "window.minimize",
-    "window.toggle_maximize",
-    "window.toggle_span",
-    "window.span_select",
-    "window.state",
-    "window.drag",
-    "window.resize",
-    "window.close",
-    "diagnostics.self_test",
-    "page.reveal_in_folder",
-    "page.copy_url",
-    "shortcut",
-];
-
+/// Whether the shared public shell API catalog contains this name.
 pub fn is_known_command(cmd: &str) -> bool {
-    COMMANDS.contains(&cmd)
+    ai_platform_contract::browser::find(cmd).is_some()
 }
 
 /// Turn a Rust string into a JS string literal safe to embed in
@@ -194,14 +134,14 @@ mod tests {
 
     #[test]
     fn request_without_id_parses() {
-        let r: Request = serde_json::from_str(r#"{"cmd":"nav.reload","payload":{}}"#).unwrap();
-        assert_eq!(r.cmd, "nav.reload");
+        let r: Request = serde_json::from_str(r#"{"cmd":"shell_page_navigation","payload":{"operation":"reload"}}"#).unwrap();
+        assert_eq!(r.cmd, "shell_page_navigation");
         assert!(r.id.is_none());
     }
 
     #[test]
     fn request_without_payload_parses() {
-        let r: Request = serde_json::from_str(r#"{"id":3,"cmd":"window.close"}"#).unwrap();
+        let r: Request = serde_json::from_str(r#"{"id":3,"cmd":"shell_page_url_copy"}"#).unwrap();
         assert_eq!(r.id, Some(3));
         assert!(!r.payload.is_object());
         assert!(r.payload.is_null());
@@ -224,8 +164,8 @@ mod tests {
     #[test]
     fn command_list_has_no_duplicates() {
         let mut seen = std::collections::HashSet::new();
-        for c in COMMANDS {
-            assert!(seen.insert(*c), "duplicate command {c}");
+        for api in ai_platform_contract::browser::definitions() {
+            assert!(seen.insert(api.name.clone()), "duplicate command {}", api.name);
         }
     }
 }

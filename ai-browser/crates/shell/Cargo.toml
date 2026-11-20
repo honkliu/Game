@@ -35,6 +35,8 @@ rusqlite = { version = "0.32.1", features = ["bundled"] }
 # url-template encoding (%s substitution) for the search engine
 percent-encoding = "2"
 url = "2"
+httparse = "1"
+getrandom = "0.3"
 # The PDF viewer fetches documents for pages (same TLS stack as the AI utility).
 ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
 

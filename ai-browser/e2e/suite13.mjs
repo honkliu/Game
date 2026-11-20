@@ -83,15 +83,15 @@ const app = await launch({ modelPort: model.port, debugPort });
 const base = `http://127.0.0.1:${fixtures.port}`;
 const apiBase = `http://127.0.0.1:${api.port}`;
 let side, chat, workingId;
-const mgmt = (op, payload = {}) => side.evaluate(([op, payload]) => new Promise((resolve, reject) => {
+const mgmt = (resource, operation, payload = {}) => side.evaluate(([resource, operation, payload]) => new Promise((resolve, reject) => {
   const req = 1000000 + Math.floor(Math.random() * 1000000);
   const off = window.__native.on('agent.reply', result => {
     if (result.req !== req) return;
     off();
     result.ok ? resolve(result.value) : reject(new Error(result.error));
   });
-  window.__native.invoke('agent.call', { ...payload, op, req }).catch(error => { off(); reject(error); });
-}), [op, payload]);
+  window.__native.invoke(resource, { ...payload, operation, req }).catch(error => { off(); reject(error); });
+}), [resource, operation, payload]);
 const ask = async text => {
   const count = await chat.evaluate(() => window.__agentUi.messages.length);
   await chat.evaluate(text => window.__agentUi.send(text), text);
@@ -101,7 +101,7 @@ const ask = async text => {
   }, count));
 };
 const openTools = async () => {
-  const context = await app.invoke('agent.context');
+  const context = await app.invoke('shell_agent', { operation: 'context_get' });
   if (context.page.url !== 'native://settings') workingId = context.page.tab_id;
   await chat.getByRole('button', { name: 'Settings', exact: true }).click();
   side = await app.pageWith(/pages\/settings\.html/);
@@ -110,7 +110,7 @@ const openTools = async () => {
   await side.locator('[data-tool-id="web_search"]').waitFor();
 };
 const backToChat = async () => {
-  await app.invoke('tab.select', { tab_id: workingId });
+  await app.invoke('shell_tab', { operation: 'activate', tab_id: workingId });
   side = chat;
 };
 const inspectColors = () => app.shell.evaluate(() => {
@@ -160,12 +160,12 @@ try {
     ['only a thin tab-strip bottom line follows the active tab in light/dark themes and canvas tabs', async () => {
       const ids = [];
       for (let index = 0; index < 2; index++) {
-        await app.invoke('nav.open', { url: `${base}/live?color=${index}`, disposition: 'new_tab' });
-        ids.push((await app.invoke('agent.context')).page.tab_id);
+        await app.invoke('shell_tab', { operation: 'open', url: `${base}/live?color=${index}`, background: false });
+        ids.push((await app.invoke('shell_agent', { operation: 'context_get' })).page.tab_id);
       }
       const backgrounds = [];
       for (const id of ids) {
-        await app.invoke('tab.select', { tab_id: id });
+        await app.invoke('shell_tab', { operation: 'activate', tab_id: id });
         await waitFor(async () => (await inspectColors()).id === id);
         for (const theme of ['light', 'dark']) {
           await app.shell.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
@@ -180,13 +180,13 @@ try {
         }
       }
       assert.notEqual(backgrounds[0], backgrounds[2], 'switching tabs changes the active hue');
-      await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [`${base}/live?cell=0`, `${base}/other?cell=1`] });
+      await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 1, urls: [`${base}/live?cell=0`, `${base}/other?cell=1`] });
       await waitFor(async () => (await inspectColors()).canvas);
       const canvas = await inspectColors();
       assert.equal(canvas.line, canvas.active, 'uses the selected canvas header, not its focused child hue');
       assert.notEqual(canvas.strip, canvas.active);
       assert.ok(Math.abs(canvas.gap) < 0.02);
-      await app.invoke('canvas.focus', { cell: 1 });
+      await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 1 });
       assert.equal((await inspectColors()).line, canvas.line);
     }],
     ['Tools exposes migrated browser, HTTP and MCP tools and saves disable switches', async () => {
@@ -194,22 +194,22 @@ try {
       side = await app.pageWith(/sidebar\.html/);
       chat = side;
       await side.waitForSelector('#ag-input');
-      const state = await mgmt('state');
-      assert.ok(state.tools.some(tool => tool.id === 'read_page' && tool.source === 'browser' && tool.enabled));
+      const state = await mgmt('shell_agent', 'state_get');
+      assert.ok(state.tools.some(tool => tool.id === 'shell_page_read' && tool.source === 'browser' && tool.enabled));
       assert.ok(state.tools.some(tool => tool.id === 'fetch_url' && tool.source === 'local'));
       assert.ok(state.tools.some(tool => tool.id === 'web_search' && tool.http.url.includes('duckduckgo')));
-      await mgmt('mcp.save', { id: 'fixture', name: 'Fixture', url: `${apiBase}/mcp`, enabled: true });
+      await mgmt('shell_agent_mcp', 'save', { id: 'fixture', name: 'Fixture', url: `${apiBase}/mcp`, enabled: true });
       await openTools();
       await side.locator('[data-tool-id="mcp_fixture__echo"]').waitFor();
       for (const id of ['fetch_url', 'web_search', 'mcp_fixture__echo']) {
         await side.getByRole('checkbox', { name: `Enable ${id}`, exact: true }).uncheck();
-        await waitFor(async () => !(await mgmt('state')).tools.find(tool => tool.id === id).enabled);
+        await waitFor(async () => !(await mgmt('shell_agent', 'state_get')).tools.find(tool => tool.id === id).enabled);
       }
       await backToChat();
       const answer = await ask('Show only configured tools.');
       assert.match(answer.content, /CONFIGURED-ONLY/);
       const names = calls.at(-1).tools.map(tool => tool.function.name);
-      assert.ok(names.includes('list_tabs'));
+      assert.ok(names.includes('shell_tab'));
       for (const id of ['fetch_url', 'web_search', 'mcp_fixture__echo']) assert.ok(!names.includes(id), `${id} must not be sent to the model`);
       assert.equal(requests.length, 0, 'disabled search performs no request');
     }],
@@ -221,7 +221,7 @@ try {
       await side.getByRole('button', { name: 'Save', exact: true }).click();
       await side.locator('[data-tool-id="web_search"]').waitFor();
       await side.getByRole('checkbox', { name: 'Enable web_search', exact: true }).check();
-      await waitFor(async () => (await mgmt('state')).tools.find(tool => tool.id === 'web_search').enabled);
+      await waitFor(async () => (await mgmt('shell_agent', 'state_get')).tools.find(tool => tool.id === 'web_search').enabled);
       await side.getByRole('button', { name: 'Add HTTP tool', exact: true }).click();
       await side.getByRole('button', { name: 'Document lookup template', exact: true }).click();
       await side.getByLabel('URL', { exact: true }).fill(`${apiBase}/v1/documents/{{document_id}}`);
@@ -268,23 +268,23 @@ try {
         await side.getByRole('button', { name: 'Save', exact: true }).click();
         await side.locator(`[data-tool-id="${id}"]`).waitFor();
       };
-      await edit('read_page', 'read_current_page');
+      await edit('shell_page_read', 'read_current_page');
       await edit('fetch_skill', 'read_skill_definition');
       await edit('mcp_fixture__echo', 'configured_echo');
       assert.equal(await side.getByRole('checkbox', { name: 'Enable mcp_fixture__echo', exact: true }).isChecked(), false,
         'editing does not enable a disabled tool');
       await side.getByRole('checkbox', { name: 'Enable mcp_fixture__echo', exact: true }).check();
-      await waitFor(async () => (await mgmt('state')).tools.find(tool => tool.id === 'mcp_fixture__echo').enabled);
-      await edit('navigate', 'propose_page');
+      await waitFor(async () => (await mgmt('shell_agent', 'state_get')).tools.find(tool => tool.id === 'mcp_fixture__echo').enabled);
+      await edit('shell_page_navigate', 'propose_page');
       await side.getByRole('button', { name: 'Edit web_search', exact: true }).click();
       await side.getByLabel('Model tool name', { exact: true }).fill('moonshot_search');
       await side.getByRole('button', { name: 'Save', exact: true }).click();
-      const readCard = side.locator('[data-tool-id="read_page"]');
+      const readCard = side.locator('[data-tool-id="shell_page_read"]');
       await readCard.waitFor();
       await readCard.locator('summary').click();
       const definition = JSON.parse(await readCard.locator('pre').innerText());
       assert.equal(definition.function.name, 'read_current_page');
-      assert.equal(definition.function.description, 'CONFIGURED read_page description');
+      assert.equal(definition.function.description, 'CONFIGURED shell_page_read description');
       assert.equal(definition.function.parameters.properties.tab_id.description, 'Configured tab selection');
       await backToChat();
       if (await side.locator('#nav-switch').isChecked()) {
@@ -297,8 +297,8 @@ try {
       const answer = await ask('Use the configured tool names.');
       assert.match(answer.content, /ALIASES-OK/);
       const sent = calls[0].tools.map(tool => tool.function.name);
-      for (const [id, name] of [['read_page', 'read_current_page'], ['fetch_skill', 'read_skill_definition'],
-        ['mcp_fixture__echo', 'configured_echo'], ['web_search', 'moonshot_search'], ['navigate', 'propose_page']]) {
+      for (const [id, name] of [['shell_page_read', 'read_current_page'], ['fetch_skill', 'read_skill_definition'],
+        ['mcp_fixture__echo', 'configured_echo'], ['web_search', 'moonshot_search'], ['shell_page_navigate', 'propose_page']]) {
         assert.ok(sent.includes(name) && !sent.includes(id), `${id} is exposed only as ${name}`);
       }
       assert.ok(mcpRequests.some(message => message.method === 'tools/call' &&
@@ -307,7 +307,7 @@ try {
       await side.reload();
       await side.waitForFunction(() => window.__agentUi?.state?.tools?.some(tool => tool.name === 'read_current_page'));
       await openTools();
-      const state = await mgmt('state');
+      const state = await mgmt('shell_agent', 'state_get');
       assert.equal(state.tools.find(tool => tool.id === 'web_search').name, 'moonshot_search');
       assert.equal(state.tools.find(tool => tool.id === 'fetch_url').enabled, false);
     }],
@@ -316,7 +316,7 @@ try {
       await side.getByRole('button', { name: 'Edit fetch_skill', exact: true }).click();
       await side.getByRole('button', { name: 'Restore source definition', exact: true }).click();
       await side.locator('[data-tool-id="fetch_skill"]').waitFor();
-      const state = await mgmt('state');
+      const state = await mgmt('shell_agent', 'state_get');
       assert.equal(state.tools.find(tool => tool.id === 'fetch_skill').name, 'fetch_skill');
       assert.equal(state.tools.find(tool => tool.id === 'fetch_skill').enabled, true);
       await side.getByRole('button', { name: 'Edit mcp_fixture__echo', exact: true }).click();

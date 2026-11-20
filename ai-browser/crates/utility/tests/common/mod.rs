@@ -207,18 +207,18 @@ impl FakeServer {
     }
 }
 
-type CallHandler = dyn Fn(Method, &serde_json::Value, &TaskControl) -> Result<ResponsePayload, Failure> + Send + Sync;
+type CallHandler = dyn Fn(&str, &serde_json::Value, &TaskControl) -> Result<ResponsePayload, Failure> + Send + Sync;
 
 /// An in-memory shell: records notifications and calls, answers calls with a closure.
 pub struct FakeShell {
     pub notifications: Mutex<Vec<(Method, serde_json::Value)>>,
-    pub calls: Mutex<Vec<(Method, serde_json::Value)>>,
+    pub calls: Mutex<Vec<(String, serde_json::Value)>>,
     handler: Box<CallHandler>,
 }
 
 impl FakeShell {
     pub fn new(
-        handler: impl Fn(Method, &serde_json::Value, &TaskControl) -> Result<ResponsePayload, Failure> + Send + Sync + 'static,
+        handler: impl Fn(&str, &serde_json::Value, &TaskControl) -> Result<ResponsePayload, Failure> + Send + Sync + 'static,
     ) -> FakeShell {
         FakeShell { notifications: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()), handler: Box::new(handler) }
     }
@@ -243,11 +243,15 @@ impl FakeShell {
             .collect()
     }
 
-    pub fn called(&self, method: Method) -> usize {
+    pub fn called(&self, method: &str) -> usize {
         self.calls.lock().unwrap().iter().filter(|(m, _)| *m == method).count()
     }
 
-    pub fn calls_of(&self, method: Method) -> Vec<serde_json::Value> {
+    pub fn action_calls(&self) -> Vec<serde_json::Value> {
+        self.calls.lock().unwrap().iter().filter_map(|(_, p)| p.get("_task").cloned()).collect()
+    }
+
+    pub fn calls_of(&self, method: &str) -> Vec<serde_json::Value> {
         self.calls.lock().unwrap().iter().filter(|(m, _)| *m == method).map(|(_, p)| p.clone()).collect()
     }
 }
@@ -257,8 +261,8 @@ impl ShellLink for FakeShell {
         self.notifications.lock().unwrap().push((method, params.clone()));
     }
 
-    fn call(&self, method: Method, params: &serde_json::Value, control: &TaskControl) -> Result<ResponsePayload, Failure> {
-        self.calls.lock().unwrap().push((method, params.clone()));
+    fn call(&self, method: &str, params: &serde_json::Value, control: &TaskControl) -> Result<ResponsePayload, Failure> {
+        self.calls.lock().unwrap().push((method.to_string(), params.clone()));
         if let Some(failure) = control.failure() {
             return Err(failure);
         }

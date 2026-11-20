@@ -44,19 +44,13 @@ use windows::Win32::System::SystemInformation::{
 /// The dispatch command the scenario uses to bring the overlay up one step after
 /// the baseline, so C5 measures a delta. Handled in `app.rs` only when
 /// [`mode::active`], so it is not a command a normal session can invoke.
-pub const OVERLAY_STEP: &str = "proof.overlay";
-
-/// Prefix of every harness-internal dispatch command, so `app.rs` can give the
-/// whole family a settle window long enough for a webview to be built (the default
-/// 30 ms window would sample a half-initialised overlay and C5 would read its cost
-/// as roughly zero).
-pub const OVERLAY_STEP_PREFIX: &str = "proof.";
+pub const OVERLAY_STEP: &str = "shell_diagnostics";
 
 /// A harness-internal step that does nothing but spend its settle window, so the
 /// run can *wait* without driving anything. Used by `+self_refresh` to watch a
 /// background tab for a fixed interval with no commands in flight, and handled in
 /// `app.rs` only when [`mode::active`].
-pub const WAIT_STEP: &str = "proof.wait";
+pub const WAIT_STEP: &str = "shell_diagnostics";
 
 /// Ceiling on a [`WAIT_STEP`]'s `ms`. The value is chosen by [`scenario`], not by a
 /// caller, and `app.rs` caps it on the way through as well — a scenario bug should
@@ -388,25 +382,25 @@ fn scenario(
         // gives C5 a before/after pair. The command is idempotent in `app.rs`, so a
         // later step re-sending it is harmless and keeps the script a pure function
         // of the scenario name.
-        steps.push((OVERLAY_STEP, json!({ "enabled": true })));
+        steps.push((OVERLAY_STEP, json!({ "operation": "measure_overlay", "enabled": true })));
     }
     let busy_before = if cfg.self_refresh_tab {
         let at = steps.len();
         steps.push((
-            "nav.open",
-            json!({ "url": SELF_REFRESH_PAGE, "disposition": "new_tab" }),
+            "shell_tab",
+            json!({ "url": SELF_REFRESH_PAGE, "operation": "open" }),
         ));
         // Spend a load window before the tabs that follow, so the busy tab's own cost
         // is sampled on a loaded page rather than a spinner.
-        steps.push((WAIT_STEP, json!({ "ms": BUSY_LOAD_SETTLE_MS })));
+        steps.push((WAIT_STEP, json!({ "operation": "measure_wait", "ms": BUSY_LOAD_SETTLE_MS })));
         Some(at)
     } else {
         None
     };
     steps.extend((0..cfg.tabs.min(pages.len())).map(|i| {
         (
-            "nav.open",
-            json!({ "url": pages[i], "disposition": "new_tab" }),
+            "shell_tab",
+            json!({ "url": pages[i], "operation": "open" }),
         )
     }));
     // Nothing to watch without `+self_refresh`: trailing waits would only stall a
@@ -414,19 +408,19 @@ fn scenario(
     let shape = busy_before.map(|busy_before| {
         // The static tabs above each activated themselves, so the busy tab is
         // backgrounded by now; let them finish loading before anything is timed.
-        steps.push((WAIT_STEP, json!({ "ms": BUSY_QUIET_MS })));
+        steps.push((WAIT_STEP, json!({ "operation": "measure_wait", "ms": BUSY_QUIET_MS })));
         let hidden_start = steps.len();
-        steps.push((WAIT_STEP, json!({ "ms": WATCH_MS })));
+        steps.push((WAIT_STEP, json!({ "operation": "measure_wait", "ms": WATCH_MS })));
         // The sample taken at *this* index is the one that closes the window: it is
         // taken after the wait above has been spent, before `tab.select` runs.
         let hidden_end = steps.len();
         // Foreground again. `AppState::activate` only flips visibility on a live tab
         // (`build_webview` returns early when one exists), so the page is not
         // reloaded and its own backoff clock is untouched.
-        steps.push(("tab.select", json!({ "tab_id": BUSY_TAB_ID })));
-        steps.push((WAIT_STEP, json!({ "ms": BUSY_QUIET_MS })));
+        steps.push(("shell_tab", json!({ "operation": "activate", "tab_id": BUSY_TAB_ID })));
+        steps.push((WAIT_STEP, json!({ "operation": "measure_wait", "ms": BUSY_QUIET_MS })));
         let visible_start = steps.len();
-        steps.push((WAIT_STEP, json!({ "ms": WATCH_MS })));
+        steps.push((WAIT_STEP, json!({ "operation": "measure_wait", "ms": WATCH_MS })));
         let visible_end = steps.len();
         Shape {
             busy_before,
@@ -1742,13 +1736,13 @@ mod tests {
     fn the_scenario_script_is_the_toggles_it_was_asked_for() {
         let plain = drive("proof:2", &observed(1, 1, true, 0));
         assert_eq!(plain.len(), 2, "one step per tab, no overlay step");
-        assert!(plain.iter().all(|(cmd, _)| *cmd == "nav.open"));
+        assert!(plain.iter().all(|(cmd, _)| *cmd == "shell_tab"));
 
         let overlay = drive("proof:2+no_overlay", &observed(1, 1, false, 0));
         assert_eq!(overlay.len(), 3, "the overlay step plus one per tab");
         assert_eq!(overlay[0].0, OVERLAY_STEP);
-        assert_eq!(overlay[0].1, json!({ "enabled": true }));
-        assert_eq!(overlay[1].0, "nav.open");
+        assert_eq!(overlay[0].1, json!({ "operation": "measure_overlay", "enabled": true }));
+        assert_eq!(overlay[1].0, "shell_tab");
     }
 
     /// The `+self_refresh` layout *is* the A/B experiment: the busy tab is opened
@@ -1767,12 +1761,12 @@ mod tests {
         // Busy tab first, and it is the self-refreshing page, opened so it takes the
         // foreground and hands it straight back to the tabs that follow.
         let busy = shape.busy_before;
-        assert_eq!(steps[busy].0, "nav.open");
+        assert_eq!(steps[busy].0, "shell_tab");
         assert_eq!(steps[busy].1["url"], json!(SELF_REFRESH_PAGE));
-        assert_eq!(steps[busy].1["disposition"], json!("new_tab"));
+        assert_eq!(steps[busy].1["operation"], json!("open"));
         // Then a load window, so its own cost is sampled on a loaded page.
         assert_eq!(steps[busy + 1].0, WAIT_STEP);
-        assert_eq!(steps[busy + 1].1, json!({ "ms": BUSY_LOAD_SETTLE_MS }));
+        assert_eq!(steps[busy + 1].1, json!({ "operation": "measure_wait", "ms": BUSY_LOAD_SETTLE_MS }));
         // Then the static tabs, whose activation is what leaves the busy tab
         // backgrounded for everything that follows.
         assert_eq!(steps[busy + 2].1["url"], json!(PROOF_PAGES[0]));
@@ -1785,20 +1779,20 @@ mod tests {
         // The sample at a window's end index is the *next* step's pre-command sample:
         // the hidden window is closed by the `tab.select` that flips visibility, and
         // the visible one by the sample after the run's last step.
-        assert_eq!(steps[shape.hidden.1].0, "tab.select");
-        assert_eq!(steps[shape.hidden.1].1, json!({ "tab_id": BUSY_TAB_ID }));
+        assert_eq!(steps[shape.hidden.1].0, "shell_tab");
+        assert_eq!(steps[shape.hidden.1].1, json!({ "operation": "activate", "tab_id": BUSY_TAB_ID }));
         assert_eq!(shape.visible.1, steps.len());
         // Neither window includes the steps that move the page between them: the
         // settle before it and the `tab.select` itself are scripted steps, so anything
         // the harness did there is not counted as the page's own doing.
         assert_eq!(steps[shape.hidden.0 - 1].0, WAIT_STEP);
-        assert_eq!(steps[shape.hidden.0 - 1].1, json!({ "ms": BUSY_QUIET_MS }));
-        assert_eq!(steps[shape.hidden.1 + 1].1, json!({ "ms": BUSY_QUIET_MS }));
+        assert_eq!(steps[shape.hidden.0 - 1].1, json!({ "operation": "measure_wait", "ms": BUSY_QUIET_MS }));
+        assert_eq!(steps[shape.hidden.1 + 1].1, json!({ "operation": "measure_wait", "ms": BUSY_QUIET_MS }));
 
         // The control of the A/B test: the same wait, twice. If these ever differ the
         // experiment no longer compares like with like.
         assert_eq!(steps[shape.hidden.0], steps[shape.visible.0]);
-        assert_eq!(steps[shape.hidden.0].1, json!({ "ms": WATCH_MS }));
+        assert_eq!(steps[shape.hidden.0].1, json!({ "operation": "measure_wait", "ms": WATCH_MS }));
         // Sample labelling follows the ranges rather than a hand-maintained index.
         assert_eq!(shape.phase_at(shape.hidden.0), Phase::Hidden);
         assert_eq!(shape.phase_at(shape.hidden.1), Phase::Hidden);
@@ -1809,7 +1803,7 @@ mod tests {
         // window it reports would not be the window it got.
         assert!(steps
             .iter()
-            .filter(|(cmd, _)| *cmd == WAIT_STEP)
+            .filter(|(_, p)| p["operation"] == "measure_wait")
             .all(|(_, p)| p["ms"].as_u64().unwrap_or(u64::MAX) <= MAX_WAIT_MS));
         assert!(WATCH_MS <= MAX_WAIT_MS);
     }
@@ -1824,7 +1818,7 @@ mod tests {
         );
         assert!(shape.is_none());
         assert_eq!(steps.len(), 3);
-        assert!(!steps.iter().any(|(cmd, _)| *cmd == WAIT_STEP));
+        assert!(!steps.iter().any(|(_, p)| p["operation"] == "measure_wait"));
     }
 
     /// C8 without the mode that produces it: say so and name the command, never

@@ -188,7 +188,7 @@ impl AppState {
         }
     }
 
-    pub(super) fn window_payload(&self) -> Value {
+    pub(super) fn wv_window_state_get(&self) -> Value {
         let displays = self.span_displays();
         let selected = self
             .settings
@@ -245,7 +245,7 @@ impl AppState {
     }
 
     pub(super) fn emit_window_state(&mut self) {
-        self.emit("state.window", self.window_payload());
+        self.emit("state.window", self.wv_window_state_get());
     }
 
     pub(super) fn restore_spanned_window(&mut self) -> Result<bool, String> {
@@ -260,11 +260,11 @@ impl AppState {
         Ok(false)
     }
 
-    pub(super) fn toggle_window_span(&mut self) -> Result<Option<Value>, String> {
+    pub(super) fn wv_window_span_toggle(&mut self) -> Result<Option<Value>, String> {
         if !self.restore_spanned_window()? {
             *self.window_displays.0.borrow_mut() = None;
             let displays = self.span_displays();
-            if !self.window_payload()["can_span"].as_bool().unwrap_or(false) {
+            if !self.wv_window_state_get()["can_span"].as_bool().unwrap_or(false) {
                 return Err("connect a second display to span monitors".into());
             }
             let Some(selected) = self
@@ -273,7 +273,7 @@ impl AppState {
                 .as_ref()
                 .and_then(|layout| resolve_layout(&displays, layout))
             else {
-                return Ok(Some(self.window_payload()));
+                return Ok(Some(self.wv_window_state_get()));
             };
             let target = span_bounds(&displays, &selected).ok_or("choose different displays")?;
             #[cfg(windows)]
@@ -295,10 +295,10 @@ impl AppState {
         self.apply_layout();
         self.mark_dirty();
         self.emit_window_state();
-        Ok(Some(self.window_payload()))
+        Ok(Some(self.wv_window_state_get()))
     }
 
-    pub(super) fn select_span_monitors(
+    pub(super) fn wv_window_span_select(
         &mut self,
         payload: &Value,
     ) -> Result<Option<Value>, String> {
@@ -316,13 +316,13 @@ impl AppState {
         self.restore_spanned_window()?;
         self.emit_window_state();
         if payload["span"].as_bool().unwrap_or(true) {
-            self.toggle_window_span()
+            self.wv_window_span_toggle()
         } else {
-            Ok(Some(self.window_payload()))
+            Ok(Some(self.wv_window_state_get()))
         }
     }
 
-    pub(super) fn toggle_window_maximize(&mut self) -> Result<(), String> {
+    pub(super) fn wv_window_maximize_toggle(&mut self) -> Result<(), String> {
         let was_spanning = self.restore_spanned_window()?;
         if let Some(window) = self.window.as_ref() {
             window.set_maximized(was_spanning || !window.is_maximized());

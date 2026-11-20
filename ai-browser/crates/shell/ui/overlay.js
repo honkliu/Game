@@ -86,7 +86,7 @@
   let seq = 0;
   async function queryPalette(text) {
     const mine = ++seq;
-    const res = await invoke('omnibox.query', { text, limit: 40 }).catch(() => null);
+    const res = await invoke('shell_omnibox', { operation: 'query', text, limit: 40 }).catch(() => null);
     if (mine !== seq || !res) return;
     paletteRows = res.rows || [];
     paletteSel = 0;
@@ -137,17 +137,17 @@
     else if (e.key === 'Tab') {
       if (paletteRows.length) { e.preventDefault(); const r = paletteRows[paletteSel]; e.target.value = r.url || r.title || e.target.value; queryPalette(e.target.value); }
     } else if (e.key === 'Enter') { e.preventDefault(); runPaletteRow(); }
-    else if (e.key === 'Escape') { e.preventDefault(); invoke('shell.close_top_overlay', {}); }
+    else if (e.key === 'Escape') { e.preventDefault(); invoke('shell_ui', { operation: 'overlay_close_top' }); }
   }
 
   function runPaletteRow() {
     const r = paletteRows[paletteSel];
     const text = document.getElementById('pal-input').value;
-    if (!r) { if (text.trim()) invoke('omnibox.activate', { text }); return; }
-    if (r.kind === 'command') invoke('omnibox.activate', { text, verb: r.verb });
-    else if (r.kind === 'tab') invoke('tab.select', { tab_id: r.tab_id });
-    else if (r.kind === 'find') invoke('omnibox.activate', { text });
-    else invoke('omnibox.activate', { text, url: r.url });
+    if (!r) { if (text.trim()) invoke('shell_omnibox', { operation: 'activate', text }); return; }
+    if (r.kind === 'command') invoke('shell_omnibox', { operation: 'activate', text, verb: r.verb });
+    else if (r.kind === 'tab') invoke('shell_tab', { operation: 'activate', tab_id: r.tab_id });
+    else if (r.kind === 'find') invoke('shell_omnibox', { operation: 'activate', text });
+    else invoke('shell_omnibox', { operation: 'activate', text, url: r.url });
   }
 
   // ── history panel ────────────────────────────────────────────────────
@@ -174,7 +174,7 @@
     search.focus();
     search.addEventListener('input', () => queryHistory(search.value));
     search.addEventListener('keydown', historyKey);
-    document.getElementById('hist-close').addEventListener('click', () => invoke('shell.close_top_overlay', {}));
+    document.getElementById('hist-close').addEventListener('click', () => invoke('shell_ui', { operation: 'overlay_close_top' }));
     document.getElementById('hist-clear').addEventListener('click', confirmClearAll);
     queryHistory('');
   }
@@ -182,7 +182,7 @@
   let histSeq = 0;
   async function queryHistory(tokens) {
     const mine = ++histSeq;
-    const res = await invoke('history.query', { tokens, limit: 300 }).catch(() => null);
+    const res = await invoke('shell_history', { operation: 'query', tokens, limit: 300 }).catch(() => null);
     if (mine !== histSeq || !res) return;
     historyRows = res.rows || [];
     historySel = 0;
@@ -262,7 +262,7 @@
       rows[historySel].focus();
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      invoke('shell.close_top_overlay', {});
+      invoke('shell_ui', { operation: 'overlay_close_top' });
     } else if (e.key === 'Enter') {
       if (document.activeElement && document.activeElement.classList.contains('history-row')) {
         e.preventDefault();
@@ -280,7 +280,7 @@
   }
 
   function openEntry(r, newTab) {
-    invoke('omnibox.activate', {
+    invoke('shell_omnibox', { operation: 'activate',
       text: r.url,
       url: r.url,
       disposition: newTab ? 'new_tab_background' : 'current',
@@ -288,7 +288,7 @@
   }
 
   async function forgetEntry(r) {
-    await invoke('history.forget', { entry_ids: [r.id] }).catch(() => {});
+    await invoke('shell_history', { operation: 'delete', entry_ids: [r.id] }).catch(() => {});
     const search = document.getElementById('hist-search');
     queryHistory(search ? search.value : '');
   }
@@ -303,7 +303,7 @@
         <button id="clear-no" class="chip-btn">Cancel</button></p>
       </div>`;
     document.getElementById('clear-yes').addEventListener('click', () => {
-      invoke('history.clear', { scope: 'all' }).then(() => queryHistory(''));
+      invoke('shell_history', { operation: 'clear', scope: 'all' }).then(() => queryHistory(''));
     });
     document.getElementById('clear-no').addEventListener('click', () => queryHistory(''));
     document.getElementById('clear-yes').focus();
@@ -321,7 +321,7 @@
       { label: 'Copy URL', run: () => navigator.clipboard.writeText(r.url).catch(() => {}) },
       { sep: true },
       { label: 'Forget this page', danger: true, run: () => forgetEntry(r) },
-      { label: 'Forget this site', danger: true, run: () => invoke('history.forget', { site: r.host }).then(() => queryHistory(document.getElementById('hist-search').value)) },
+      { label: 'Forget this site', danger: true, run: () => invoke('shell_history', { operation: 'delete', site: r.host }).then(() => queryHistory(document.getElementById('hist-search').value)) },
     ];
     for (const it of items) {
       if (it.sep) {
@@ -359,7 +359,7 @@
   const askTurns = new Map(); // turn_id → record; survives close so reopen shows them
   let askBusy = null;         // turn_id whose final `ai.answer` has not arrived
 
-  let askStatusInfo = null;   // last `ai.status` payload: context header, models, switches
+  let askStatusInfo = null;   // last `shell_ai` status_get payload: context header, models, switches
   let askCard = false;        // inline card next to a selection rather than the composer
 
   function openAsk(card) {
@@ -410,7 +410,7 @@
     for (const t of askTurns.values()) paintTurn(t);
     paintContext();
     refreshStatus();
-    invoke('ai.models', {}).catch(() => {});
+    invoke('shell_ai', { operation: 'models_list' }).catch(() => {});
     setBusy(askBusy !== null);
     if (!askTurns.size) {
       const hint = document.createElement('p');
@@ -436,14 +436,14 @@
   async function stopAsk() {
     const stop = document.getElementById('ask-stop');
     if (stop) stop.disabled = true;
-    try { await invoke('ai.stop', { turn_id: askBusy }); } catch (e) {
+    try { await invoke('shell_ai', { operation: 'stop', turn_id: askBusy }); } catch (e) {
       setAskStatus(clip((e && e.message) || 'nothing to stop', 200), 'warn');
     }
     if (stop) stop.disabled = false;
   }
 
   async function refreshStatus() {
-    try { askStatusInfo = await invoke('ai.status', {}); } catch (e) { return; }
+    try { askStatusInfo = await invoke('shell_ai', { operation: 'status_get' }); } catch (e) { return; }
     paintContext();
   }
 
@@ -577,7 +577,7 @@
   async function scrollCitation(t, c, chip) {
     setAskStatus('');
     try {
-      const res = await invoke('ai.citation.scroll', { turn_id: t.turnId, citation_id: c.citation_id });
+      const res = await invoke('shell_ai', { operation: 'citation_reveal', turn_id: t.turnId, citation_id: c.citation_id });
       if (res && res.scrolled) setAskStatus(`Scrolled to citation ${c.ordinal}.`);
     } catch (e) {
       // The host refuses rather than scroll a document this citation no longer
@@ -721,7 +721,7 @@
     if (!question && !(useSel && intent !== 'ask' && intent !== 'act')) return;
     let res;
     try {
-      res = await invoke('ai.ask', {
+      res = await invoke('shell_ai', { operation: 'ask',
         question,
         intent,
         selection: useSel,
@@ -774,7 +774,7 @@
       }
     }
     const fresh = document.getElementById('ask-new');
-    if (fresh) fresh.addEventListener('click', () => { invoke('ai.history.clear', {}).catch(() => {}); });
+    if (fresh) fresh.addEventListener('click', () => { invoke('shell_ai', { operation: 'history_clear' }).catch(() => {}); });
     const gear = document.getElementById('ask-gear');
     if (gear) gear.addEventListener('click', toggleSettings);
     const save = document.getElementById('set-save');
@@ -787,7 +787,7 @@
     const show = typeof force === 'boolean' ? force : box.hidden;
     box.hidden = !show;
     if (!show) return;
-    try { askStatusInfo = await invoke('ai.status', {}); } catch (e) { return; }
+    try { askStatusInfo = await invoke('shell_ai', { operation: 'status_get' }); } catch (e) { return; }
     const p = askStatusInfo.provider || {};
     document.getElementById('set-url').value = p.base_url || '';
     document.getElementById('set-model').value = p.model_id || '';
@@ -799,7 +799,7 @@
     const msg = document.getElementById('set-msg');
     msg.textContent = 'Saving…';
     try {
-      askStatusInfo = await invoke('ai.provider.set', {
+      askStatusInfo = await invoke('shell_ai', { operation: 'provider_set',
         base_url: document.getElementById('set-url').value,
         model_id: document.getElementById('set-model').value,
         api_key: document.getElementById('set-key').value,
@@ -842,7 +842,7 @@
     // The host turns the toolbar into the card before the task starts.
     let res;
     try {
-      res = await invoke('ai.selection.act', { intent, question: intent === 'ask' ? '' : undefined });
+      res = await invoke('shell_ai', { operation: 'selection_run', intent, question: intent === 'ask' ? '' : undefined });
     } catch (e) {
       openAsk(true);
       setAskStatus(clip((e && e.message) || 'could not start', 200), 'error');
@@ -876,7 +876,7 @@
 
   on('shell.shortcut', (p) => {
     if (!p) return;
-    if (p.name === 'escape') invoke('shell.close_top_overlay', {});
+    if (p.name === 'escape') invoke('shell_ui', { operation: 'overlay_close_top' });
     else if (p.name === 'ask_ai') openAsk(false);
   });
 
@@ -909,7 +909,7 @@
 
   // A page the assistant opened in the background: shown as a candidate the user can
   // switch to. Nothing here navigates; the tab id goes back through the same
-  // `tab.select` command the rail uses.
+  // `shell_tab` activate command the rail uses.
   on('ai.candidate', (p) => {
     const row = document.getElementById('ask-cands');
     if (!row || !p) return;
@@ -918,7 +918,7 @@
     b.className = 'ask-chip ask-cand';
     b.textContent = clip(p.title || p.url || 'candidate', 40);
     b.title = (p.reason ? p.reason + ' — ' : '') + (p.url || '');
-    b.addEventListener('click', () => invoke('tab.select', { tab_id: p.tab_id }).catch(() => {}));
+    b.addEventListener('click', () => invoke('shell_tab', { operation: 'activate', tab_id: p.tab_id }).catch(() => {}));
     row.appendChild(b);
   });
 
@@ -981,7 +981,7 @@
   });
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') invoke('shell.close_top_overlay', {});
+    if (e.key === 'Escape') invoke('shell_ui', { operation: 'overlay_close_top' });
   });
 
   on('ai.history.cleared', () => {

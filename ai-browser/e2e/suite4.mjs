@@ -8,7 +8,7 @@ const app = await launch({ debugPort: 9447, withProvider: false });
 const pageUrl = (n) => `${base}/?n=${n}`;
 const six = [1, 2, 3, 4, 5, 6].map(pageUrl);
 
-const canvas = () => app.invoke('canvas.state');
+const canvas = () => app.invoke('shell_canvas', { operation: 'state_get' });
 const livePage = (n) => app.ctx.pages().find((p) => p.url() === pageUrl(n));
 const waitFor = async (fn, ms = 15000) => {
   const end = Date.now() + ms;
@@ -22,7 +22,7 @@ let cv;
 
 await run([
   ['create a 3x2 canvas with six live pages', async () => {
-    const r = await app.invoke('canvas.create', { cols: 3, rows: 2, urls: six });
+    const r = await app.invoke('shell_canvas', { operation: 'open', cols: 3, rows: 2, urls: six });
     assert.equal(r.tab_ids.length, 6);
     await waitFor(async () => six.every((_, i) => livePage(i + 1)));
     cv = await canvas();
@@ -71,7 +71,7 @@ await run([
       { x: 2, w: 4 }, 'a cell is its page plus a 2px focus ring');
     const [c1, c2] = (await canvas()).cells;
     assert.equal(c2.body.x - (c1.body.x + c1.body.w), 4, 'neighbouring pages are 4px apart');
-    await app.invoke('canvas.focus', { cell: 3 });
+    await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 3 });
     await app.shell.evaluate(() => document.getElementById('cv-zoom').click());
     await waitFor(async () => (await canvas()).zoomed === true);
     await app.shell.evaluate(() => document.getElementById('cv-zoom').click());
@@ -80,15 +80,15 @@ await run([
   }],
 
   ['the focused page is what the AI context sees', async () => {
-    await app.invoke('canvas.focus', { cell: 2 });
-    const ctx = await app.invoke('agent.context', {});
+    await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 2 });
+    const ctx = await app.invoke('shell_agent', { operation: 'context_get' });
     const list = JSON.stringify(ctx);
     assert.ok(list.includes('n=3'), 'context mentions the focused page');
   }],
 
   ['zoom shows one page full size and back', async () => {
-    await app.invoke('canvas.focus', { cell: 0 });
-    await app.invoke('canvas.zoom', { zoomed: true });
+    await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 0 });
+    await app.invoke('shell_canvas', { operation: 'zoom', zoomed: true });
     cv = await canvas();
     assert.equal(cv.zoomed, true);
     const visible = cv.cells.filter((c) => !c.hidden);
@@ -99,13 +99,13 @@ await run([
       return x > cv.cells[1].body.w * 2 ? x : 0;
     });
     assert.ok(w > 0);
-    await app.invoke('canvas.zoom', { zoomed: false });
+    await app.invoke('shell_canvas', { operation: 'zoom', zoomed: false });
     cv = await canvas();
     assert.equal(cv.cells.filter((c) => !c.hidden).length, 6);
   }],
 
   ['reshaping to 2x2 closes the overflow pages', async () => {
-    const r = await app.invoke('canvas.layout', { cols: 2, rows: 2 });
+    const r = await app.invoke('shell_canvas', { operation: 'layout_set', cols: 2, rows: 2 });
     assert.equal(r.closed, 2);
     cv = await canvas();
     assert.equal(cv.capacity, 4);
@@ -113,35 +113,35 @@ await run([
   }],
 
   ['a page beyond capacity is refused', async () => {
-    await assert.rejects(app.invoke('canvas.set', { url: pageUrl(7) }), /fit|full|capacity|empty/i);
-    await assert.rejects(app.invoke('canvas.create', { cols: 5, rows: 5 }), /at most|columns|rows|fit/i);
+    await assert.rejects(app.invoke('shell_canvas', { operation: 'cell_open', url: pageUrl(7) }), /fit|full|capacity|empty/i);
+    await assert.rejects(app.invoke('shell_canvas', { operation: 'open', cols: 5, rows: 5 }), /at most|columns|rows|fit/i);
   }],
 
   ['clearing a cell leaves an empty slot that can be refilled', async () => {
-    await app.invoke('canvas.clear', { cell: 3 });
+    await app.invoke('shell_canvas', { operation: 'cell_close', cell: 3 });
     cv = await canvas();
     assert.equal(cv.cells[3].tab_id, null);
-    const r = await app.invoke('canvas.set', { cell: 3, url: pageUrl(8) });
+    const r = await app.invoke('shell_canvas', { operation: 'cell_open', cell: 3, url: pageUrl(8) });
     assert.ok(r.tab_id);
     await waitFor(async () => livePage(8));
   }],
 
   ['links that open a new window fill the next empty cell', async () => {
-    await app.invoke('canvas.clear', { cell: 2 });
-    await app.invoke('canvas.focus', { cell: 0 });
+    await app.invoke('shell_canvas', { operation: 'cell_close', cell: 2 });
+    await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 0 });
     await livePage(1).evaluate((u) => { window.open(u, '_blank'); }, pageUrl(9));
     await waitFor(async () => (await canvas()).cells[2].tab_id != null);
   }],
 
   ['clicking an empty cell only focuses it; address-bar navigation fills it', async () => {
-    await app.invoke('canvas.clear', { cell: 1 });
+    await app.invoke('shell_canvas', { operation: 'cell_close', cell: 1 });
     await waitFor(async () => app.shell.evaluate(() => document.querySelectorAll('.cv-cell.is-empty').length >= 1));
     assert.equal(await app.shell.evaluate(() => document.querySelectorAll('.cv-input').length), 0);
     const idx = (await canvas()).cells.find((c) => c.tab_id == null).index;
     await app.shell.evaluate((i) => document.querySelector(`.cv-cell[data-cell="${i}"] .cv-empty`).click(), idx);
     await waitFor(async () => (await canvas()).focus === idx);
     assert.equal((await canvas()).cells[idx].tab_id, null);
-    await app.invoke('nav.open', { url: pageUrl(11), disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: pageUrl(11) });
     await waitFor(async () => livePage(11));
     assert.equal((await canvas()).cells[idx].url, pageUrl(11));
   }],
@@ -182,7 +182,7 @@ await run([
 
   ['a click on blank space between cells picks the nearest cell', async () => {
     cv = await canvas();
-    await app.invoke('canvas.focus', { cell: 3 });
+    await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 3 });
     const a = cv.cells[0], b = cv.cells[2];
     const info = await app.shell.evaluate(() => ({ sx: window.screenX, sy: window.screenY, dpr: devicePixelRatio }));
     // the gap just below cell 0's frame, horizontally centred on it
@@ -192,8 +192,8 @@ await run([
   }],
 
   ['blank pages: a real click on each cell of a 3x2 focuses exactly that cell', async () => {
-    await app.invoke('canvas.create', { cols: 3, rows: 2 });
-    for (let i = 1; i < 6; i++) await app.invoke('canvas.focus', { cell: i });
+    await app.invoke('shell_canvas', { operation: 'open', cols: 3, rows: 2 });
+    for (let i = 1; i < 6; i++) await app.invoke('shell_canvas', { operation: 'cell_focus', cell: i });
     await sleep(1500);
     cv = await canvas();
     assert.equal(cv.cells.filter((c) => c.tab_id != null).length, 0);
@@ -204,14 +204,14 @@ await run([
       await sleep(900);
       assert.equal((await canvas()).focus, i, `clicked cell ${i}`);
     }
-    await app.invoke('tab.close', { tab_id: (await canvas()).id });
+    await app.invoke('shell_tab', { operation: 'close', tab_id: (await canvas()).id });
     await waitFor(async () => (await canvas()) === null || (await canvas()).cols === 2);
     if ((await canvas()) && (await canvas()).cols === 3) throw new Error('blank canvas not closed');
   }],
 
   ['closing the canvas closes all its pages', async () => {
     const id = (await canvas()).id;
-    await app.invoke('tab.close', { tab_id: id });
+    await app.invoke('shell_tab', { operation: 'close', tab_id: id });
     await waitFor(async () => (await canvas()) === null);
     await waitFor(async () => !app.ctx.pages().some((p) => /\/\?n=\d/.test(p.url())));
     const rows = await app.shell.evaluate(() => document.querySelectorAll('#rail-list .tab-row').length);

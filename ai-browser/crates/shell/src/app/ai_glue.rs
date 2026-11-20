@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 
 use ai_platform_contract::config::AiConfig;
 use ai_platform_contract::contract::{
-    ActionDecision, ActionLevel, ActionRequest, ActionResult, AnswerWithCitations, CancelReason,
+    ActionLevel, AnswerWithCitations, CancelReason,
     CancellationRequest, CancellationToken, ContextSnapshotRequest, TaskOutcome, TaskRequest,
 };
 use ai_platform_contract::failure::Failure;
@@ -80,7 +80,7 @@ fn collapse_ws(s: &str) -> String {
 
 /// The flash/scroll script. Numbers only: nothing page- or model-derived is spliced
 /// into script text.
-fn scroll_script(y: f64, rect: Option<[f64; 4]>) -> String {
+pub(super) fn scroll_script(y: f64, rect: Option<[f64; 4]>) -> String {
     let flash = match rect {
         Some([x, ry, w, h]) => format!("window.__aiFlash&&window.__aiFlash({x},{ry},{w},{h});"),
         None => String::new(),
@@ -170,14 +170,18 @@ impl AppState {
             link.next_id()
         };
         self.ai.pending.insert(id, what);
-        let frame = Frame::request(id, method, params);
+        let mut params = params.clone();
+        if let Some(server) = self.api.server.as_ref() {
+            params["browser_api"] = serde_json::to_value(server.builtin_connection()).map_err(|error| Failure::unavailable("shell_api.connection").with_detail(error.to_string()))?;
+        }
+        let frame = Frame::request(id, method, &params);
         self.ai.link.as_ref().ok_or_else(|| Failure::unavailable("utility.not_running"))?.send(&frame)
     }
 
     // ---- browser → AI --------------------------------------------------
 
     /// `ai.ask`: begin a task about the active tab.
-    pub(super) fn ai_ask(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_ai_ask(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let question = p.get("question").and_then(Value::as_str).unwrap_or("").trim().to_string();
         let intent: TaskIntent = p
             .get("intent")
@@ -406,7 +410,7 @@ impl AppState {
 
     /// `ai.stop`: the user pressed stop. The effect is reported as the utility
     /// states it, and the local turn is closed either way.
-    pub(super) fn ai_stop(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_ai_stop(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let turn = p.get("turn_id").and_then(Value::as_u64);
         let task = self
             .ai
@@ -433,9 +437,6 @@ impl AppState {
     pub(super) fn ai_on_frame(&mut self, frame: Frame) {
         match frame {
             Frame::Request(request) => match request.method {
-                Method::GetSnapshot => self.ai_on_get_snapshot(request.id, request.params),
-                Method::DispatchAction => self.ai_on_action(request.id, request.params),
-                Method::AgentTool => self.agent_on_tool(request.id, request.params),
                 Method::Ping => {
                     if let Ok(payload) = ResponsePayload::ok(&json!({ "pong": true })) {
                         self.ai_send(Frame::ok(request.id, payload));
@@ -609,7 +610,7 @@ impl AppState {
     }
 
     /// i.history.clear: start a fresh conversation.
-    pub(super) fn ai_history_clear(&mut self) -> Result<Option<Value>, String> {
+    pub(super) fn wv_ai_history_clear(&mut self) -> Result<Option<Value>, String> {
         self.ai.history.clear();
         self.ai.answers.clear_turns();
         self.ai.ui.clear_finished();
@@ -672,18 +673,18 @@ impl AppState {
         }
     }
 
-    // ---- context.get_snapshot ------------------------------------------
+    // ---- shell_page_snapshot ------------------------------------------
 
-    fn ai_on_get_snapshot(&mut self, id: u64, params: Value) {
+    pub(super) fn wv_page_snapshot(&mut self, id: u64, params: Value) {
         let request: ContextSnapshotRequest = match serde_json::from_value(params) {
             Ok(r) => r,
             Err(e) => {
-                return self.ai_send(Frame::failure(
-                    id,
-                    Failure::unsupported("snapshot.request_unreadable").with_detail(e.to_string()),
-                ))
+                return self.wv_reply_failure(id, Failure::unsupported("snapshot.request_unreadable").with_detail(e.to_string()));
             }
         };
+        if self.ai.identity.scope().is_none_or(|scope| request.workspace != scope.workspace_id) {
+            return self.wv_reply_failure(id, Failure::blocked("snapshot.workspace_mismatch"));
+        }
         let token = request.document;
         // A conversation with no readable page holds an empty stand-in capture: answer
         // from it instead of trying to read a tab that has nothing to read.
@@ -691,26 +692,24 @@ impl AppState {
             return self.ai_reply_snapshot(id, token, "");
         }
         let Some(scope) = self.ai.identity.scope() else {
-            return self.ai_send(Frame::failure(id, Failure::unavailable("identity.workspace_unavailable")));
+            return self.wv_reply_failure(id, Failure::unavailable("identity.workspace_unavailable"));
         };
         if let Err(f) = self.ai.identity.registry().resolve(token, &scope) {
-            return self.ai_send(Frame::failure(id, f));
+            return self.wv_reply_failure(id, f);
         }
         if let Some(ctx) = self.ai.contexts.newest(token) {
             let title = ctx.title.clone();
             return self.ai_reply_snapshot(id, token, &title);
         }
-        // Not captured yet: only another live tab can be captured on demand, and
-        // only when multi-tab context is switched on.
-        if !self.ai.config.flags.multi_tab_context {
-            return self.ai_send(Frame::failure(id, Failure::blocked("context.multi_tab_disabled")));
-        }
         let Some(tab) = self.ai.identity.tab_of_document(token).map(TabId) else {
-            return self.ai_send(Frame::failure(id, Failure::stale("context.document_not_in_a_tab")));
+            return self.wv_reply_failure(id, Failure::stale("context.document_not_in_a_tab"));
         };
+        if self.wv_api_caller().builtin && self.wv_api_caller().id != 0 && Some(tab) != self.active && !self.ai.config.flags.multi_tab_context {
+            return self.wv_reply_failure(id, Failure::blocked("context.multi_tab_disabled"));
+        }
         let version = match self.ai.identity.snapshot_captured(token) {
             Ok(v) => v,
-            Err(f) => return self.ai_send(Frame::failure(id, f)),
+            Err(f) => return self.wv_reply_failure(id, f),
         };
         let proxy = self.proxy();
         let what = CaptureFor::Snapshot { request: id, token: token.0, version: version.0 };
@@ -722,7 +721,7 @@ impl AppState {
                 .with_detail("that tab's page is not loaded; switch to it to let the assistant read it")),
         };
         if let Err(f) = started {
-            self.ai_send(Frame::failure(id, f));
+            self.wv_reply_failure(id, f);
         }
     }
 
@@ -754,7 +753,7 @@ impl AppState {
         if self.live.contains_key(&tab) {
             return self.ai_read_extra_now(task, tab);
         }
-        self.build_webview(tab);
+        self.wv_webview_create(tab);
         match self.live.get(&tab) {
             Some(live) => {
                 let _ = live.webview.set_visible(false);
@@ -865,193 +864,42 @@ impl AppState {
 
     fn ai_snapshot_failed(&mut self, what: CaptureFor, failure: Failure) {
         if let CaptureFor::Snapshot { request, .. } = what {
-            self.ai_send(Frame::failure(request, failure));
+            self.wv_reply_failure(request, failure);
         }
     }
 
     fn ai_reply_snapshot(&mut self, id: u64, token: DocumentToken, title: &str) {
         let Some(scope) = self.ai.identity.scope() else {
-            return self.ai_send(Frame::failure(id, Failure::unavailable("identity.workspace_unavailable")));
+            return self.wv_reply_failure(id, Failure::unavailable("identity.workspace_unavailable"));
         };
         let key = match self.ai.identity.registry().resolve(token, &scope) {
             Ok(k) => k,
-            Err(f) => return self.ai_send(Frame::failure(id, f)),
+            Err(f) => return self.wv_reply_failure(id, f),
         };
         let Some(ctx) = self.ai.contexts.newest(token) else {
-            return self.ai_send(Frame::failure(id, Failure::unavailable("context.not_captured")));
+            return self.wv_reply_failure(id, Failure::unavailable("context.not_captured"));
         };
         let snapshot = snapshot_of(key, ctx, title);
-        match ResponsePayload::ok(&snapshot) {
-            Ok(payload) => self.ai_send(Frame::ok(id, payload)),
-            Err(f) => self.ai_send(Frame::failure(id, f)),
+        if let Some(tab) = self.ai.identity.tab_of_document(token) {
+            let caller = self.api.pending.get(&id).map_or(0, |pending| pending.caller.id);
+            self.wv_api_record_read(caller, TabId(tab), key);
         }
-    }
-
-    // ---- action.dispatch -----------------------------------------------
-
-    fn ai_on_action(&mut self, id: u64, params: Value) {
-        let request: ActionRequest = match serde_json::from_value(params) {
-            Ok(r) => r,
-            Err(e) => {
-                return self.ai_send(Frame::failure(
-                    id,
-                    Failure::unsupported("action.request_unreadable").with_detail(e.to_string()),
-                ))
-            }
-        };
-        let level = match self.ai.admit_action(&request, now_ms()) {
-            Ok(level) => level,
-            Err(failure) => {
-                self.note(format!("ai action {} refused: {}", request.action_kind, failure_message(&failure)));
-                return self.ai_send(Frame::failure(id, failure));
-            }
-        };
-        match self.ai_execute(&request) {
-            Ok((verified, payload)) => {
-                let (document, snapshot) = match self.ai.tasks.get(&request.task.0) {
-                    Some(t) => (t.document, t.snapshot),
-                    None => return self.ai_send(Frame::failure(id, Failure::stale("action.task_unknown"))),
-                };
-                let result = ActionResult {
-                    action_id: request.action_id.clone(),
-                    decision: ActionDecision { level, approval_required: false, approval_granted: false, blocked_by: None },
-                    executed_on: document,
-                    observation_snapshot_version: snapshot,
-                    verified,
-                    result_payload: payload,
-                    limit: None,
-                };
-                self.note(format!("ai action {} ok (verified={verified})", request.action_kind));
-                match ResponsePayload::ok(&result) {
-                    Ok(p) => self.ai_send(Frame::ok(id, p)),
-                    Err(f) => self.ai_send(Frame::failure(id, f)),
-                }
-            }
-            Err(failure) => {
-                self.note(format!("ai action {} failed: {}", request.action_kind, failure_message(&failure)));
-                self.ai_send(Frame::failure(id, failure));
-            }
-        }
-    }
-
-    /// Run one admitted action. Returns whether the effect could be confirmed, and
-    /// what the utility may read about it. Anything the browser cannot confirm is
-    /// reported as unverified rather than assumed.
-    fn ai_execute(&mut self, request: &ActionRequest) -> Result<(bool, Value), Failure> {
-        let task_id = request.task.0;
-        let (turn_id, task_tab, snapshot, document, opened) = {
-            let t = self.ai.tasks.get(&task_id).ok_or_else(|| Failure::stale("action.task_unknown"))?;
-            (t.turn_id, TabId(t.tab), t.snapshot, t.document.document_token(), t.opened_tabs.clone())
-        };
-        let args = &request.arguments;
-        // The utility puts model-chosen ids in the opaque target and resolved values in the
-        // arguments; accept either so no action loses its operand.
-        let find = |key: &str| {
-            args.get(key).or_else(|| request.target.as_ref().and_then(|t| t.opaque_target.get(key)))
-        };
-        let text = |key: &str| find(key).and_then(Value::as_str);
-        let tab_arg = || {
-            find("tab_id")
-                .and_then(Value::as_u64)
-                .map(TabId)
-                .ok_or_else(|| Failure::unsupported("action.tab_id_required"))
-        };
-        match request.action_kind.as_str() {
-            "scroll_to" => {
-                let block_id = text("block_id").ok_or_else(|| Failure::unsupported("action.block_id_required"))?;
-                let ctx = self
-                    .ai
-                    .contexts
-                    .get(document, snapshot)
-                    .ok_or_else(|| Failure::stale("action.snapshot_evicted"))?;
-                let block = ctx.find(block_id).ok_or_else(|| Failure::stale("action.block_missing"))?;
-                let script = scroll_script(block.scroll_y(), Some([block.x, block.y, block.w, block.h]));
-                let live = self.live.get(&task_tab).ok_or_else(|| Failure::stale("action.tab_not_live"))?;
-                #[cfg(windows)]
-                if let Some(pdf) = &live.native_pdf {
-                    pdf.reveal(block.text.clone()).map_err(|error| Failure::unavailable("action.pdf_scroll_failed").with_detail(error))?;
-                    return Ok((false, json!({ "scrolled_to": block_id })));
-                }
-                live.webview
-                    .evaluate_script(&script)
-                    .map_err(|e| Failure::unavailable("action.script_failed").with_detail(e.to_string()))?;
-                Ok((false, json!({ "scrolled_to": block_id })))
-            }
-            "open_tab" | "show_candidate" => {
-                let link_id = text("link_id").ok_or_else(|| Failure::unsupported("action.link_id_required"))?;
-                let url = self.ai.link_url(task_id, link_id)?;
-                let title = text("title").unwrap_or("").to_string();
-                let reason = text("reason").unwrap_or("").to_string();
-                let new = self.create_tab(&url, Some(task_tab), false);
-                self.ai.ai_tabs.insert(new.0);
-                if let Some(t) = self.ai.tasks.get_mut(&task_id) {
-                    t.opened_tabs.push(new.0);
-                }
-                self.emit(
-                    "ai.candidate",
-                    json!({ "turn_id": turn_id, "tab_id": new.0, "url": url, "title": title, "reason": reason }),
-                );
-                Ok((self.tabs.get(new).is_some(), json!({ "tab_id": new.0, "url": url })))
-            }
-            "activate_tab" => {
-                let target = tab_arg()?;
-                if target != task_tab && !opened.contains(&target.0) {
-                    return Err(Failure::blocked("action.tab_not_owned_by_task"));
-                }
-                if self.tabs.get(target).is_none() {
-                    return Err(Failure::stale("action.tab_gone"));
-                }
-                self.activate(target);
-                Ok((self.active == Some(target), json!({ "tab_id": target.0 })))
-            }
-            "close_tab" => {
-                let target = tab_arg()?;
-                if !opened.contains(&target.0) {
-                    return Err(Failure::blocked("action.tab_not_opened_by_task"));
-                }
-                self.close_tab(target);
-                Ok((self.tabs.get(target).is_none(), json!({ "closed": target.0 })))
-            }
-            "navigate" => {
-                let link_id = text("link_id").ok_or_else(|| Failure::unsupported("action.link_id_required"))?;
-                let url = self.ai.link_url(task_id, link_id)?;
-                self.navigate(task_tab, &url, false);
-                // Navigation starts; whether it lands is only known when it commits.
-                Ok((false, json!({ "navigating_to": url })))
-            }
-            "list_tabs" => {
-                if !self.ai.config.flags.multi_tab_context {
-                    return Err(Failure::blocked("context.multi_tab_disabled"));
-                }
-                let rows: Vec<Value> = self
-                    .tabs
-                    .tabs()
-                    .iter()
-                    .map(|t| {
-                        let doc = self.ai.identity.current(t.id.0).map(|k| k.document_token().0);
-                        json!({
-                            "tab_id": t.id.0, "title": t.display_title(), "url": t.url,
-                            "active": self.active == Some(t.id), "sleeping": t.sleeping,
-                            "ai_opened": self.ai.ai_tabs.contains(&t.id.0), "document": doc,
-                        })
-                    })
-                    .collect();
-                Ok((true, json!({ "tabs": rows })))
-            }
-            other => Err(Failure::unsupported("action.no_handler").with_detail(other)),
+        match serde_json::to_value(snapshot) {
+            Ok(payload) => self.wv_reply_ok(id, payload),
+            Err(error) => self.wv_reply_err(id, error.to_string()),
         }
     }
 
     // ---- citations ------------------------------------------------------
 
-    pub(super) fn ai_citation_scroll(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_ai_citation_reveal(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let turn = p.get("turn_id").and_then(Value::as_u64).ok_or("turn_id required")?;
         let citation = p.get("citation_id").and_then(Value::as_u64).ok_or("citation_id required")? as usize;
         #[cfg(windows)]
         if let Ok((target, quote)) = self.ai.answers.native_citation_target(&self.ai.identity, turn, citation) {
             let tab = TabId(target);
             if self.has_native_pdf(tab) {
-                if self.active != Some(tab) { self.activate(tab); }
+                if self.active != Some(tab) { self.wv_tab_activate(tab); }
                 let pdf = self.live.get(&tab).and_then(|live| live.native_pdf.as_ref()).ok_or("the PDF is no longer loaded")?;
                 pdf.reveal(quote)?;
                 return Ok(Some(json!({ "scrolled": true, "tab_id": target })));
@@ -1070,7 +918,7 @@ impl AppState {
             }
             let tab = TabId(other);
             if self.active != Some(tab) {
-                self.activate(tab);
+                self.wv_tab_activate(tab);
             }
             let live = self.live.get(&tab).ok_or("that tab is not loaded")?;
             live.webview.evaluate_script(&scroll_script(y, Some(rect))).map_err(|e| e.to_string())?;
@@ -1087,7 +935,7 @@ impl AppState {
         });
         let tab = TabId(payload["tab_id"].as_u64().ok_or("turn has no tab")?);
         if self.active != Some(tab) {
-            self.activate(tab);
+            self.wv_tab_activate(tab);
         }
         let live = self.live.get(&tab).ok_or("the page is not loaded")?;
         live.webview.evaluate_script(&scroll_script(y, rect)).map_err(|e| e.to_string())?;
@@ -1109,7 +957,7 @@ impl AppState {
             #[cfg(target_os = "macos")]
             if !crate::pdf::is_pdf_url(&url) {
                 let viewer = crate::pdf::viewer_url(&url);
-                self.navigate(tab, &viewer, false);
+                self.wv_page_navigate(tab, &viewer, false);
             }
             return;
         }
@@ -1118,13 +966,13 @@ impl AppState {
             .filter(|v| v.get("ai").and_then(Value::as_str) == Some("zoom"))
             .map(|v| v.get("dir").and_then(Value::as_i64).unwrap_or(0))
         {
-            self.canvas_focus_tab(tab);
+            self.wv_canvas_page_focus(tab);
             let action = match dir {
                 d if d > 0 => "zoom_in",
                 0 => "zoom_reset",
                 _ => "zoom_out",
             };
-            self.zoom_tab(tab, action);
+            self.wv_page_zoom_step(tab, action);
             return;
         }
         if self.canvas_probe(tab, raw) {
@@ -1132,7 +980,7 @@ impl AppState {
         }
         if let Some(url) = open_request(raw) {
             if self.active == Some(tab) {
-                self.open_from_page(tab, &url);
+                self.wv_page_popup_open(tab, &url);
             }
             return;
         }
@@ -1204,7 +1052,7 @@ impl AppState {
         if self.ai.toolbar_open {
             self.ai.toolbar_open = false;
             if matches!(self.overlay_rect, Overlay::Anchored { h, .. } if h == TOOLBAR_H) {
-                self.close_overlay();
+                self.wv_ui_overlay_close();
             }
         }
     }
@@ -1291,7 +1139,7 @@ impl AppState {
 
     /// `ai.provider.set`: the in-browser endpoint form. The endpoint and model go to
     /// `ai.json`; the key stays in the OS vault and this engine's private memory.
-    pub(super) fn ai_provider_set(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_ai_provider_set(&mut self, p: &Value) -> Result<Option<Value>, String> {
         if !self.ai.tasks.is_empty() || self.ai.agent_run != 0 || !self.ai.agent_jobs.is_empty() {
             return Err("stop AI work before changing the provider".into());
         }
@@ -1340,7 +1188,7 @@ impl AppState {
         self.ai_provider_changed(cfg)
     }
 
-    pub(super) fn ai_provider_delete(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_ai_provider_delete(&mut self, p: &Value) -> Result<Option<Value>, String> {
         if !self.ai.tasks.is_empty() || self.ai.agent_run != 0 || !self.ai.agent_jobs.is_empty() {
             return Err("stop AI work before changing the provider".into());
         }
@@ -1365,7 +1213,7 @@ impl AppState {
         self.ai.link = None;
         self.ai.pending.clear();
         self.ai.models.clear();
-        let status = self.ai_status();
+        let status = self.wv_ai_status_get();
         self.emit("ai.context", status.clone());
         Ok(Some(status))
     }
@@ -1416,7 +1264,7 @@ impl AppState {
     /// is told what was asked and runs it in whichever mode it is in; the selection
     /// itself travels with the request. Otherwise the toolbar becomes an inline card
     /// at the same spot and the task starts there.
-    pub(super) fn ai_selection_act(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_ai_selection_run(&mut self, p: &Value) -> Result<Option<Value>, String> {
         let (x, y) = self.ai.anchor;
         if self.panel == Panel::Ai {
             self.ai_hide_toolbar();
@@ -1428,12 +1276,12 @@ impl AppState {
         self.place_overlay(Overlay::Anchored { x, y, w: CARD_W, h: CARD_H }, "card", true);
         let mut args = p.clone();
         args["selection"] = Value::Bool(true);
-        self.ai_ask(&args)
+        self.wv_ai_ask(&args)
     }
 
     // ---- status ----------------------------------------------------------
 
-    pub(super) fn ai_status(&mut self) -> Value {
+    pub(super) fn wv_ai_status_get(&mut self) -> Value {
         self.ai_reload_config();
         let tab = self.active.and_then(|id| self.tabs.get(id)).map(|t| (t.id, t.display_title(), t.url.clone()));
         let doc = tab.as_ref().and_then(|(id, _, _)| self.ai.identity.current(id.0));
@@ -1475,7 +1323,7 @@ impl AppState {
     }
 
     /// `ai.models`: the catalogue the picker shows, refreshed from the utility.
-    pub(super) fn ai_models(&mut self) -> Result<Option<Value>, String> {
+    pub(super) fn wv_ai_model_list(&mut self) -> Result<Option<Value>, String> {
         self.ai_ensure_link().map_err(|f| failure_message(&f))?;
         self.ai_request(Method::ListModels, &json!({}), Pending::Models).map_err(|f| failure_message(&f))?;
         Ok(Some(json!({ "models": self.ai.models })))
@@ -1483,7 +1331,7 @@ impl AppState {
 
     /// `ai.config.set`: the kill switches the UI exposes. Written to `ai.json`, which
     /// is also what the utility reads, so the two cannot disagree.
-    pub(super) fn ai_config_set(&mut self, p: &Value) -> Result<Option<Value>, String> {
+    pub(super) fn wv_ai_config_set(&mut self, p: &Value) -> Result<Option<Value>, String> {
         self.ai_reload_config();
         let flag = p.get("flag").and_then(Value::as_str).ok_or("flag required")?;
         let on = p.get("value").and_then(Value::as_bool).ok_or("value must be true or false")?;
@@ -1503,7 +1351,7 @@ impl AppState {
         if !on && flag == "ai_enabled" {
             self.ai_hide_toolbar();
         }
-        Ok(Some(self.ai_status()))
+        Ok(Some(self.wv_ai_status_get()))
     }
 
     // ---- lifecycle hooks -------------------------------------------------
@@ -1541,7 +1389,7 @@ impl AppState {
         self.ai_hide_toolbar();
         let document = self.ai.identity.current(id.0).map(|k| k.document_token());
         self.ai_notify(BrowserEvent::TabActivated { tab_id: id.0, document });
-        let status = self.ai_status();
+        let status = self.wv_ai_status_get();
         self.emit("ai.context", status);
     }
 

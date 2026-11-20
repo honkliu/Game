@@ -16,7 +16,7 @@ function openLink(event: MouseEvent) {
   event.preventDefault();
   const href = link.getAttribute('href') ?? '';
   if (!SAFE_URL.test(href)) return;
-  bridge().invoke('nav.open', { url: href, disposition: 'new_tab' }).catch(() => undefined);
+  bridge().invoke('shell_tab', { operation: 'open', url: href, background: false }).catch(() => undefined);
 }
 
 export function Markdown({ text }: { text: string }) {

@@ -57,12 +57,6 @@ impl Peer {
 /// The complete set of callable methods, with the side allowed to issue each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Method {
-    /// utility → shell. The utility asks for context it cannot observe itself.
-    #[serde(rename = "context.get_snapshot")]
-    GetSnapshot,
-    /// utility → shell. The *only* way anything reaches a page.
-    #[serde(rename = "action.dispatch")]
-    DispatchAction,
     /// utility → shell, notification.
     #[serde(rename = "task.progress")]
     PublishProgress,
@@ -100,9 +94,6 @@ pub enum Method {
     /// utility → shell, notification. Progress of an agent run: deltas, tool calls, approvals.
     #[serde(rename = "agent.event")]
     AgentEvent,
-    /// utility → shell, request. One browser-side tool call of an agent run.
-    #[serde(rename = "agent.tool")]
-    AgentTool,
 }
 
 impl Method {
@@ -110,8 +101,7 @@ impl Method {
     /// other way.
     pub fn issuer(self) -> Peer {
         match self {
-            Method::GetSnapshot | Method::DispatchAction | Method::PublishProgress
-            | Method::FinishTask | Method::AgentEvent | Method::AgentTool => Peer::Utility,
+            Method::PublishProgress | Method::FinishTask | Method::AgentEvent => Peer::Utility,
             Method::CompleteModel | Method::CancelTask | Method::Ping | Method::ListModels
             | Method::BrowserEvent | Method::AgentRun | Method::AgentControl => Peer::Shell,
         }
@@ -125,8 +115,6 @@ impl Method {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Method::GetSnapshot => "context.get_snapshot",
-            Method::DispatchAction => "action.dispatch",
             Method::PublishProgress => "task.progress",
             Method::FinishTask => "task.finish",
             Method::CompleteModel => "model.complete",
@@ -137,7 +125,6 @@ impl Method {
             Method::AgentRun => "agent.run",
             Method::AgentControl => "agent.control",
             Method::AgentEvent => "agent.event",
-            Method::AgentTool => "agent.tool",
         }
     }
 }

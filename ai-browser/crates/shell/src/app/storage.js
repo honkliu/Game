@@ -35,18 +35,18 @@
   });
   try {
     checkPage();
-    const write = args.action === 'set' || args.action === 'delete';
+    const write = args.operation === 'set' || args.operation === 'delete';
     const limit = args.limit ?? 50;
     const offset = args.offset ?? 0;
     if (args.storage !== 'indexeddb') {
       const storage = args.storage === 'local' ? localStorage : sessionStorage;
       if (write) {
         const before = storage.getItem(args.key);
-        const after = args.action === 'delete' ? null : args.value;
+        const after = args.operation === 'delete' ? null : args.value;
         // Check the result size before committing, not after changing the value.
         const result = finish({ key: args.key, before, after, verified: true });
         checkPage();
-        if (args.action === 'delete') storage.removeItem(args.key);
+        if (args.operation === 'delete') storage.removeItem(args.key);
         else storage.setItem(args.key, args.value);
         if (storage.getItem(args.key) !== after) throw new Error('The stored value did not match; read it again before retrying.');
         return result;
@@ -92,7 +92,7 @@
     const metadata = { database: args.database, object_store: args.object_store };
     if (write) {
       let key = args.key;
-      if (store.keyPath !== null && args.action === 'set') {
+      if (store.keyPath !== null && args.operation === 'set') {
         const atPath = path => path === '' ? args.value : path.split('.').reduce((value, part) => value?.[part], args.value);
         const inline = Array.isArray(store.keyPath) ? store.keyPath.map(atPath) : atPath(store.keyPath);
         if (inline === undefined || (Array.isArray(inline) && inline.some(value => value === undefined))) {
@@ -103,10 +103,10 @@
       }
       if (key === undefined) throw new Error('An existing record key is required.');
       const before = jsonValue(await request(store.get(key)));
-      const after = args.action === 'delete' ? null : args.value;
+      const after = args.operation === 'delete' ? null : args.value;
       finish({ ...metadata, key, before, after });
       checkPage();
-      if (args.action === 'delete') await request(store.delete(key));
+      if (args.operation === 'delete') await request(store.delete(key));
       else if (store.keyPath !== null) await request(store.put(args.value));
       else await request(store.put(args.value, key));
       const actual = jsonValue(await request(store.get(key)));

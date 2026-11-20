@@ -144,7 +144,7 @@ async function waitPdf(marker) {
 async function waitSelection(expected) {
   let actual;
   for (let attempt = 0; attempt < 100; attempt++) {
-    actual = (await app.invoke('agent.context')).page.selection;
+    actual = (await app.invoke('shell_agent', { operation: 'context_get' })).page.selection;
     if (actual === expected) return;
     await sleep(100);
   }
@@ -216,12 +216,12 @@ async function preview() {
       clearTimeout(timeout); off();
       result.ok ? resolve(result.value) : reject(new Error(result.error));
     });
-    window.__native.invoke('agent.call', { op: 'context.preview', req }).catch(reject);
+    window.__native.invoke('shell_agent', { operation: 'context_preview', req }).catch(reject);
   }));
 }
 
 async function assertRiverSelection(marker, { alreadyOpen = false } = {}) {
-  if (!alreadyOpen) await app.invoke('shortcut', { name: 'ask_ai' });
+  if (!alreadyOpen) await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
   const river = await app.pageWith(/sidebar\.html/);
   try {
     await river.locator('#sel-card').waitFor();
@@ -245,7 +245,7 @@ async function assertRiverSelection(marker, { alreadyOpen = false } = {}) {
     assert.match(JSON.stringify(messages.at(-1)), /Explain the selected text/);
     await river.waitForFunction(() => window.__agentUi.messages.at(-1)?.content === 'Native PDF content received.');
   } finally {
-    await app.invoke('shortcut', { name: 'ask_ai' });
+    await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
   }
 }
 
@@ -253,7 +253,7 @@ let failed = 0;
 try {
 failed = await run([
   ['a PDF url uses WebView2 native rendering and exposes native document text', async () => {
-    await app.invoke('nav.open', { url: `${base}/doc.pdf`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/doc.pdf` });
     const page = await app.pageWith(/\/doc\.pdf$/);
     assert.ok(page);
     assert.match((await waitPdf('Quarterly revenue')).text, /Quarterly revenue/);
@@ -264,22 +264,22 @@ failed = await run([
     assert.ok(targets.targetInfos.some(target => target.type === 'webview' && /edge_pdf/.test(target.url)));
   }],
   ['the tab keeps the real PDF url, not the viewer url', async () => {
-    const s = JSON.stringify(await app.invoke('agent.context', {}));
+    const s = JSON.stringify(await app.invoke('shell_agent', { operation: 'context_get' }));
     assert.ok(s.includes('/doc.pdf'), s);
     assert.ok(!s.includes('pdf.localhost'), s);
   }],
   ['selecting PDF text reaches the AI selection pipeline', async () => {
     const result = await nativePdfText(app.child.pid, 'Quarterly revenue', 'Quarterly revenue');
     assert.equal(result.selected, 'Quarterly revenue');
-    await app.shell.waitForFunction(async () => (await window.__native.invoke('agent.context')).page.selection === 'Quarterly revenue');
-    const ctx = await app.invoke('agent.context', {});
+    await app.shell.waitForFunction(async () => (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === 'Quarterly revenue');
+    const ctx = await app.invoke('shell_agent', { operation: 'context_get' });
     assert.match(ctx.page.selection || '', /Quarterly/, JSON.stringify(ctx.page));
   }],
   ['native PDF selection is visible in River and Explain sends it to the model', async () => {
     await assertRiverSelection('Quarterly revenue');
   }],
   ['PDF selection matches the native engine when accessibility offsets differ', async () => {
-    await app.invoke('nav.open', { url: `${base}/image.pdf`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/image.pdf` });
     try {
       const page = await app.pageWith(/\/image\.pdf$/);
       const accessibility = await nativePdfText(app.child.pid, 'Quarterly revenue', 'revenue grew');
@@ -287,23 +287,23 @@ failed = await run([
       assert.ok(actual.trim(), 'native selection exists');
       assert.notEqual(actual, accessibility.selected, 'fixture reproduces the accessibility offset mismatch');
       await app.shell.waitForFunction(async expected =>
-        (await window.__native.invoke('agent.context')).page.selection === expected, actual);
+        (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === expected, actual);
       await assertRiverSelection(actual);
       const multiline = await engineSelection(page, { selectAll: true });
       assert.match(multiline, /Example authors[\r\n]+Abstract[\r\n]+Quarterly revenue/);
       await app.shell.waitForFunction(async expected =>
-        (await window.__native.invoke('agent.context')).page.selection === expected, multiline);
+        (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === expected, multiline);
       await assertRiverSelection(multiline);
     } finally {
-      await app.invoke('nav.open', { url: `${base}/doc.pdf`, disposition: 'current' });
+      await app.invoke('shell_page_navigate', { url: `${base}/doc.pdf` });
       await waitPdf('Quarterly revenue');
     }
   }],
   ['long PDF selections stay complete in River and reach the model unchanged', async () => {
-    await app.invoke('nav.open', { url: base + '/long.pdf', disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: base + '/long.pdf' });
     try {
       const page = await app.pageWith(/\/long\.pdf$/);
-      await app.invoke('shortcut', { name: 'ask_ai' });
+      await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
       await app.pageWith(/sidebar\.html/);
       const document = await waitPdf('END OF PDF SELECTION');
       await nativePdfText(app.child.pid, 'END OF PDF SELECTION', document.text.trim());
@@ -313,16 +313,16 @@ failed = await run([
       await waitSelection(text);
       await assertRiverSelection(text, { alreadyOpen: true });
     } finally {
-      await app.invoke('nav.open', { url: base + '/doc.pdf', disposition: 'current' });
+      await app.invoke('shell_page_navigate', { url: base + '/doc.pdf' });
       await waitPdf('Quarterly revenue');
     }
   }],
   ['ordinary web selections also preserve text beyond 4,000 characters', async () => {
-    await app.invoke('nav.open', { url: base + '/long-html', disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: base + '/long-html' });
     try {
       const page = await app.pageWith(/\/long-html$/);
       await page.locator('#long-selection').waitFor();
-      await app.invoke('shortcut', { name: 'ask_ai' });
+      await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
       const text = await page.locator('#long-selection').evaluate(element => {
         const range = document.createRange();
         range.selectNodeContents(element);
@@ -335,7 +335,7 @@ failed = await run([
       await waitSelection(text);
       await assertRiverSelection(text, { alreadyOpen: true });
     } finally {
-      await app.invoke('nav.open', { url: base + '/doc.pdf', disposition: 'current' });
+      await app.invoke('shell_page_navigate', { url: base + '/doc.pdf' });
       await waitPdf('Quarterly revenue');
     }
   }],
@@ -347,87 +347,87 @@ failed = await run([
   ['native selection clears when clicking away from text', async () => {
     const page = await app.pageWith(/\/doc\.pdf$/);
     await page.mouse.click(50, 400);
-    await app.shell.waitForFunction(async () => !(await window.__native.invoke('agent.context')).page.selection);
+    await app.shell.waitForFunction(async () => !(await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection);
   }],
   ['PDF find reports and navigates document text', async () => {
     await app.shell.evaluate(() => {
       window.__pdfFindResults = [];
       window.__native.on('find.result', result => window.__pdfFindResults.push(result));
     });
-    await app.invoke('find.start', { query: 'revenue' });
+    await app.invoke('shell_page_find', { operation: 'start', query: 'revenue' });
     await app.shell.waitForFunction(() => window.__pdfFindResults.at(-1)?.total === 1);
-    await app.invoke('find.next', { query: 'revenue' });
+    await app.invoke('shell_page_find', { operation: 'next', query: 'revenue' });
     await app.shell.waitForFunction(() => window.__pdfFindResults.at(-1)?.active === 1);
-    await app.invoke('find.stop');
+    await app.invoke('shell_page_find', { operation: 'stop' });
     await sleep(600);
     assert.equal((await nativePdfText(app.child.pid, 'Quarterly revenue')).selected.trim(), '', 'stopping Find removes its native selection');
   }],
   ['PDF loading uses the browser HttpOnly login cookie', async () => {
-    await app.invoke('nav.open', { url: base + '/sign-in' });
+    await app.invoke('shell_page_navigate', { url: base + '/sign-in' });
     const signedIn = await app.pageWith(/\/sign-in$/);
     assert.ok(signedIn);
     await signedIn.locator('h1').waitFor();
     assert.equal(await signedIn.evaluate(() => document.cookie), '', 'login cookie is not available to page JavaScript');
-    await app.invoke('nav.open', { url: base + '/authenticated.pdf' });
+    await app.invoke('shell_page_navigate', { url: base + '/authenticated.pdf' });
     assert.ok(await app.pageWith(/\/authenticated\.pdf$/));
     await waitPdf('Quarterly revenue');
     assert.match(authenticatedCookie, /pdf_session=allowed/);
   }],
   ['PDF redirects do not forward login cookies to a different origin', async () => {
-    await app.invoke('nav.open', { url: base + '/redirect.pdf' });
+    await app.invoke('shell_page_navigate', { url: base + '/redirect.pdf' });
     await waitPdf('Redirected document');
     assert.equal(redirectedCookie, '');
   }],
   ['HTML sign-in responses remain ordinary readable pages', async () => {
-    await app.invoke('nav.open', { url: `${base}/login.pdf` });
+    await app.invoke('shell_page_navigate', { url: `${base}/login.pdf` });
     const page = await app.pageWith(/\/login\.pdf$/);
     await page.locator('h1').waitFor();
     assert.match(JSON.stringify(await preview()), /Please sign in/);
   }],
   ['extensionless PDFs use native rendering and River text extraction', async () => {
-    await app.invoke('nav.open', { url: `${base}/extensionless-document` });
+    await app.invoke('shell_page_navigate', { url: `${base}/extensionless-document` });
     await waitPdf('Quarterly revenue');
     assert.match(JSON.stringify(await preview()), /Quarterly revenue/);
-    assert.equal((await app.invoke('agent.context')).page.url, `${base}/extensionless-document`);
+    assert.equal((await app.invoke('shell_agent', { operation: 'context_get' })).page.url, `${base}/extensionless-document`);
   }],
   ['River reads all native PDF pages including offscreen content', async () => {
-    await app.invoke('nav.open', { url: `${base}/multipage.pdf` });
+    await app.invoke('shell_page_navigate', { url: `${base}/multipage.pdf` });
     await waitPdf('FIRST-PAGE');
     const content = JSON.stringify(await preview());
     for (const marker of ['FIRST-PAGE', 'SECOND-PAGE', 'THIRD-PAGE']) assert.ok(content.includes(marker), marker);
     await nativePdfText(app.child.pid, 'FIRST-PAGE', true);
     await app.shell.waitForFunction(async () =>
-      (await window.__native.invoke('agent.context')).page.selection?.includes('THIRD-PAGE'));
-    const selected = (await app.invoke('agent.context')).page.selection;
+      (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection?.includes('THIRD-PAGE'));
+    const selected = (await app.invoke('shell_agent', { operation: 'context_get' })).page.selection;
     for (const marker of ['FIRST-PAGE', 'SECOND-PAGE', 'THIRD-PAGE']) {
       assert.equal(selected.split(marker).length - 1, 1, 'multi-page selections are not duplicated');
     }
   }],
   ['native PDF find cycles case-insensitive matches across pages and wraps', async () => {
-    await app.invoke('nav.open', { url: `${base}/find.pdf` });
+    await app.invoke('shell_page_navigate', { url: `${base}/find.pdf` });
     await waitPdf('Revenue report');
     await app.shell.evaluate(() => { window.__pdfFindResults = []; });
-    await app.invoke('find.start', { query: 'revenue' });
+    await app.invoke('shell_page_find', { operation: 'start', query: 'revenue' });
     await app.shell.waitForFunction(() => window.__pdfFindResults.at(-1)?.total === 3);
     for (const active of [2, 3, 1]) {
-      await app.invoke('find.next', { query: 'revenue' });
+      await app.invoke('shell_page_find', { operation: 'next', query: 'revenue' });
       await app.shell.waitForFunction(expected => window.__pdfFindResults.at(-1)?.active === expected, active);
     }
-    await app.invoke('find.prev', { query: 'revenue' });
+    await app.invoke('shell_page_find', { operation: 'previous', query: 'revenue' });
     await app.shell.waitForFunction(() => window.__pdfFindResults.at(-1)?.active === 3);
-    assert.equal((await app.invoke('agent.context')).page.selection, null, 'find matches do not become River selections');
-    await app.invoke('find.stop');
+    assert.equal((await app.invoke('shell_agent', { operation: 'context_get' })).page.selection, null, 'find matches do not become River selections');
+    await app.invoke('shell_page_find', { operation: 'stop' });
   }],
   ['fit to page width uses native PDF fitting in only the focused canvas cell', async () => {
-    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [base + '/left.pdf', base + '/wide.pdf'] });
-    const canvas = await app.invoke('canvas.state');
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 1, urls: [base + '/left.pdf', base + '/wide.pdf'] });
+    const canvas = await app.invoke('shell_canvas', { operation: 'state_get' });
     try {
-      await app.invoke('canvas.focus', { cell: 1 });
+      await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 1 });
       await waitPdf('Quarterly revenue');
       const left = await app.pageWith(/\/left\.pdf$/);
       const right = await app.pageWith(/\/wide\.pdf$/);
-      await app.invoke('tab.zoom_set', { tab_id: canvas.cells[0].tab_id, factor: 1.4 });
-      await app.invoke('tab.zoom_set', { tab_id: canvas.cells[1].tab_id, factor: 1.7 });
+      await app.invoke('shell_page_zoom', { operation: 'set', tab_id: canvas.cells[0].tab_id, factor: 1.4 });
+      await app.invoke('shell_page_zoom', { operation: 'set', tab_id: canvas.cells[1].tab_id, factor: 1.7 });
       await app.shell.locator('#zoom-fit').click();
       let fit;
       for (let attempt = 0; attempt < 50; attempt++) {
@@ -443,19 +443,19 @@ failed = await run([
       assert.ok(Math.abs(other - 1.4) < 0.01, 'the other PDF cell keeps its zoom');
       await app.shell.waitForFunction(expected => document.querySelector('#zoom-label').textContent === expected,
         `${Math.round(fit.zoom * 100)}%`);
-      assert.equal((await app.invoke('agent.context')).page.tab_id, canvas.cells[1].tab_id);
+      assert.equal((await app.invoke('shell_agent', { operation: 'context_get' })).page.tab_id, canvas.cells[1].tab_id);
     } finally {
-      await app.invoke('tab.close', { tab_id: canvas.id });
+      await app.invoke('shell_tab', { operation: 'close', tab_id: canvas.id });
     }
   }],
   ['fit to page width fits wide webpages from either zoom direction and resets responsive pages', async () => {
-    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [base + '/before-fit', base + '/wide-html'] });
-    const canvas = await app.invoke('canvas.state');
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 1, urls: [base + '/before-fit', base + '/wide-html'] });
+    const canvas = await app.invoke('shell_canvas', { operation: 'state_get' });
     try {
-      await app.invoke('canvas.focus', { cell: 1 });
+      await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 1 });
       const page = await app.pageWith(/\/wide-html$/);
       await page.locator('main').waitFor();
-      await app.invoke('tab.zoom_reset');
+      await app.invoke('shell_page_zoom', { operation: 'reset' });
       const baseline = await page.evaluate(() => ({
         available: document.documentElement.clientWidth, width: document.documentElement.scrollWidth,
         dpr: devicePixelRatio,
@@ -463,7 +463,7 @@ failed = await run([
       const expected = baseline.available / baseline.width;
       assert.ok(expected < 1 && expected > 0.25);
       for (const factor of [2, 0.25]) {
-        await app.invoke('tab.zoom_set', { factor });
+        await app.invoke('shell_page_zoom', { operation: 'set', factor });
         await app.shell.locator('#zoom-fit').click();
         await page.waitForFunction(dpr => Math.abs(devicePixelRatio / dpr - 1) < 0.01,
           baseline.dpr * expected);
@@ -482,7 +482,7 @@ failed = await run([
       try {
         await app.shell.locator('#zoom-fit').click();
         await page.waitForFunction(() => window.__fitFrames.length > 0);
-        await app.invoke('tab.zoom_set', { factor: 1.3 });
+        await app.invoke('shell_page_zoom', { operation: 'set', factor: 1.3 });
         await page.evaluate(() => {
           while (window.__fitFrames.length) window.__fitFrames.shift()(performance.now());
         });
@@ -496,24 +496,24 @@ failed = await run([
           delete window.__fitFrames;
         });
       }
-      const context = await app.invoke('agent.context');
+      const context = await app.invoke('shell_agent', { operation: 'context_get' });
       assert.equal(context.page.tab_id, canvas.cells[1].tab_id);
       assert.equal(context.tabs.find(tab => tab.tab_id === canvas.cells[0].tab_id).url, base + '/before-fit');
-      await app.invoke('nav.open', { url: base + '/responsive-fit', disposition: 'current' });
+      await app.invoke('shell_page_navigate', { url: base + '/responsive-fit' });
       const responsive = await app.pageWith(/\/responsive-fit$/);
       await responsive.locator('h1').waitFor();
       await app.shell.locator('#zoom-fit').click();
       await responsive.waitForFunction(dpr => Math.abs(devicePixelRatio - dpr) < 0.01, baseline.dpr);
       await app.shell.waitForFunction(() => document.querySelector('#zoom-label').textContent === '100%');
     } finally {
-      await app.invoke('tab.close', { tab_id: canvas.id });
+      await app.invoke('shell_tab', { operation: 'close', tab_id: canvas.id });
     }
   }],
   ['fit to width removes horizontal scrolling after the page changes layout', async () => {
-    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [base + '/before-fit', base + '/reflow-fit'] });
-    const canvas = await app.invoke('canvas.state');
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 1, urls: [base + '/before-fit', base + '/reflow-fit'] });
+    const canvas = await app.invoke('shell_canvas', { operation: 'state_get' });
     try {
-      await app.invoke('canvas.focus', { cell: 1 });
+      await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 1 });
       const page = await app.pageWith(/\/reflow-fit$/);
       await page.locator('main').waitFor();
       const before = await page.evaluate(() => ({
@@ -533,26 +533,26 @@ failed = await run([
       assert.ok(!['hidden', 'clip'].includes(fitted.overflow), 'content is fitted, not hidden');
       assert.equal(fitted.verticalScrolling, true, 'vertical scrolling remains available');
     } finally {
-      await app.invoke('tab.close', { tab_id: canvas.id });
+      await app.invoke('shell_tab', { operation: 'close', tab_id: canvas.id });
     }
   }],
   ['fit to width uses the actual page area in standalone, 2x2, sidebar and resized-cell layouts', async () => {
-    await app.invoke('nav.open', { url: base + '/scope-fit?standalone', disposition: 'new_tab' });
-    const standaloneId = (await app.invoke('agent.context')).page.tab_id;
+    await app.invoke('shell_tab', { operation: 'open', url: base + '/scope-fit?standalone', background: false });
+    const standaloneId = (await app.invoke('shell_agent', { operation: 'context_get' })).page.tab_id;
     const standalone = await app.pageWith(/\/scope-fit\?standalone$/);
     await standalone.locator('main').waitFor();
     await app.shell.locator('#zoom-fit').click();
     await standalone.waitForFunction(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
-    await app.invoke('canvas.create', { cols: 2, rows: 2, urls: [0, 1, 2, 3].map(cell => `${base}/scope-fit?cell=${cell}`) });
-    const canvas = await app.invoke('canvas.state');
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 2, urls: [0, 1, 2, 3].map(cell => `${base}/scope-fit?cell=${cell}`) });
+    const canvas = await app.invoke('shell_canvas', { operation: 'state_get' });
     let riverOpen = false;
     try {
-      await app.invoke('canvas.focus', { cell: 2 });
+      await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 2 });
       const page = await app.pageWith(/\/scope-fit\?cell=2$/);
       await page.locator('main').waitFor();
       const dpr = await page.evaluate(() => devicePixelRatio);
       const fitCurrentArea = async () => {
-        await app.invoke('tab.zoom_reset');
+        await app.invoke('shell_page_zoom', { operation: 'reset' });
         await page.waitForFunction(expected => Math.abs(devicePixelRatio - expected) < 0.001, dpr);
         const expected = await page.evaluate(() =>
           Math.min(1, (document.documentElement.clientWidth - 1) / document.documentElement.scrollWidth));
@@ -563,23 +563,23 @@ failed = await run([
         return expected;
       };
       const gridZoom = await fitCurrentArea();
-      await app.invoke('shortcut', { name: 'ask_ai' });
+      await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
       riverOpen = true;
       await (await app.pageWith(/sidebar\.html/)).locator('#ag-input').waitFor();
       const withRiver = await fitCurrentArea();
       assert.ok(withRiver < gridZoom, 'River reduces the width available to the cell');
-      const layout = await app.invoke('canvas.state');
+      const layout = await app.invoke('shell_canvas', { operation: 'state_get' });
       const divider = layout.dividers.find(divider => divider.vertical && divider.row === 1);
-      await app.invoke('canvas.resize', { vertical: true, row: 1, index: 0, pos: divider.rect.x - 50 });
+      await app.invoke('shell_canvas', { operation: 'resize', vertical: true, row: 1, index: 0, pos: divider.rect.x - 50 });
       const resized = await fitCurrentArea();
       assert.ok(resized < withRiver, 'a narrower cell gets a smaller fitted zoom');
-      await app.invoke('canvas.zoom', { zoomed: true });
+      await app.invoke('shell_canvas', { operation: 'zoom', zoomed: true });
       const expanded = await fitCurrentArea();
       assert.ok(expanded > resized, 'expanding the cell uses its larger page area');
-      await app.invoke('canvas.zoom', { zoomed: false });
-      await app.invoke('nav.open', { url: base + '/scope-fit?wide', disposition: 'current' });
+      await app.invoke('shell_canvas', { operation: 'zoom', zoomed: false });
+      await app.invoke('shell_page_navigate', { url: base + '/scope-fit?wide' });
       await page.waitForURL(/\/scope-fit\?wide$/);
-      const requested = await app.invoke('tab.zoom_set', { factor: 0.1 });
+      const requested = await app.invoke('shell_page_zoom', { operation: 'set', factor: 0.1 });
       assert.equal(requested.factor, 0.1, 'the app does not clamp the requested zoom to 25%');
       await page.waitForFunction(baseline => devicePixelRatio < baseline * 0.5, dpr);
       let actual = await page.evaluate(baseline => devicePixelRatio / baseline, dpr);
@@ -598,15 +598,15 @@ failed = await run([
       actual = await page.evaluate(baseline => devicePixelRatio / baseline, dpr);
       await app.shell.waitForFunction(expected => document.querySelector('#zoom-label').textContent === expected,
         `${Math.round(actual * 100)}%`);
-      assert.equal((await app.invoke('agent.context')).page.tab_id, canvas.cells[2].tab_id);
+      assert.equal((await app.invoke('shell_agent', { operation: 'context_get' })).page.tab_id, canvas.cells[2].tab_id);
     } finally {
-      if (riverOpen) await app.invoke('shortcut', { name: 'ask_ai' });
-      await app.invoke('tab.close', { tab_id: canvas.id });
-      await app.invoke('tab.close', { tab_id: standaloneId });
+      if (riverOpen) await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
+      await app.invoke('shell_tab', { operation: 'close', tab_id: canvas.id });
+      await app.invoke('shell_tab', { operation: 'close', tab_id: standaloneId });
     }
   }],
   ['browser zoom changes native PDF text geometry without raster canvases', async () => {
-    await app.invoke('nav.open', { url: `${base}/doc.pdf` });
+    await app.invoke('shell_page_navigate', { url: `${base}/doc.pdf` });
     await waitPdf('Quarterly revenue');
     const before = await nativePdfText(app.child.pid, 'Quarterly revenue', 'Quarterly revenue');
     await app.shell.locator('#zoom-in').click();
@@ -650,19 +650,19 @@ failed = await run([
   }],
   ['dropping a local PDF replaces the page and preserves toolbar Back and Forward', async () => {
     const previousUrl = base + '/before-drop';
-    await app.invoke('nav.open', { url: previousUrl });
+    await app.invoke('shell_page_navigate', { url: previousUrl });
     const page = await app.pageWith(/\/before-drop$/);
     await page.locator('h1').waitFor();
-    const before = await app.invoke('agent.context');
+    const before = await app.invoke('shell_agent', { operation: 'context_get' });
     await dropFile(page, 'h1');
     await page.waitForURL(localUrl);
     await waitPdf('Local dropped PDF');
     assert.match(JSON.stringify(await preview()), /Local dropped PDF document/);
     await nativePdfText(app.child.pid, 'Local dropped PDF', 'Local dropped PDF');
     await app.shell.waitForFunction(async () =>
-      (await window.__native.invoke('agent.context')).page.selection === 'Local dropped PDF');
+      (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === 'Local dropped PDF');
     await assertRiverSelection('Local dropped PDF');
-    const after = await app.invoke('agent.context');
+    const after = await app.invoke('shell_agent', { operation: 'context_get' });
     assert.equal(after.page.tab_id, before.page.tab_id, 'opens in the same page, not another tab');
     assert.equal(after.tabs.length, before.tabs.length);
     assert.equal(after.page.url, localUrl);
@@ -672,11 +672,11 @@ failed = await run([
     await app.shell.locator('#btn-forward').click();
     await page.waitForURL(localUrl);
     await waitPdf('Local dropped PDF');
-    assert.equal((await app.invoke('agent.context')).page.url, localUrl);
+    assert.equal((await app.invoke('shell_agent', { operation: 'context_get' })).page.url, localUrl);
   }],
   ['native file inputs and website upload drop zones retain PDF drops', async () => {
     const uploadUrl = base + '/upload-test';
-    await app.invoke('nav.open', { url: uploadUrl });
+    await app.invoke('shell_page_navigate', { url: uploadUrl });
     const page = await app.pageWith(/\/upload-test$/);
     await page.locator('#upload').waitFor();
     await dropFile(page, '#upload');
@@ -691,19 +691,19 @@ failed = await run([
   }],
   ['dropping a PDF into an unfocused canvas cell navigates only that cell with Back and Forward', async () => {
     const urls = [base + '/drop-left', base + '/drop-right'];
-    await app.invoke('canvas.create', { cols: 2, rows: 1, urls });
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 1, urls });
     const left = await app.pageWith(/\/drop-left$/);
     const right = await app.pageWith(/\/drop-right$/);
     await left.locator('h1').waitFor();
     await right.locator('h1').waitFor();
     await left.evaluate(() => { window.cellMarker = 'preserved'; });
-    await app.invoke('canvas.focus', { cell: 0 });
-    const before = await app.invoke('agent.context');
+    await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 0 });
+    const before = await app.invoke('shell_agent', { operation: 'context_get' });
     const target = before.tabs.find(tab => tab.url === urls[1]);
     await dropFile(right, 'h1');
     await right.waitForURL(localUrl);
     await waitPdf('Local dropped PDF');
-    const after = await app.invoke('agent.context');
+    const after = await app.invoke('shell_agent', { operation: 'context_get' });
     assert.equal(after.page.tab_id, target.tab_id, 'the drop focuses its destination cell');
     assert.equal(after.page.url, localUrl);
     assert.equal(after.tabs.length, before.tabs.length);
@@ -719,26 +719,26 @@ failed = await run([
     assert.equal(left.url(), urls[0]);
   }],
   ['River reads and selects only the focused native PDF canvas cell', async () => {
-    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [base + '/left.pdf', base + '/right.pdf'] });
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 1, urls: [base + '/left.pdf', base + '/right.pdf'] });
     await waitPdf('LEFT-NATIVE-PDF');
     await waitPdf('RIGHT-NATIVE-PDF');
     for (const [cell, marker, other] of [[0, 'LEFT-NATIVE-PDF', 'RIGHT-NATIVE-PDF'], [1, 'RIGHT-NATIVE-PDF', 'LEFT-NATIVE-PDF']]) {
-      await app.invoke('canvas.focus', { cell });
+      await app.invoke('shell_canvas', { operation: 'cell_focus', cell });
       const content = JSON.stringify(await preview());
       assert.ok(content.includes(marker), content);
       assert.ok(!content.includes(other), content);
       await nativePdfText(app.child.pid, marker, marker);
       await app.shell.waitForFunction(async expected =>
-        (await window.__native.invoke('agent.context')).page.selection === expected, marker);
+        (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === expected, marker);
     }
   }],
   ['Ctrl+scroll in another PDF canvas cell focuses and zooms only that cell', async () => {
     const height = async marker => (await nativePdfText(app.child.pid, marker, marker)).bounds[0].height;
     const beforeLeft = await height('LEFT-NATIVE-PDF');
     const beforeRight = await height('RIGHT-NATIVE-PDF');
-    await app.invoke('canvas.focus', { cell: 0 });
+    await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 0 });
     const beforeZoom = parseInt(await app.shell.locator('#zoom-label').textContent(), 10);
-    await app.invoke('canvas.focus', { cell: 1 });
+    await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 1 });
     await app.shell.evaluate(() => {
       window.__canvasZoomEvents = [];
       window.__native.on('tab.zoom_changed', value => window.__canvasZoomEvents.push(value));
@@ -748,7 +748,7 @@ failed = await run([
     await left.keyboard.down('Control');
     try { await left.mouse.wheel(0, -120); } finally { await left.keyboard.up('Control'); }
     await app.shell.waitForFunction(async () =>
-      (await window.__native.invoke('agent.context')).page.url.endsWith('/left.pdf'));
+      (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.url.endsWith('/left.pdf'));
     const afterLeft = await height('LEFT-NATIVE-PDF');
     const afterRight = await height('RIGHT-NATIVE-PDF');
     const label = await app.shell.locator('#zoom-label').textContent();
@@ -760,15 +760,15 @@ failed = await run([
     assert.equal(parseInt(await app.shell.locator('#zoom-label').textContent(), 10), 100);
     assert.ok(Math.abs(await height('LEFT-NATIVE-PDF') / beforeLeft - 100 / beforeZoom) < 0.05, 'Reset sets the targeted PDF to actual 100%');
     assert.ok(Math.abs(await height('RIGHT-NATIVE-PDF') - beforeRight) < 1, 'Reset does not change the neighboring PDF');
-    await app.invoke('nav.open', { url: base + '/after-native-pdf' });
+    await app.invoke('shell_page_navigate', { url: base + '/after-native-pdf' });
     const page = await app.pageWith(/\/after-native-pdf$/);
     await page.locator('h1').waitFor();
-    assert.equal((await app.invoke('agent.context')).page.selection, null, 'navigation clears the old native selection');
+    assert.equal((await app.invoke('shell_agent', { operation: 'context_get' })).page.selection, null, 'navigation clears the old native selection');
     assert.match(JSON.stringify(await preview()), /Page before a drop/);
   }],
   ['identical PDF URLs in separate canvas cells retain distinct native selections', async () => {
     const before = new Set(app.ctx.pages());
-    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [base + '/doc.pdf', base + '/doc.pdf'] });
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 1, urls: [base + '/doc.pdf', base + '/doc.pdf'] });
     await waitPdf('Quarterly revenue');
     let pages = [];
     for (let attempt = 0; attempt < 100; attempt++) {
@@ -786,30 +786,30 @@ failed = await run([
     assert.equal(full, 'Quarterly revenue grew twelve percent');
     assert.equal(await engineSelection(pages[selected]), 'revenue', 'the neighbor keeps its partial selection');
     for (const [cell, expected] of [[selected, 'revenue'], [other, full], [selected, 'revenue']]) {
-      await app.invoke('canvas.focus', { cell });
+      await app.invoke('shell_canvas', { operation: 'cell_focus', cell });
       await app.shell.waitForFunction(async text =>
-        (await window.__native.invoke('agent.context')).page.selection === text, expected);
+        (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === text, expected);
     }
   }],
   ['an unavailable native selection protocol clears River rather than using inaccurate UIA text', async () => {
-    await app.invoke('nav.open', { url: base + '/unavailable.pdf' });
+    await app.invoke('shell_page_navigate', { url: base + '/unavailable.pdf' });
     const page = await app.pageWith(/\/unavailable\.pdf$/);
     await nativePdfText(app.child.pid, 'Quarterly revenue', 'revenue');
     await app.shell.waitForFunction(async () =>
-      (await window.__native.invoke('agent.context')).page.selection === 'revenue');
+      (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === 'revenue');
     await nativePdfEvaluate(page, `globalThis.__savedPdfPort = viewer.pluginController_.messagePort_;
       viewer.pluginController_.messagePort_ = null; 'unavailable'`);
     try {
       await nativePdfText(app.child.pid, 'Quarterly revenue', 'twelve percent');
       await app.shell.waitForFunction(async () =>
-        (await window.__native.invoke('agent.context')).page.selection === null);
+        (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === null);
     } finally {
       await nativePdfEvaluate(page, `viewer.pluginController_.messagePort_ = globalThis.__savedPdfPort;
         delete globalThis.__savedPdfPort; 'restored'`);
     }
     await nativePdfText(app.child.pid, 'Quarterly revenue', 'revenue grew');
     await app.shell.waitForFunction(async () =>
-      (await window.__native.invoke('agent.context')).page.selection === 'revenue grew');
+      (await window.__native.invoke('shell_agent', { operation: 'context_get' })).page.selection === 'revenue grew');
   }],
   ['a delayed native PDF selection reply cannot repopulate River after navigation', async () => {
     const page = await app.pageWith(/\/unavailable\.pdf$/);
@@ -826,11 +826,11 @@ failed = await run([
     })()`);
     await nativePdfText(app.child.pid, 'Quarterly revenue', 'percent');
     assert.equal(await nativePdfEvaluate(page, 'String(globalThis.__selectionReads)'), '1', 'a native read is in flight');
-    await app.invoke('nav.open', { url: base + '/selection-after-navigation', disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: base + '/selection-after-navigation' });
     await page.waitForURL(base + '/selection-after-navigation');
     await page.locator('h1').waitFor();
     await sleep(1000);
-    assert.equal((await app.invoke('agent.context')).page.selection, null);
+    assert.equal((await app.invoke('shell_agent', { operation: 'context_get' })).page.selection, null);
   }],
 ]);
 } finally {

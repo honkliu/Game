@@ -10,7 +10,7 @@ use ai_platform_contract::contract::{
     level_of_action_kind, ActionLevel, ActionRequest, ActionTarget, Idempotency, TargetResolution,
 };
 use ai_platform_contract::failure::{Failure, FailureKind};
-use ai_platform_contract::frame::{Method, ResponsePayload};
+use ai_platform_contract::frame::ResponsePayload;
 use ai_platform_contract::identity::{DocumentToken, SnapshotVersion, TaskId};
 use ai_platform_contract::model::{PageBlock, PageLink};
 use serde_json::{json, Value};
@@ -217,12 +217,28 @@ pub fn dispatch(
         deadline_ms_since_epoch: ctx.deadline_ms,
         idempotency: idempotency(&planned.kind),
     };
-    let params = match serde_json::to_value(&request) {
+    let metadata = match serde_json::to_value(&request) {
         Ok(params) => params,
         Err(_) => return Dispatched::Terminal(Failure::unsupported("contract.encode_failed")),
     };
+    let mut params = planned.arguments.clone();
+    if let Some(target) = &planned.target {
+        if let Some(target) = target.as_object() {
+            for (key, value) in target { params[key] = value.clone(); }
+        }
+    }
+    let name = match planned.kind.as_str() {
+        "open_tab" | "show_candidate" => { params["operation"] = json!("open"); "shell_tab" }
+        "activate_tab" => { params["operation"] = json!("activate"); "shell_tab" }
+        "list_tabs" => { params["operation"] = json!("list"); "shell_tab" }
+        "read_tab" => "shell_page_read",
+        "navigate" => "shell_page_navigate",
+        "scroll_to" | "highlight_passage" => "shell_page_scroll_to",
+        _ => return Dispatched::Terminal(Failure::unsupported("action.unknown")),
+    };
+    params["_task"] = metadata;
     control.action_started();
-    let response = shell.call(Method::DispatchAction, &params, control);
+    let response = shell.call(name, &params, control);
     let observation = |summary: String| {
         Dispatched::Observation(StepObservation { action_kind: planned.kind.clone(), summary })
     };

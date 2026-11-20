@@ -59,15 +59,15 @@ const ask = async (text) => {
 
 await run([
   ['2x2 canvas of four popup-ridden pages', async () => {
-    await app.invoke('canvas.create', { cols: 2, rows: 2, urls: [0, 1, 2, 3].map((n) => `${base}/${n}`) });
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 2, urls: [0, 1, 2, 3].map((n) => `${base}/${n}`) });
     for (let n = 0; n < 4; n++) await waitFor(() => pageOf(n));
     for (let n = 0; n < 4; n++) await pageOf(n).waitForSelector('#dlg');
     await sleep(500);
     assert.ok(await popupsLeft(0));
   }],
   ['shell command, scope cell: only the focused cell is cleaned; header and content survive', async () => {
-    await app.invoke('canvas.focus', { cell: 1 });
-    await app.invoke('page.dismiss_popups', { scope: 'cell' });
+    await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 1 });
+    await app.invoke('shell_page_popups_dismiss', { scope: 'cell' });
     await waitFor(async () => !(await popupsLeft(1)));
     const s = await state(pageOf(1));
     assert.equal(s.hdr, true, 'site header is chrome, not a popup');
@@ -79,8 +79,8 @@ await run([
   ['agent tool, scope tab: one prompt cleans every cell of the canvas', async () => {
     script = (messages) => messages.some((m) => m.role === 'tool')
       ? { text: 'done' }
-      : { tools: [{ name: 'dismiss_popups', args: { scope: 'tab' } }] };
-    await app.invoke('shortcut', { name: 'ask_ai' });
+      : { tools: [{ name: 'shell_page_popups_dismiss', args: { scope: 'tab' } }] };
+    await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
     side = await app.pageWith(/sidebar\.html/);
     await side.waitForSelector('#ag-input');
     calls.length = 0;
@@ -100,7 +100,7 @@ await run([
     await sleep(400);
     script = (messages) => messages.some((m) => m.role === 'tool')
       ? { text: 'done' }
-      : { tools: [{ name: 'dismiss_popups', args: { scope: 'cell', cell: 2 } }] };
+      : { tools: [{ name: 'shell_page_popups_dismiss', args: { scope: 'cell', cell: 2 } }] };
     await ask('close all popups in cell 3');
     await waitFor(async () => !(await popupsLeft(2)));
     assert.ok(await popupsLeft(0) && await popupsLeft(1) && await popupsLeft(3), 'other cells untouched');

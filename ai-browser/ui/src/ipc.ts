@@ -2,40 +2,19 @@
 //
 // WebView2 is out of process, so every command is a message: `window.ipc.postMessage`
 // out, `window.__native._dispatch` (events) and `_reply` (command results) back in. The
-// command list below is checked against the Rust dispatcher by a test, so a renamed or
+// command list below is checked against the shared Rust catalog by a test, so a renamed or
 // removed command fails the build instead of failing at runtime.
 
 export const COMMANDS = [
-  'ai.ask',
-  'ai.status',
-  'ai.session',
-  'ai.models',
-  'ai.stop',
-  'ai.provider.set',
-  'ai.provider.delete',
-  'ai.citation.scroll',
-  'ai.history.clear',
-  'ai.selection.act',
-  'ai.pane.resize',
-  'nav.open',
-  'tab.select',
-  'agent.run',
-  'agent.stop',
-  'agent.approve',
-  'agent.call',
-  'agent.context',
-  'settings.open',
-  'settings.state',
-  'settings.section',
-  'settings.update',
-  'settings.open_folder',
-  'history.query',
-  'history.forget',
-  'history.clear',
-  'download.action',
-  'download.clear_list',
-  'ai.conversation.open',
-  'ai.conversation.pending',
+  'shell_tab', 'shell_canvas', 'shell_page_read', 'shell_page_navigate',
+  'shell_page_click', 'shell_page_fill', 'shell_page_popups_dismiss',
+  'shell_page_url_copy', 'shell_page_scroll_to', 'shell_page_snapshot',
+  'shell_page_navigation', 'shell_page_zoom', 'shell_page_find',
+  'shell_cookie', 'shell_storage', 'shell_tab_group', 'shell_history',
+  'shell_bookmark', 'shell_download', 'shell_window', 'shell_settings',
+  'shell_omnibox', 'shell_ui', 'shell_diagnostics', 'shell_ai', 'shell_agent',
+  'shell_agent_tool', 'shell_agent_skill', 'shell_agent_prompt',
+  'shell_agent_mcp', 'shell_conversation',
 ] as const;
 
 export type Command = (typeof COMMANDS)[number];
@@ -97,7 +76,7 @@ export function createBridge(post: (raw: string) => void, firstId = 1, timeoutMs
   };
 }
 
-/** Management operations: `agent.call` returns at once and the result arrives later as
+/** Management operations return at once and the result arrives later as
  *  the `agent.reply` event with the same `req`. This turns that pair into a promise. */
 export function createAgentCalls(bridge: Bridge, timeoutMs = 150_000) {
   let seq = 0;
@@ -110,14 +89,14 @@ export function createAgentCalls(bridge: Bridge, timeoutMs = 150_000) {
     if (r.ok) w.resolve(r.value);
     else w.reject(new Error(r.error || 'failed'));
   });
-  return function call<T = Payload>(op: string, params: object = {}): Promise<T> {
+  return function call<T = Payload>(resource: Command, operation: string, params: object = {}): Promise<T> {
     const req = ++seq;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (waiting.delete(req)) reject(new Error('timed out'));
       }, timeoutMs);
       waiting.set(req, { resolve, reject, timer });
-      bridge.invoke('agent.call', { ...params, op, req }).catch((e) => {
+      bridge.invoke(resource, { ...params, operation, req }).catch((e) => {
         waiting.delete(req);
         clearTimeout(timer);
         reject(e);

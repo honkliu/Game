@@ -67,21 +67,20 @@ const ask = async (text) => {
   return ui(() => window.__agentUi.messages.at(-1));
 };
 const toolMsg = (messages) => messages.filter((m) => m.role === 'tool');
-const call = (op, params) => ui(([o, p]) => window.__native.invoke('agent.call', { ...p, op, req: 9000 + Math.floor(Math.random() * 1e6) }).then(() => null), [op, params || {}]);
-const mgmt = (op, params = {}) => ui(([o, p]) => new Promise((resolve, reject) => {
+const mgmt = (resource, operation, params = {}) => ui(([resource, operation, p]) => new Promise((resolve, reject) => {
   const req = 5000000 + Math.floor(Math.random() * 1e6);
-  window.__native.on('agent.reply', function h(r) { if (r.req === req) r.ok ? resolve(r.value) : reject(new Error(r.error)); });
-  window.__native.invoke('agent.call', { ...p, op: o, req }).catch(reject);
-}), [op, params]);
+  const off = window.__native.on('agent.reply', r => { if (r.req === req) { off(); r.ok ? resolve(r.value) : reject(new Error(r.error)); } });
+  window.__native.invoke(resource, { ...p, operation, req }).catch(error => { off(); reject(error); });
+}), [resource, operation, params]);
 
 const cases = [
   ['setup: article tab, agent mode', async () => {
-    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/` });
     await (await app.pageWith(/127\.0\.0\.1:\d+\/$/)).waitForSelector('#btn');
-    await app.invoke('shortcut', { name: 'ask_ai' });
+    await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
     side = await app.pageWith(/sidebar\.html/);
         await side.waitForSelector('#ag-input');
-    const st = await mgmt('state');
+    const st = await mgmt('shell_agent', 'state_get');
     assert.equal(st.prompts.length, 3);
     assert.ok(st.skills.length >= 4);
   }],
@@ -90,21 +89,21 @@ const cases = [
     calls.length = 0;
     script = (messages) => {
       const tools = toolMsg(messages);
-      if (tools.length === 0) return { tools: [{ name: 'list_tabs' }] };
-      if (tools.length === 1) return { tools: [{ name: 'read_page' }] };
+      if (tools.length === 0) return { tools: [{ name: 'shell_tab', args: { operation: 'list' } }] };
+      if (tools.length === 1) return { tools: [{ name: 'shell_page_read' }] };
       return { text: 'The page says: ' + (/Returns policy/.test(tools[1].content) ? 'RETURNS-OK' : 'MISSING') };
     };
     const last = await ask('what is on my current tab?');
     assert.match(last.content, /RETURNS-OK/);
     assert.equal(last.tools.length, 2);
-    assert.ok(calls[0].tools.some((t) => t.function.name === 'read_page'));
+    assert.ok(calls[0].tools.some((t) => t.function.name === 'shell_page_read'));
     assert.match(calls[0].messages[0].content, /browser/i);
   }],
 
   ['write tool asks for approval: deny', async () => {
     calls.length = 0;
     script = (messages) => toolMsg(messages).length === 0
-      ? { tools: [{ name: 'click', args: { selector: '#btn' } }] }
+      ? { tools: [{ name: 'shell_page_click', args: { selector: '#btn' } }] }
       : { text: 'got: ' + toolMsg(messages)[0].content.slice(0, 60) };
     const n = await ui(() => window.__agentUi.messages.length);
     await ui((t) => window.__agentUi.send(t), 'click the button');
@@ -119,7 +118,7 @@ const cases = [
   ['auto mode: "open X" navigates the page with no approval', async () => {
     calls.length = 0;
     script = (messages) => toolMsg(messages).length === 0
-      ? { tools: [{ name: 'navigate', args: { url: `${base}/other` } }] }
+      ? { tools: [{ name: 'shell_page_navigate', args: { url: `${base}/other` } }] }
       : { text: 'opened it' };
     const n = await ui(() => window.__agentUi.messages.length);
     await ui((t) => window.__agentUi.send(t), 'open 新浪新闻');
@@ -132,10 +131,10 @@ const cases = [
   ['chat mode: "打开 X" is handed to the agent and navigates', async () => {
     await ui(() => document.getElementById('agent-switch').click());
     assert.equal(await ui(() => window.__agentUi.agentOn), false);
-    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/` });
     await app.pageWith(/127\.0\.0\.1:\d+\/$/);
     script = (messages) => toolMsg(messages).length === 0
-      ? { tools: [{ name: 'navigate', args: { url: `${base}/other` } }] }
+      ? { tools: [{ name: 'shell_page_navigate', args: { url: `${base}/other` } }] }
       : { text: 'opened it' };
     await ui((t) => window.__agentUi.send(t), '打开新浪');
     await app.pageWith(/127\.0\.0\.1:\d+\/other/);
@@ -144,39 +143,39 @@ const cases = [
 
   ['agent tool: canvas opens a grid of pages the user can see', async () => {
     script = (messages) => toolMsg(messages).length === 0
-      ? { tools: [{ name: 'canvas', args: { action: 'open', cols: 2, rows: 1, urls: [`${base}/?c=1`, `${base}/?c=2`] } }] }
+      ? { tools: [{ name: 'shell_canvas', args: { operation: 'open', cols: 2, rows: 1, urls: [`${base}/?c=1`, `${base}/?c=2`] } }] }
       : { text: 'canvas ready' };
     await ui((t) => window.__agentUi.send(t), 'put two pages side by side');
-    await waitFor(async () => (await app.invoke('canvas.state'))?.cells?.filter((c) => c.tab_id != null).length === 2);
-    const cv = await app.invoke('canvas.state');
+    await waitFor(async () => (await app.invoke('shell_canvas', { operation: 'state_get' }))?.cells?.filter((c) => c.tab_id != null).length === 2);
+    const cv = await app.invoke('shell_canvas', { operation: 'state_get' });
     assert.equal(cv.cols, 2);
-    await app.invoke('tab.close', { tab_id: cv.id });
+    await app.invoke('shell_tab', { operation: 'close', tab_id: cv.id });
   }],
 
   ['agent: "open X at (1,2)" loads that row/column of the canvas', async () => {
-    await app.invoke('canvas.create', { cols: 3, rows: 2, urls: [`${base}/?g=0`] });
+    await app.invoke('shell_canvas', { operation: 'open', cols: 3, rows: 2, urls: [`${base}/?g=0`] });
     script = (messages) => toolMsg(messages).length === 0
-      ? { tools: [{ name: 'navigate', args: { url: `${base}/?g=target`, row: 1, col: 2 } }] }
+      ? { tools: [{ name: 'shell_canvas', args: { operation: 'cell_open', url: `${base}/?g=target`, row: 1, col: 2 } }] }
       : { text: 'done' };
     await ui((t) => window.__agentUi.send(t), 'open google at (1,2)');
-    await waitFor(async () => (await app.invoke('canvas.state'))?.cells?.[5]?.tab_id != null);
+    await waitFor(async () => (await app.invoke('shell_canvas', { operation: 'state_get' }))?.cells?.[5]?.tab_id != null);
     await waitFor(async () => app.ctx.pages().some((p) => p.url().includes('g=target')));
     assert.match(calls.at(-1).messages[0].content, /# Canvas/);
-    await app.invoke('tab.close', { tab_id: (await app.invoke('canvas.state')).id });
+    await app.invoke('shell_tab', { operation: 'close', tab_id: (await app.invoke('shell_canvas', { operation: 'state_get' })).id });
   }],
 
   ['canvas container page tools navigate and read its focused visible cell', async () => {
-    await app.invoke('canvas.create', { cols: 2, rows: 2, urls: [0, 1, 2, 3].map(cell => `${base}/?canvas-cell=${cell}`) });
-    const canvas = await app.invoke('canvas.state');
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 2, urls: [0, 1, 2, 3].map(cell => `${base}/?canvas-cell=${cell}`) });
+    const canvas = await app.invoke('shell_canvas', { operation: 'state_get' });
     try {
-      await app.invoke('canvas.focus', { cell: 2 });
+      await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 2 });
       calls.length = 0;
       const target = `${base}/other?canvas-focused=2`;
       script = messages => {
         const tools = toolMsg(messages);
-        if (tools.length === 0) return { tools: [{ name: 'list_tabs' }] };
-        if (tools.length === 1) return { tools: [{ name: 'navigate', args: { tab_id: canvas.id, url: target } }] };
-        if (tools.length === 2) return { tools: [{ name: 'read_page', args: { tab_id: canvas.id } }] };
+        if (tools.length === 0) return { tools: [{ name: 'shell_tab', args: { operation: 'list' } }] };
+        if (tools.length === 1) return { tools: [{ name: 'shell_page_navigate', args: { tab_id: canvas.id, url: target } }] };
+        if (tools.length === 2) return { tools: [{ name: 'shell_page_read', args: { tab_id: canvas.id } }] };
         return { text: 'navigation checked' };
       };
       await ask('in the current cell, open the other page');
@@ -189,37 +188,37 @@ const cases = [
       assert.equal(results[2].url, target, 'read_page of a canvas reads its focused cell');
       const visible = await app.pageWith(/\/other\?canvas-focused=2$/);
       assert.equal(await visible.evaluate(() => document.visibilityState), 'visible');
-      const after = await app.invoke('canvas.state');
+      const after = await app.invoke('shell_canvas', { operation: 'state_get' });
       assert.equal(after.id, canvas.id);
       assert.equal(after.focus, 2);
       for (let cell = 0; cell < 4; cell++) {
         assert.equal(after.cells[cell].url, cell === 2 ? target : `${base}/?canvas-cell=${cell}`);
       }
-      const context = await app.invoke('agent.context');
+      const context = await app.invoke('shell_agent', { operation: 'context_get' });
       assert.equal(context.tabs.find(tab => tab.tab_id === canvas.id).url, 'native://canvas');
       assert.match(calls[0].messages[0].content, new RegExp(`canvas ${canvas.id}, cell 2`));
     } finally {
-      await app.invoke('tab.close', { tab_id: canvas.id });
+      await app.invoke('shell_tab', { operation: 'close', tab_id: canvas.id });
     }
   }],
 
   ['default agent navigation stays in the current cell with another canvas open', async () => {
-    await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [`${base}/?background=0`, `${base}/?background=1`] });
-    const background = await app.invoke('canvas.state');
-    await app.invoke('canvas.create', { cols: 2, rows: 2, urls: [0, 1, 2, 3].map(cell => `${base}/?current=${cell}`) });
-    const current = await app.invoke('canvas.state');
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 1, urls: [`${base}/?background=0`, `${base}/?background=1`] });
+    const background = await app.invoke('shell_canvas', { operation: 'state_get' });
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 2, urls: [0, 1, 2, 3].map(cell => `${base}/?current=${cell}`) });
+    const current = await app.invoke('shell_canvas', { operation: 'state_get' });
     try {
-      await app.invoke('canvas.focus', { cell: 3 });
+      await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 3 });
       calls.length = 0;
       const target = `${base}/other?current-cell=3`;
       script = messages => toolMsg(messages).length === 0
-        ? { tools: [{ name: 'navigate', args: { url: target } }] }
+        ? { tools: [{ name: 'shell_page_navigate', args: { url: target } }] }
         : { text: 'opened in the current cell' };
       await ask('google in the current cell');
       const result = JSON.parse(toolMsg(calls.at(-1).messages)[0].content);
       assert.equal(result.tab_id, current.cells[3].tab_id);
       await app.pageWith(/\/other\?current-cell=3$/);
-      const context = await app.invoke('agent.context');
+      const context = await app.invoke('shell_agent', { operation: 'context_get' });
       assert.equal(context.page.tab_id, current.cells[3].tab_id);
       for (let cell = 0; cell < 3; cell++) {
         assert.equal(context.tabs.find(tab => tab.tab_id === current.cells[cell].tab_id).url, `${base}/?current=${cell}`);
@@ -228,50 +227,50 @@ const cases = [
         assert.equal(context.tabs.find(tab => tab.tab_id === background.cells[cell].tab_id).url, `${base}/?background=${cell}`);
       }
     } finally {
-      await app.invoke('tab.close', { tab_id: current.id });
-      await app.invoke('tab.close', { tab_id: background.id });
+      await app.invoke('shell_tab', { operation: 'close', tab_id: current.id });
+      await app.invoke('shell_tab', { operation: 'close', tab_id: background.id });
     }
   }],
 
   ['canvas navigation fills the focused empty cell without creating a hidden page', async () => {
-    await app.invoke('canvas.create', { cols: 2, rows: 1 });
-    const canvas = await app.invoke('canvas.state');
+    await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 1 });
+    const canvas = await app.invoke('shell_canvas', { operation: 'state_get' });
     try {
       calls.length = 0;
       const target = `${base}/other?blank-canvas=1`;
       script = messages => toolMsg(messages).length === 0
-        ? { tools: [{ name: 'navigate', args: { tab_id: canvas.id, url: target } }] }
+        ? { tools: [{ name: 'shell_page_navigate', args: { tab_id: canvas.id, url: target } }] }
         : { text: 'opened in the blank cell' };
       await ask('open the other page in the current blank cell');
       const result = JSON.parse(toolMsg(calls.at(-1).messages)[0].content);
       assert.ok(result.tab_id);
       const page = await app.pageWith(/\/other\?blank-canvas=1$/);
       assert.equal(await page.evaluate(() => document.visibilityState), 'visible');
-      const after = await app.invoke('canvas.state');
+      const after = await app.invoke('shell_canvas', { operation: 'state_get' });
       assert.equal(result.tab_id, after.cells[0].tab_id);
       assert.equal(after.cells[0].url, target);
       assert.equal(after.cells[1].tab_id, null);
-      const context = await app.invoke('agent.context');
+      const context = await app.invoke('shell_agent', { operation: 'context_get' });
       assert.equal(context.tabs.find(tab => tab.tab_id === canvas.id).url, 'native://canvas');
     } finally {
-      await app.invoke('tab.close', { tab_id: canvas.id });
+      await app.invoke('shell_tab', { operation: 'close', tab_id: canvas.id });
     }
   }],
 
   ['manual mode: the pane shows a link, the page does not move until it is clicked', async () => {
-    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/` });
     await app.pageWith(/127\.0\.0\.1:\d+\/$/);
     await ui(() => document.getElementById('nav-switch').click());
     calls.length = 0;
     script = (messages) => toolMsg(messages).length === 0
-      ? { tools: [{ name: 'open_tab', args: { url: `${base}/live` } }] }
+      ? { tools: [{ name: 'shell_tab', args: { operation: 'open', url: `${base}/live` } }] }
       : { text: 'link ready' };
     const n = await ui(() => window.__agentUi.messages.length);
     await ui((t) => window.__agentUi.send(t), 'open the live page');
     await waitFor(() => ui((n0) => window.__agentUi.messages.length >= n0 + 2, n));
     assert.match(calls[0].messages[0].content, /Navigation mode: MANUAL/);
     await side.waitForSelector('.ag-link');
-    const tabs = await ui(() => window.__native.invoke('agent.context', {}));
+    const tabs = await ui(() => window.__native.invoke('shell_agent', { operation: 'context_get' }));
     assert.ok(!tabs.tabs.some((t) => /\/live/.test(t.url)), 'nothing was opened yet');
     await side.click('.ag-link');
     await app.pageWith(/127\.0\.0\.1:\d+\/live/);
@@ -287,12 +286,12 @@ const cases = [
   }],
 
   ['editable prompts: system prompt edit reaches the model, reset restores', async () => {
-    await mgmt('prompt.save', { name: 'system', text: 'MARKER-SYSTEM-42 today={{date}}' });
+    await mgmt('shell_agent_prompt', 'save', { name: 'system', text: 'MARKER-SYSTEM-42 today={{date}}' });
     calls.length = 0;
     script = () => ({ text: 'ok' });
     await ask('hello');
     assert.match(calls[0].messages[0].content, /^MARKER-SYSTEM-42 today=\d{4}-\d\d-\d\d/);
-    const st = await mgmt('prompt.reset', { name: 'system' });
+    const st = await mgmt('shell_agent_prompt', 'reset', { name: 'system' });
     assert.equal(st.prompts.find((p) => p.name === 'system').customized, false);
     calls.length = 0;
     await ask('hello again');
@@ -300,15 +299,15 @@ const cases = [
   }],
 
   ['custom instructions reach the system prompt', async () => {
-    await mgmt('config.set', { custom_instructions: 'ALWAYS-SAY-PINEAPPLE' });
+    await mgmt('shell_agent', 'config_set', { custom_instructions: 'ALWAYS-SAY-PINEAPPLE' });
     calls.length = 0;
     await ask('hi');
     assert.match(calls[0].messages[0].content, /ALWAYS-SAY-PINEAPPLE/);
-    await mgmt('config.set', { custom_instructions: '' });
+    await mgmt('shell_agent', 'config_set', { custom_instructions: '' });
   }],
 
   ['live context: typing and in-page tabs change the context with no URL change', async () => {
-    await app.invoke('nav.open', { url: `${base}/live`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/live` });
     const page = await app.pageWith(/127\.0\.0\.1:\d+\/live/);
     await page.waitForSelector('#nm');
     await sleep(800);
@@ -331,12 +330,12 @@ const cases = [
   }],
 
   ['edited context: the text the user wrote replaces the generated context', async () => {
-    const preview = await mgmt('context.preview', {});
+    const preview = await mgmt('shell_agent', 'context_preview', {});
     assert.match(preview.context, /Ada Lovelace/);
     calls.length = 0;
     script = () => ({ text: 'ok' });
     const n = await ui(() => window.__agentUi.messages.length);
-    await ui(() => window.__native.invoke('agent.run', { messages: [{ role: 'user', content: 'hi' }], context_override: 'USER-EDITED-CONTEXT-77' }));
+    await ui(() => window.__native.invoke('shell_agent', { operation: 'run', messages: [{ role: 'user', content: 'hi' }], context_override: 'USER-EDITED-CONTEXT-77' }));
     await waitFor(() => calls.length > 0);
     const system = calls[0].messages[0].content;
     assert.match(system, /USER-EDITED-CONTEXT-77/);
@@ -346,7 +345,7 @@ const cases = [
   }],
 
   ['selection: selecting page text shows it in the pane, and Explain sends it (agent mode)', async () => {
-    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/` });
     const page = await app.pageWith(/127\.0\.0\.1:\d+\/$/);
     await page.waitForSelector('#p1');
     await sleep(600);
@@ -379,7 +378,7 @@ const cases = [
     await side.waitForFunction(() => /Shipping is free/.test(document.getElementById('sel-card')?.textContent || ''), null, { timeout: 15000 });
     calls.length = 0;
     script = () => ({ text: 'TRANSLATED' });
-    await app.invoke('ai.selection.act', { intent: 'translate' });
+    await app.invoke('shell_ai', { operation: 'selection_run', intent: 'translate' });
     await waitFor(() => calls.length > 0);
     assert.match(JSON.stringify(calls[0].messages), /Shipping is free over \$50/, 'selection reaches the ask pipeline');
     await side.waitForFunction(() => /TRANSLATED/.test(document.getElementById('ask-log').textContent));
@@ -396,7 +395,7 @@ const cases = [
     script = () => ({ text: 'ok' });
     await ask('use my context');
     assert.match(calls[0].messages[0].content, /MY-EDITED-CONTEXT-55/);
-    await app.invoke('nav.open', { url: `${base}/other`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/other` });
     await app.pageWith(/127\.0\.0\.1:\d+\/other/);
     await waitFor(() => side.inputValue('#ctx-edit').then((v) => !/MY-EDITED-CONTEXT-55/.test(v)));
     calls.length = 0;
@@ -406,22 +405,22 @@ const cases = [
 
   ['pane resize: width follows the request and is clamped', async () => {
     const w0 = await ui(() => window.innerWidth);
-    const r = await ui(() => window.__native.invoke('ai.pane.resize', { width: 600 }));
+    const r = await ui(() => window.__native.invoke('shell_ai', { operation: 'pane_resize', width: 600 }));
     assert.equal(r.width, 600);
     await waitFor(() => ui(() => Math.abs(window.innerWidth - 600) <= 1));
-    const small = await ui(() => window.__native.invoke('ai.pane.resize', { width: 10 }));
+    const small = await ui(() => window.__native.invoke('shell_ai', { operation: 'pane_resize', width: 10 }));
     assert.equal(small.width, 320);
-    const big = await ui(() => window.__native.invoke('ai.pane.resize', { width: 5000 }));
+    const big = await ui(() => window.__native.invoke('shell_ai', { operation: 'pane_resize', width: 5000 }));
     assert.ok(big.width > 900, 'no fixed maximum');
-    await ui(() => window.__native.invoke('ai.pane.resize', { width: 420 }));
+    await ui(() => window.__native.invoke('shell_ai', { operation: 'pane_resize', width: 420 }));
     await waitFor(() => ui(() => Math.abs(window.innerWidth - 420) <= 1));
     assert.ok(w0 > 0);
     assert.ok(await side.locator('#resize-grip').count());
   }],
 
   ['skills: create in UI store, always-on injected, auto loaded via fetch_skill', async () => {
-    await mgmt('skill.save', { name: 'Always Polite', description: 'tone', mode: 'always-on', instructions: 'ALWAYS-POLITE-BODY', triggers: [] });
-    await mgmt('skill.save', { name: 'Tax Helper', description: 'help with tax forms', mode: 'auto', instructions: 'TAX-STEPS-BODY', triggers: ['tax'] });
+    await mgmt('shell_agent_skill', 'save', { name: 'Always Polite', description: 'tone', mode: 'always-on', instructions: 'ALWAYS-POLITE-BODY', triggers: [] });
+    await mgmt('shell_agent_skill', 'save', { name: 'Tax Helper', description: 'help with tax forms', mode: 'auto', instructions: 'TAX-STEPS-BODY', triggers: ['tax'] });
     calls.length = 0;
     script = (messages) => toolMsg(messages).length === 0
       ? { tools: [{ name: 'fetch_skill', args: { skill_id: 'tax-helper' } }] }
@@ -431,20 +430,20 @@ const cases = [
     assert.ok(calls[0].tools.some((t) => t.function.name === 'fetch_skill'));
     assert.match(last.content, /loaded: yes/);
     // Off removes it from the catalog entirely.
-    await mgmt('skill.mode', { id: 'tax-helper', mode: 'off' });
+    await mgmt('shell_agent_skill', 'mode_set', { id: 'tax-helper', mode: 'off' });
     calls.length = 0;
     script = () => ({ text: 'ok' });
     await ask('tax again');
     assert.doesNotMatch(calls[0].messages[0].content, /Tax Helper/);
-    await mgmt('skill.delete', { id: 'tax-helper' });
-    await mgmt('skill.delete', { id: 'always-polite' });
+    await mgmt('shell_agent_skill', 'delete', { id: 'tax-helper' });
+    await mgmt('shell_agent_skill', 'delete', { id: 'always-polite' });
   }],
 
   ['MCP: add server, tools listed, read-only runs, other asks approval', async () => {
-    const st = await mgmt('mcp.save', { name: 'Fake', url: `http://127.0.0.1:${mcpPort}/mcp`, trust: false, enabled: true });
+    const st = await mgmt('shell_agent_mcp', 'save', { name: 'Fake', url: `http://127.0.0.1:${mcpPort}/mcp`, trust: false, enabled: true });
     assert.equal(st.mcp.length, 1);
-    await waitFor(async () => (await mgmt('state')).mcp[0].status === 'connected');
-    const tools = (await mgmt('state')).mcp[0].tools.map((t) => t.name);
+    await waitFor(async () => (await mgmt('shell_agent', 'state_get')).mcp[0].status === 'connected');
+    const tools = (await mgmt('shell_agent', 'state_get')).mcp[0].tools.map((t) => t.name);
     assert.deepEqual(tools.sort(), ['delete_all', 'echo']);
     calls.length = 0;
     script = (messages) => toolMsg(messages).length === 0
@@ -462,13 +461,13 @@ const cases = [
     await side.waitForSelector('.ag-approve');
     await side.click('.ag-approve .is-danger');
     await waitFor(() => ui((n0) => window.__agentUi.messages.length >= n0 + 2, n));
-    await mgmt('mcp.delete', { id: 'fake' });
+    await mgmt('shell_agent_mcp', 'delete', { id: 'fake' });
   }],
 
   ['conversation history: saved, listed, loaded', async () => {
-    const list = await mgmt('conv.list', { query: '' });
+    const list = await mgmt('shell_conversation', 'list', { query: '' });
     assert.ok(list.conversations.length >= 1);
-    const doc = await mgmt('conv.load', { id: list.conversations[0].id });
+    const doc = await mgmt('shell_conversation', 'load', { id: list.conversations[0].id });
     assert.ok(Array.isArray(doc.messages) && doc.messages.length >= 2);
   }],
 
@@ -482,18 +481,19 @@ const cases = [
   }],
 
   ['settings UI: every editor renders and prompt edit saves from the textarea', async () => {
-    await side.click('#mode-bar button:has-text("⚙")');
-    await side.waitForSelector('.ag-tab');
-    for (const label of ['Skills', 'MCP', 'Prompts', 'Instructions', 'Model', 'General']) {
-      await side.click(`.ag-tab:has-text("${label}")`);
-      assert.ok(await side.$('.ag-body > *'), label);
+    await side.getByRole('button', { name: 'Settings', exact: true }).click();
+    const settings = await app.pageWith(/pages\/settings\.html/);
+    for (const label of ['Skills', 'MCP', 'Prompts', 'Instructions', 'Models', 'General']) {
+      await settings.getByRole('tab', { name: label, exact: true }).click();
+      await settings.getByRole('heading', { name: label, exact: true }).waitFor();
+      assert.ok(await settings.$('.ag-body > *'), label);
     }
-    await side.click('.ag-tab:has-text("Prompts")');
-    const ta = side.locator('.ag-edit').first();
+    await settings.getByRole('tab', { name: 'Prompts', exact: true }).click();
+    const ta = settings.locator('.ag-edit').first();
     await ta.fill('UI-EDITED {{date}}');
-    await side.click('.ag-card button:has-text("Save")');
-    await waitFor(async () => (await mgmt('state')).prompts.some((p) => p.customized && /UI-EDITED/.test(p.text)));
-    await mgmt('prompt.reset', { name: (await mgmt('state')).prompts.find((p) => p.customized).name });
+    await settings.locator('.ag-card').first().getByRole('button', { name: 'Save', exact: true }).click();
+    await waitFor(async () => (await mgmt('shell_agent', 'state_get')).prompts.some((p) => p.customized && /UI-EDITED/.test(p.text)));
+    await mgmt('shell_agent_prompt', 'reset', { name: (await mgmt('shell_agent', 'state_get')).prompts.find((p) => p.customized).name });
   }],
 ];
 

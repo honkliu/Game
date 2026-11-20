@@ -1,6 +1,6 @@
 // Application state and the actions that change it. One transcript holds both kinds of
 // turn: with the Agent switch on a message runs the tool loop (`agent.run`); off, it goes
-// through the cited-answer pipeline (`ai.ask`). The shell owns the facts (page, tabs,
+// through the cited-answer pipeline (`shell_ai` ask). The shell owns the facts (page, tabs,
 // selection, content); this module only mirrors them and decides what the user sees.
 
 import { batch, computed, signal } from '@preact/signals';
@@ -95,7 +95,7 @@ function observeSessionEvent(payload: { state_seq?: number }) {
 
 export async function syncSession() {
   try {
-    const snapshot = await native.invoke<{ sequence: number; turns: Turn[] }>('ai.session');
+    const snapshot = await native.invoke<{ sequence: number; turns: Turn[] }>('shell_ai', { operation: 'session_get' });
     if (snapshot.sequence < sessionSeq) return;
     sessionSeq = snapshot.sequence;
     const previous = turns.value;
@@ -138,7 +138,7 @@ export async function loadPreview(depth = 0) {
   const sig = contextSignature(ctx.value);
   ctxPanel.value = { ...ctxPanel.value, open: true, loading: true, error: undefined };
   try {
-    const r = await call<{ context: string; system: string }>('context.preview', { loaded_skills: loadedSkills });
+    const r = await call<{ context: string; system: string }>('shell_agent', 'context_preview', { loaded_skills: loadedSkills });
     ctxPanel.value = { open: ctxPanel.value.open, loading: false, context: r.context, system: r.system, baseSig: sig };
     // The page moved while this was rendering; render again (a few times at most).
     if (ctxPanel.value.open && depth < 3 && contextSignature(ctx.value) !== sig) void loadPreview(depth + 1);
@@ -183,7 +183,7 @@ export function applyContext(next: AgentContext) {
 
 export async function refreshContext() {
   try {
-    applyContext(await native.invoke<AgentContext>('agent.context', {}));
+    applyContext(await native.invoke<AgentContext>('shell_agent', { operation: 'context_get' }));
   } catch {
     /* the host is closing */
   }
@@ -191,7 +191,7 @@ export async function refreshContext() {
 
 export async function refreshStatus() {
   try {
-    const s = await native.invoke<AiStatus>('ai.status', {});
+    const s = await native.invoke<AiStatus>('shell_ai', { operation: 'status_get' });
     aiStatus.value = s;
     applyStatus(s);
   } catch {
@@ -225,7 +225,7 @@ export function applyModels(entries: ListedModel[]) {
 
 export async function refreshAgentState() {
   try {
-    agentState.value = await call<AgentState>('state');
+    agentState.value = await call<AgentState>('shell_agent', 'state_get');
   } catch {
     /* engine not reachable yet */
   }
@@ -268,7 +268,7 @@ async function sendAgent(content: string) {
   pushTurn(turn);
   setStatus('Starting…');
   try {
-    const r = await native.invoke<{ run_id: number }>('agent.run', {
+    const r = await native.invoke<{ run_id: number }>('shell_agent', { operation: 'run',
       messages: toMessages(turns.value).map((m) => ({ role: m.role, content: m.content })),
       loaded_skills: loadedSkills,
       model: model.value || undefined,
@@ -288,7 +288,7 @@ async function sendAsk(question: string, over?: { intent: Intent; selection?: bo
   if (!question && !(useSel && useIntent !== 'ask' && useIntent !== 'act')) return;
   let res: { accepted?: boolean; reason?: string; turn_id: number; task_id?: number };
   try {
-    res = await native.invoke('ai.ask', {
+    res = await native.invoke('shell_ai', { operation: 'ask',
       question, intent: useIntent, selection: useSel, model: model.value || undefined,
       local_only: localOnly.value, tabs: extraTabs.value,
     });
@@ -307,10 +307,10 @@ async function sendAsk(question: string, over?: { intent: Intent; selection?: bo
 export async function stop() {
   const running = turns.value.find((t) => t.kind === 'agent' && t.status === 'running');
   try {
-    if (running) await native.invoke('agent.stop', {});
+    if (running) await native.invoke('shell_agent', { operation: 'stop' });
     else {
       const pending = turns.value.find((t): t is AskTurn => t.kind === 'ask' && t.status === 'pending');
-      await native.invoke('ai.stop', { turn_id: pending?.turnId });
+      await native.invoke('shell_ai', { operation: 'stop', turn_id: pending?.turnId });
     }
     setStatus('Stopping…');
   } catch (e) {
@@ -324,7 +324,7 @@ export function approve(callId: string, allow: boolean) {
       ? { ...t, tools: t.tools.map((r) => (r.id === callId && r.approval ? { ...r, approval: { ...r.approval, answered: allow ? 'allowed' : 'denied' } } : r)) }
       : t,
   );
-  native.invoke('agent.approve', { call_id: callId, allow }).catch(() => undefined);
+  native.invoke('shell_agent', { operation: 'approval_resolve', call_id: callId, allow }).catch(() => undefined);
 }
 
 export function setNavAuto(on: boolean) {
@@ -333,7 +333,7 @@ export function setNavAuto(on: boolean) {
 }
 
 export function openLink(url: string) {
-  native.invoke('nav.open', { url, disposition: 'current' }).catch((e) => setStatus(errText(e), 'error'));
+  native.invoke('shell_page_navigate', { url }).catch((e) => setStatus(errText(e), 'error'));
 }
 
 export function setAgentOn(on: boolean) {
@@ -355,7 +355,7 @@ async function autosave() {
   if (!list.length) return;
   if (!convId) convId = 'c' + Date.now().toString(36);
   try {
-    await call('conv.save', { id: convId, doc: { title: titleOf(), updated: Date.now(), messages: list, loaded_skills: loadedSkills } });
+    await call('shell_conversation', 'save', { id: convId, doc: { title: titleOf(), updated: Date.now(), messages: list, loaded_skills: loadedSkills } });
   } catch (e) {
     setStatus('Could not save this conversation: ' + errText(e), 'warn');
   }
@@ -371,23 +371,23 @@ export function newChat() {
   convId = null;
   loadedSkills = [];
   setStatus('');
-  native.invoke('ai.history.clear', {}).catch(() => undefined);
+  native.invoke('shell_ai', { operation: 'history_clear' }).catch(() => undefined);
   focusInput();
 }
 
 export async function listConversations(query: string): Promise<ConversationRow[]> {
-  return (await call<{ conversations?: ConversationRow[] }>('conv.list', { query })).conversations ?? [];
+  return (await call<{ conversations?: ConversationRow[] }>('shell_conversation', 'list', { query })).conversations ?? [];
 }
 
 export async function deleteConversation(id: string) {
-  await call('conv.delete', { id });
+  await call('shell_conversation', 'delete', { id });
 }
 
 export async function openConversation(id: string) {
   if (busy.value) return;
   try {
-    const doc = await call<{ messages?: never[]; loaded_skills?: string[] }>('conv.load', { id });
-    await native.invoke('ai.history.clear', {});
+    const doc = await call<{ messages?: never[]; loaded_skills?: string[] }>('shell_conversation', 'load', { id });
+    await native.invoke('shell_ai', { operation: 'history_clear' });
     turns.value = fromMessages(Array.isArray(doc.messages) ? doc.messages : [], nextId);
     loadedSkills = Array.isArray(doc.loaded_skills) ? doc.loaded_skills : [];
     convId = id;
@@ -402,9 +402,9 @@ export async function saveAsSkill() {
   if (!list.length) return setStatus('Have a conversation first, then save it as a skill.', 'warn');
   setStatus('Drafting a skill from this conversation…');
   try {
-    const draft = await call('skill.distill', { messages: list.map((m) => ({ role: m.role, content: m.content })) });
+    const draft = await call('shell_agent_skill', 'distill', { messages: list.map((m) => ({ role: m.role, content: m.content })) });
     setStatus('');
-    await native.invoke('settings.open', { section: 'skills', skill_draft: draft });
+    await native.invoke('shell_settings', { operation: 'open', section: 'skills', skill_draft: draft });
   } catch (e) {
     setStatus('Could not draft a skill: ' + errText(e), 'error');
   }
@@ -413,7 +413,7 @@ export async function saveAsSkill() {
 export const skillDraft = signal<any>(null);
 
 export function openSettings(tab: SettingsTab) {
-  native.invoke('settings.open', { section: tab }).catch(error => setStatus(errText(error), 'error'));
+  native.invoke('shell_settings', { operation: 'open', section: tab }).catch(error => setStatus(errText(error), 'error'));
 }
 
 // ── selection routing ────────────────────────────────────────────────────
@@ -532,7 +532,7 @@ export function startStore() {
   on('sidebar.selection', (p) => void onSidebarSelection(p?.intent));
   const pendingConversation = async () => {
     try {
-      const { id } = await native.invoke<{ id?: string }>('ai.conversation.pending');
+      const { id } = await native.invoke<{ id?: string }>('shell_ai', { operation: 'conversation_pending_get' });
       if (id) await openConversation(id);
     } catch (e) { setStatus(errText(e), 'error'); }
   };
@@ -562,7 +562,7 @@ export function startStore() {
 
   void (async () => {
     await Promise.all([refreshContext(), refreshStatus(), refreshAgentState(), syncSession()]);
-    native.invoke('ai.models', {}).catch(() => undefined);
+    native.invoke('shell_ai', { operation: 'models_list' }).catch(() => undefined);
     await pendingConversation();
   })();
 }

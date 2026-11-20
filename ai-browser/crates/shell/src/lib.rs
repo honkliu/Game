@@ -18,6 +18,7 @@
 //! - `webview2` the runtime gate
 
 pub mod ai;
+pub mod api_server;
 pub mod app;
 pub mod bookmarks;
 pub mod downloads;

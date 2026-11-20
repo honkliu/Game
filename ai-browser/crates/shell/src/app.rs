@@ -48,6 +48,9 @@ use crate::tabs::{self, Group, GroupColor, GroupId, Tab, TabId, TabSet};
 use crate::ui;
 
 mod agent_glue;
+mod api;
+mod dispatch;
+mod operations;
 pub(crate) mod devtools;
 mod ai_glue;
 mod canvas;
@@ -212,6 +215,7 @@ pub struct AppState {
     driver_snaps: Option<Vec<Value>>,
     /// Everything about AI work in flight; see `ai::session` and `app::ai_glue`.
     ai: crate::ai::session::AiSession,
+    api: api::State,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -228,6 +232,7 @@ struct FindResult {
 pub enum AppMessage {
     /// A raw IPC envelope from the shell or overlay.
     Ipc(Surface, String),
+    ApiRequest(crate::api_server::ApiRequest),
     /// A page webview changed its document title.
     TabTitle(TabId, String),
     /// A page webview started a navigation to `url`.
@@ -281,10 +286,10 @@ pub enum AppMessage {
     /// Time to read an extra tab for this task (it was woken and needed a moment to load).
     AiReadExtra(u64, TabId),
     /// Run (or retry) the page script of a pending agent tool call, by utility request id.
-    AgentEval(u64),
+    ApiEval(u64),
     /// A page script of an agent tool call returned (raw JSON text of its result).
-    AgentEvalDone(u64, String),
-    DevtoolsDone(u64, u64, Result<String, String>),
+    ApiEvalDone(u64, String),
+    DevtoolsDone(u64, Result<String, String>),
     /// The active page's content was read for an agent job (None: it could not be, or
     /// took too long, and the job goes ahead without it).
     AgentJob(u64, Option<String>),
@@ -371,11 +376,11 @@ impl AppState {
             "groups": self.groups_json(),
             "active_tab_id": self.active.map(|a| a.0),
             "closed_count": self.tabs.closed_len(),
-            "canvas": self.canvas_payload(),
+            "canvas": self.wv_canvas_state_get(),
         })
     }
 
-    fn settings_payload(&self) -> Value {
+    fn wv_settings_state_get(&self) -> Value {
         json!({
             "theme": self.settings.theme,
             "system_dark": self.system_dark,
@@ -461,6 +466,11 @@ impl AppState {
     }
 
     fn reply(&mut self, source: Surface, r: Reply) {
+        if let Surface::ApiCall(id) = source {
+            if r.ok { self.wv_reply_ok(id, r.data.unwrap_or(Value::Null)); }
+            else { self.wv_reply_err(id, r.error.unwrap_or_else(|| "operation failed".into())); }
+            return;
+        }
         let Ok(body) = serde_json::to_string(&r) else { return };
         let script = format!("window.__native&&window.__native._reply({body})");
         let view = match source {
@@ -468,6 +478,7 @@ impl AppState {
             Surface::Overlay => self.overlay.as_ref(),
             Surface::Sidebar => self.sidebar.as_ref(),
             Surface::Settings(id) => self.settings_view(id),
+            Surface::ApiCall(_) => None,
         };
         if let Some(view) = view {
             let _ = view.evaluate_script(&script);
@@ -578,7 +589,7 @@ impl AppState {
     /// A page asked to open a link in a new window. Inside the canvas on screen it
     /// fills the next empty cell (the canvas stays whole); otherwise it is a tab.
     /// Steps (or resets) one tab's page zoom; the chrome scales with it (§8, clamped 0.8–2.0).
-    pub(super) fn zoom_tab(&mut self, id: TabId, name: &str) {
+    pub(super) fn wv_page_zoom_step(&mut self, id: TabId, name: &str) {
         self.zoom_request = self.zoom_request.wrapping_add(1);
         let cur = self.tabs.get(id).map(|t| t.zoom).unwrap_or(1.0);
         let factor = match name {
@@ -587,7 +598,7 @@ impl AppState {
             _ => 1.0,
         };
         if !factor.is_finite() || factor <= 0.0 { return; }
-            self.apply_zoom(id, factor);
+            self.wv_page_zoom_set(id, factor);
             if let Some(t) = self.tabs.get_mut(id) {
                 t.zoom = factor;
             }
@@ -595,7 +606,7 @@ impl AppState {
             self.emit("shell.ui_scale", json!({ "scale": factor.clamp(0.8, 2.0) }));
         }
 
-    fn fit_page_width(&mut self, id: TabId) -> Result<(), String> {
+    fn wv_page_zoom_fit(&mut self, id: TabId) -> Result<(), String> {
         self.zoom_request = self.zoom_request.wrapping_add(1);
         #[cfg(windows)]
         if let Some(pdf) = self.live.get(&id).and_then(|live| live.native_pdf.as_ref()) {
@@ -607,13 +618,13 @@ impl AppState {
             return Ok(());
         }
         if self.is_viewer_tab(id) {
-            self.zoom_tab(id, "zoom_reset");
+            self.wv_page_zoom_step(id, "zoom_reset");
             return Ok(());
         }
         if !self.live.contains_key(&id) {
             return Err("The page is not loaded.".into());
         }
-        self.zoom_tab(id, "zoom_reset");
+        self.wv_page_zoom_step(id, "zoom_reset");
         self.measure_fit_width(id, 1.0, 0)
     }
 
@@ -713,7 +724,7 @@ impl AppState {
             self.emit("tab.zoom_changed", json!({ "tab_id": id.0, "factor": factor }));
         }
 
-        fn apply_zoom(&self, id: TabId, factor: f64) {
+        fn wv_page_zoom_set(&self, id: TabId, factor: f64) {
             let Some(live) = self.live.get(&id) else { return };
             if self.is_viewer_tab(id) {
                 let _ = live.webview.zoom(1.0);
@@ -723,18 +734,18 @@ impl AppState {
             }
         }
 
-    pub(super) fn open_from_page(&mut self, opener: TabId, url: &str) {
+    pub(super) fn wv_page_popup_open(&mut self, opener: TabId, url: &str) {
         if let Some(canvas) = self.shown_canvas_of(opener) {
             let target = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()).and_then(|cv| cv.popup_target(opener));
             if let Some(cell) = target {
-                self.canvas_add_popup(canvas, cell, url);
+                self.wv_canvas_popup_open(canvas, cell, url);
                 return;
             }
         }
-        self.create_tab(url, Some(opener), true);
+        self.wv_tab_open(url, Some(opener), true);
     }
 
-    fn create_tab(&mut self, url: &str, after: Option<TabId>, activate: bool) -> TabId {
+    fn wv_tab_open(&mut self, url: &str, after: Option<TabId>, activate: bool) -> TabId {
         let id = self.tabs.alloc_id();
         self.tabs.insert_after(after, Tab::new(id, url));
         if let Some(t) = self.tabs.get(id) {
@@ -746,13 +757,13 @@ impl AppState {
         // would cost a renderer immediately and then be slept on the next
         // activation anyway.
         if activate {
-            self.activate(id);
+            self.wv_tab_activate(id);
         }
         self.emit_tabs();
         id
     }
 
-    fn activate(&mut self, id: TabId) {
+    fn wv_tab_activate(&mut self, id: TabId) {
         let Some(tab) = self.tabs.get(id) else { return };
         // A canvas, or a page inside one, is shown as the whole grid.
         if let Some(parent) = tab.member_of {
@@ -765,7 +776,7 @@ impl AppState {
         }
         self.canvas_shown = None;
         // Discarded tabs are rebuilt; warm tabs keep their live document and history.
-        self.build_webview(id);
+        self.wv_webview_create(id);
         if let Some(live) = self.live.get_mut(&id) {
             live.last_used = Instant::now();
         }
@@ -789,7 +800,7 @@ impl AppState {
                 self.note(format!("set_visible({}): {e}", other.0));
             }
         }
-        self.sleep_background_tabs(&[id]);
+        self.wv_webviews_suspend_background(&[id]);
         let title = self.tabs.get(id).map(|t| t.display_title()).unwrap_or_default();
         self.emit(
             "tab.activated",
@@ -800,7 +811,7 @@ impl AppState {
     }
 
     /// Keep a small warm pool; editing, media, downloads and AI work take precedence.
-    fn sleep_background_tabs(&mut self, keep: &[TabId]) {
+    fn wv_webviews_suspend_background(&mut self, keep: &[TabId]) {
         if !crate::ai::mode::tabs_may_sleep() {
             return;
         }
@@ -816,7 +827,7 @@ impl AppState {
                     || self.download_owners.values().any(|owner| owner == id)
                     || self.ai.agent_run != 0
                     || self.ai.tasks.values().any(|task| task.tab == id.0 || task.extra_tabs.contains(&id.0))
-                    || self.ai.agent_evals.values().any(|eval| eval.tab == id.0),
+                    || self.api.evals.values().any(|eval| eval.tab == id.0),
             }
         }).collect();
         let victims = crate::tab_lifecycle::eviction_candidates(candidates,
@@ -838,18 +849,18 @@ impl AppState {
         }
     }
 
-    fn close_tab(&mut self, id: TabId) {
+    fn wv_tab_close(&mut self, id: TabId) {
         // Closing a page inside a canvas clears its cell; the canvas itself closes
         // its pages first.
         if let Some(parent) = self.tabs.get(id).and_then(|t| t.member_of) {
-            self.canvas_close_member(parent, id);
+            self.wv_canvas_member_close(parent, id);
             return;
         }
         let Some(pos) = self.tabs.position(id) else { return };
         let is_canvas = self.canvas_of(id).is_some();
         let was_active = if is_canvas { self.canvas_shown == Some(id) } else { self.active == Some(id) };
         if is_canvas {
-            self.canvas_close(id);
+            self.wv_canvas_close(id);
             if was_active {
                 self.canvas_shown = None;
             }
@@ -870,11 +881,11 @@ impl AppState {
                 .or_else(|| self.tabs.last());
             self.active = None;
             if let Some(n) = next {
-                self.activate(n);
+                self.wv_tab_activate(n);
             }
         }
         if self.tabs.is_empty() {
-            self.create_tab(tabs::NEWTAB_URL, None, true);
+            self.wv_tab_open(tabs::NEWTAB_URL, None, true);
         }
         self.emit_tabs();
     }
@@ -882,7 +893,7 @@ impl AppState {
     fn step_tab(&mut self, delta: isize) {
         if let Some(cur) = self.active.or(self.canvas_shown) {
             if let Some(next) = self.tabs.step(cur, delta) {
-                self.activate(next);
+                self.wv_tab_activate(next);
             }
         }
     }
@@ -900,7 +911,7 @@ impl AppState {
 
     /// Start a navigation in a tab. `typed` marks an omnibox-initiated visit so
     /// history ranking can favour it.
-    fn navigate(&mut self, tab: TabId, url: &str, typed: bool) {
+    fn wv_page_navigate(&mut self, tab: TabId, url: &str, typed: bool) {
         let resolved = self.resolve_url(url);
         let Some(t) = self.tabs.get_mut(tab) else { return };
         if t.canvas.is_some() {
@@ -964,7 +975,7 @@ impl AppState {
         }
     }
 
-    fn open_palette(&mut self) {
+    fn wv_ui_palette_open(&mut self) {
         let l = layout::compute(
             self.viewport().0,
             self.viewport().1,
@@ -1006,7 +1017,7 @@ impl AppState {
         );
     }
 
-    fn close_overlay(&mut self) {
+    fn wv_ui_overlay_close(&mut self) {
         self.overlay_rect = Overlay::Closed;
         if let Some(ov) = self.overlay.as_ref() {
             let _ = ov.set_visible(false);
@@ -1084,7 +1095,7 @@ impl AppState {
                 "page_y": l.page_y,
                 "page_w": l.page_w,
                 "page_h": l.page_h,
-                "canvas": self.canvas_payload(),
+                "canvas": self.wv_canvas_state_get(),
             }),
         );
     }
@@ -1096,719 +1107,60 @@ impl AppState {
             Ok(r) => r,
             Err(e) => return Some(Reply::err(None, format!("bad envelope: {e}"))),
         };
-        let id = req.id;
-        match self.run_from(&req, source) {
-            Ok(data) => match data {
-                Some(d) => Some(Reply::ok(id, d)),
-                None if req.cmd == "omnibox.query" => None,
-                None => Some(Reply::empty(id)),
-            },
-            Err(e) => {
-                self.note(format!("{} failed: {e}", req.cmd));
-                Some(Reply::err(id, e))
-            }
+        let id = self.wv_api_begin(crate::api_server::ApiCaller { id: 0, builtin: true }, api::ReplyTarget::Ui(source, req.id));
+        let previous = std::mem::replace(&mut self.api.current, id);
+        let result = self.wv_execute(&req, source);
+        self.api.current = previous;
+        let pending = self.api.pending.get(&id)?;
+        if pending.deferred && result.is_ok() { return None; }
+        self.api.pending.remove(&id);
+        match result {
+            Ok(Some(value)) => Some(Reply::ok(req.id, value)),
+            Ok(None) => Some(Reply::empty(req.id)),
+            Err(error) => Some(Reply::err(req.id, error)),
         }
     }
 
     fn run(&mut self, req: &Request) -> Result<Option<Value>, String> {
-        self.run_from(req, Surface::Shell)
+        self.wv_execute(req, Surface::Shell)
     }
 
-    fn run_from(&mut self, req: &Request, source: Surface) -> Result<Option<Value>, String> {
-        let p = &req.payload;
-        let id_arg = || p.get("tab_id").and_then(Value::as_u64).map(TabId).or(self.active);
-        match req.cmd.as_str() {
-            "shell.ready" => {
-                self.shell_ready_ms = Some(elapsed_ms(self.start_tick));
-                self.note("shell ready");
-                self.emit_tabs();
-                self.emit("state.settings", self.settings_payload());
-                self.emit("state.downloads", json!({ "downloads": self.downloads }));
-                self.emit("app.ready", json!({}));
-                self.emit_window_state();
-                self.apply_layout();
-                // The shell is painted, so the rail is already on screen (W1).
-                // Now create the active tab's webview and load its URL: this is
-                // the ordering §6.4 prescribes, and it is why navigation is not
-                // done during startup.
-                if let Some(canvas) = self.canvas_shown {
-                    self.show_canvas(canvas, self.active);
-                } else if let Some(id) = self.active {
-                    self.build_webview(id);
-                    let url = self.tabs.get(id).map(|t| t.url.clone()).unwrap_or_default();
-                    self.navigate(id, &url, false);
-                }
-                // The driver runs after the first navigation has had a moment
-                // to commit, on the event loop, so state matches a live session.
-                if !self.driver_name.is_empty() && self.driver_step == 0 && self.driver_snaps.is_none() {
-                    self.driver_snaps = Some(Vec::new());
-                    let proxy = self.proxy();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(Duration::from_millis(2_000));
-                        // `driver_step` is the 0-based index of the step to run next
-                        // and `DriverStep(i)` is dropped unless `i` equals it, so
-                        // waking with 1 skipped every scenario's first step and then
-                        // wedged the driver: no step ever ran and the process never
-                        // exited.
-                        let _ = proxy.send_event(AppMessage::DriverStep(0));
-                    });
-                }
-                Ok(None)
-            }
-            "ai.ask" => self.ai_ask(p),
-            "ai.stop" => self.ai_stop(p),
-            "ai.status" => Ok(Some(self.ai_status())),
-            "ai.session" => Ok(Some(self.ai.ui.snapshot())),
-            "ai.models" => self.ai_models(),
-            "ai.config.set" => self.ai_config_set(p),
-            "ai.provider.set" => self.ai_provider_set(p),
-            "ai.provider.delete" => self.ai_provider_delete(p),
-            "ai.conversation.open" => {
-                if self.ai.agent_run != 0 || !self.ai.tasks.is_empty() || !self.ai.agent_jobs.is_empty() {
-                    return Err("stop the current task before opening a conversation".into());
-                }
-                let id = p.get("id").and_then(Value::as_str).ok_or("conversation ID required")?;
-                self.settings_page.conversation = Some(id.to_string());
-                self.ai_show_pane();
-                self.emit_raw("sidebar", "conversation.open", json!({}));
-                Ok(None)
-            }
-            "ai.conversation.pending" => Ok(Some(json!({ "id": self.settings_page.conversation.take() }))),
-            "ai.history.clear" => self.ai_history_clear(),
-            "agent.run" => self.agent_run(p),
-            "agent.stop" => self.agent_stop(),
-            "agent.approve" => self.agent_approve(p),
-            "agent.call" => self.agent_call(p, source),
-            "agent.context" => Ok(Some(self.agent_context())),
-            "ai.pane.resize" => {
-                let wanted = p.get("width").and_then(Value::as_f64).ok_or("ai.pane.resize: missing width")?.round() as i32;
-                let l = self.layout();
-                let rail = self.settings.tabs().rail_w();
-                let w = layout::set_ai_width(wanted, l.shell_w, rail);
-                self.apply_layout();
-                Ok(Some(json!({ "width": w })))
-            }
-            "ai.citation.scroll" => self.ai_citation_scroll(p),
-            "ai.selection.act" => self.ai_selection_act(p),
-            "nav.open" => {
-                let url = p.get("url").and_then(Value::as_str).ok_or("nav.open: missing url")?.to_string();
-                match p.get("disposition").and_then(Value::as_str).unwrap_or("current") {
-                    "new_tab" => {
-                        self.create_tab(&url, self.active, true);
-                    }
-                    "new_tab_background" => {
-                        self.create_tab(&url, self.active, false);
-                    }
-                    _ => {
-                        if let Some(id) = id_arg() {
-                            // A `nav.open` from the shell is a user choice: a
-                            // new-tab tile, a recent/history row, a menu item.
-                            // It outranks a followed link in `history::score`.
-                            self.navigate(id, &url, true);
-                        } else if let Some(canvas) = self.canvas_shown {
-                            let cell = self.canvas_of(canvas).map(|cv| cv.focus).unwrap_or(0);
-                            self.canvas_set(&json!({ "canvas_id": canvas.0, "cell": cell, "url": url }))?;
-                        }
-                    }
-                };
-                Ok(None)
-            }
-            "nav.back" | "nav.forward" | "nav.reload" | "nav.reload_ignoring_cache" | "nav.stop" => {
-                let Some(id) = id_arg() else { return Ok(None) };
-                let Some(live) = self.live.get(&id) else { return Ok(None) };
-                let r = match req.cmd.as_str() {
-                    "nav.back" => live.webview.go_back(),
-                    "nav.forward" => live.webview.go_forward(),
-                    "nav.reload" | "nav.reload_ignoring_cache" => live.webview.reload(),
-                    _ => live.webview.evaluate_script("window.stop()"),
-                };
-                if let Err(e) = r {
-                    return Err(format!("{}: {e}", req.cmd));
-                }
-                Ok(None)
-            }
-            "canvas.create" => self.canvas_create(p),
-            "canvas.set" => self.canvas_set(p),
-            "canvas.focus" => self.canvas_focus(p),
-            "canvas.zoom" => self.canvas_zoom(p),
-            "canvas.layout" => self.canvas_layout(p),
-            "canvas.resize" => self.canvas_resize(p),
-            "page.dismiss_popups" => {
-                let targets = self.dismiss_targets(p)?;
-                self.ai.agent_job_seq += 1;
-                self.dismiss_start((1 << 62) + self.ai.agent_job_seq, targets, false);
-                Ok(None)
-            }
-            "shell.menu" => {
-                self.menu_open = p.get("open").and_then(Value::as_bool).unwrap_or(false);
-                self.apply_layout();
-                Ok(None)
-            }
-            "canvas.clear" => self.canvas_clear(p),
-            "canvas.state" => Ok(Some(self.canvas_payload())),
-            "tab.select" => {
-                if let Some(id) = id_arg() {
-                    self.activate(id);
-                }
-                Ok(None)
-            }
-            "tab.close" => {
-                if let Some(id) = id_arg().or(self.canvas_shown) {
-                    self.close_tab(id);
-                }
-                Ok(None)
-            }
-            "tab.new" => {
-                self.create_tab(tabs::NEWTAB_URL, self.active, true);
-                Ok(None)
-            }
-            "tab.duplicate" => {
-                if let Some(url) = self.active_tab().map(|t| t.url.clone()) {
-                    self.create_tab(&url, self.active, true);
-                }
-                Ok(None)
-            }
-            "tab.reopen_closed" => {
-                if let Some(c) = self.tabs.take_closed() {
-                    let id = self.tabs.alloc_id();
-                    let mut tab = Tab::new(id, &c.url);
-                    tab.pinned = c.pinned;
-                    tab.group_id = c.group_id;
-                    self.tabs.insert_at(c.index, tab);
-                    self.build_webview(id);
-                    self.activate(id);
-                    self.emit_tabs();
-                }
-                Ok(None)
-            }
-            "tab.pin" | "tab.unpin" => {
-                if let Some(id) = id_arg() {
-                    if let Some(t) = self.tabs.get_mut(id) {
-                        t.pinned = req.cmd == "tab.pin";
-                    }
-                    self.emit_tabs();
-                }
-                Ok(None)
-            }
-            "tab.move" => {
-                let Some(id) = id_arg() else { return Err("tab.move: missing tab_id".into()) };
-                let before = p.get("before_tab_id").and_then(Value::as_u64).map(TabId);
-                let after = p.get("after_tab_id").and_then(Value::as_u64).map(TabId);
-                let group = p.get("group_id").map(|v| v.as_u64().map(GroupId));
-                let moved = self.tabs.move_tab(id, before, after, Some(group.flatten()));
-                if moved {
-                    self.emit_tabs();
-                }
-                Ok(Some(json!({ "moved": moved })))
-            }
-            "tab.bookmark" => {
-                let Some(t) = self.active_tab().cloned() else { return Ok(None) };
-                let on = self
-                    .store
-                    .toggle_bookmark(&t.url, &t.display_title(), ipc::now_secs())
-                    .map_err(|e| e.to_string())?;
-                self.emit("state.tabs", self.tabs_payload());
-                Ok(Some(json!({ "bookmarked": on })))
-            }
-            "tab.bookmark_all" => {
-                let pairs: Vec<(String, String)> = self
-                    .tabs
-                    .tabs()
-                    .iter()
-                    .map(|t| (t.url.clone(), t.display_title()))
-                    .collect();
-                let now = ipc::now_secs();
-                for (url, title) in pairs {
-                    self.store.add_bookmark(&url, &title, now).map_err(|e| e.to_string())?;
-                }
-                Ok(None)
-            }
-            "tab.zoom_set" | "tab.zoom_reset" => {
-                self.zoom_request = self.zoom_request.wrapping_add(1);
-                let Some(id) = id_arg() else { return Ok(None) };
-                let factor = if req.cmd == "tab.zoom_reset" {
-                    1.0
-                } else {
-                    p.get("factor").and_then(Value::as_f64)
-                        .filter(|factor| factor.is_finite() && *factor > 0.0)
-                        .ok_or("Zoom must be a positive finite number.")?
-                };
-                if self.live.contains_key(&id) {
-                    self.apply_zoom(id, factor);
-                }
-                if let Some(t) = self.tabs.get_mut(id) {
-                    t.zoom = factor;
-                }
-                self.emit("tab.zoom_changed", json!({ "tab_id": id.0, "factor": factor }));
-                self.mark_dirty();
-                Ok(Some(json!({ "factor": factor })))
-            }
-            "group.create" => {
-                let gid = self.tabs.alloc_group_id();
-                let color = self.groups.last().map(|g| g.color.next()).unwrap_or(GroupColor::Blue);
-                self.groups.push(Group {
-                    id: gid,
-                    name: p.get("name").and_then(Value::as_str).unwrap_or("Group").to_string(),
-                    color,
-                    collapsed: false,
-                });
-                if let Some(ids) = p.get("tab_ids").and_then(Value::as_array) {
-                    for v in ids.iter().filter_map(Value::as_u64) {
-                        if let Some(t) = self.tabs.get_mut(TabId(v)) {
-                            t.group_id = Some(gid);
-                        }
-                    }
-                }
-                self.emit("state.groups", self.groups_json());
-                self.emit_tabs();
-                Ok(Some(json!({ "group_id": gid.0 })))
-            }
-            "group.rename" | "group.set_color" | "group.collapse" | "group.delete" => {
-                let gid = p.get("group_id").and_then(Value::as_u64).map(GroupId);
-                let Some(pos) = gid.and_then(|g| self.groups.iter().position(|x| x.id == g)) else {
-                    return Err("unknown group".into());
-                };
-                match req.cmd.as_str() {
-                    "group.rename" => {
-                        self.groups[pos].name = p.get("name").and_then(Value::as_str).unwrap_or("").to_string()
-                    }
-                    "group.collapse" => {
-                        self.groups[pos].collapsed = p.get("collapsed").and_then(Value::as_bool).unwrap_or(false)
-                    }
-                    "group.set_color" => {
-                        self.groups[pos].color = match p.get("color").and_then(Value::as_str) {
-                            Some("green") => GroupColor::Green,
-                            Some("amber") => GroupColor::Amber,
-                            Some("red") => GroupColor::Red,
-                            Some("violet") => GroupColor::Violet,
-                            Some("slate") => GroupColor::Slate,
-                            _ => GroupColor::Blue,
-                        }
-                    }
-                    _ => {
-                        let g = self.groups.remove(pos);
-                        for t in self.tabs.tabs_mut() {
-                            if t.group_id == Some(g.id) {
-                                t.group_id = None;
-                            }
-                        }
-                    }
-                }
-                self.emit("state.groups", self.groups_json());
-                self.emit_tabs();
-                Ok(None)
-            }
-            "find.start" | "find.query" | "find.next" | "find.prev" | "find.stop" => {
-                self.find_query(&req.cmd, p)
-            }
-            "omnibox.query" => {
-                let text = p.get("text").and_then(Value::as_str).unwrap_or("");
-                let limit = p.get("limit").and_then(Value::as_u64).unwrap_or(8).clamp(1, 40) as usize;
-                let res = self.omnibox_results(text, limit);
-                if let Some(worker) = &self.omnibox_worker {
-                    if worker.send(omnibox_worker::Query { source, id: req.id, text: text.chars().take(2_000).collect(),
-                        limit, base: res.clone() }).is_ok() {
-                        return Ok(None);
-                    }
-                }
-                Ok(Some(res))
-            }
-            "omnibox.activate" => {
-                let text = p.get("text").and_then(Value::as_str).unwrap_or("").to_string();
-                let row_url = p.get("url").and_then(Value::as_str).map(str::to_string);
-                let verb = p.get("verb").and_then(Value::as_str).map(str::to_string);
-                self.close_overlay();
-                if let Some(verb) = verb {
-                    self.run_verb(&verb);
-                    return Ok(None);
-                }
-                let disposition = p.get("disposition").and_then(Value::as_str).unwrap_or("current");
-                if let Some(url) = row_url {
-                    self.open_url_with(url, disposition);
-                    return Ok(None);
-                }
-                match omnibox::classify(&text) {
-                    Intent::Command { verb, .. } => self.run_verb(&verb),
-                    Intent::Find(q) => {
-                        self.emit("shell.focus_find", json!({ "query": q }));
-                    }
-                    Intent::Ask { question, intent, all_tabs } => {
-                        self.ai_show_pane();
-                        if let Err(e) = self.ai_ask(&json!({ "question": question, "intent": intent, "tabs": if all_tabs { "all" } else { "" } })) {
-                            self.emit("ai.notice", json!({ "text": e }));
-                        }
-                    }
-                    Intent::Url(u) => self.open_url_with(u, disposition),
-                    Intent::Search(q) => {
-                        let url = omnibox::search_url(&self.settings.search_template, &q);
-                        self.open_url_with(url, disposition);
-                    }
-                }
-                Ok(None)
-            }
-            "history.query" => {
-                let tokens = p.get("tokens").and_then(Value::as_str).unwrap_or("");
-                let limit = p.get("limit").and_then(Value::as_u64).unwrap_or(300) as usize;
-                let q: HistoryQuery = history::parse_query(tokens);
-                let entries = self
-                    .store
-                    .search_history(&q, limit, ipc::now_secs())
-                    .map_err(|e| e.to_string())?;
-                let rows: Vec<Value> = entries
-                    .iter()
-                    .map(|e| {
-                        json!({
-                            "id": e.id,
-                            "url": e.url,
-                            "title": if e.title.is_empty() { history::host_of(&e.url) } else { e.title.as_str() },
-                            "host": history::host_of(&e.url),
-                            "visited_at": e.visited_at,
-                            "visit_count": e.visit_count,
-                        })
-                    })
-                    .collect();
-                let out = json!({ "rows": rows });
-                self.emit("history.results", out.clone());
-                Ok(Some(out))
-            }
-            "history.forget" => {
-                let removed = if let Some(site) = p.get("site").and_then(Value::as_str) {
-                    self.store.forget_site(site).map_err(|e| e.to_string())?
-                } else {
-                    let ids: Vec<i64> = p
-                        .get("entry_ids")
-                        .and_then(Value::as_array)
-                        .map(|a| a.iter().filter_map(Value::as_i64).collect())
-                        .unwrap_or_default();
-                    self.store.forget_ids(&ids).map_err(|e| e.to_string())?
-                };
-                self.emit(
-                    "state.history_meta",
-                    json!({ "removed": removed, "count": self.store.history_count().ok() }),
-                );
-                Ok(Some(json!({ "removed": removed })))
-            }
-            "history.clear" => {
-                let removed = if p.get("scope").and_then(Value::as_str) == Some("range") {
-                    let from = p.get("from").and_then(Value::as_i64).unwrap_or(0);
-                    let to = p.get("to").and_then(Value::as_i64).unwrap_or(i64::MAX);
-                    self.store.clear_history_range(from, to).map_err(|e| e.to_string())?
-                } else {
-                    self.store.clear_history().map_err(|e| e.to_string())?
-                };
-                self.emit(
-                    "state.history_meta",
-                    json!({ "removed": removed, "count": self.store.history_count().ok() }),
-                );
-                Ok(Some(json!({ "removed": removed })))
-            }
-            "bookmark.toggle" => {
-                let url = p.get("url").and_then(Value::as_str).ok_or("missing url")?;
-                let title = p.get("title").and_then(Value::as_str).unwrap_or("");
-                let on = self
-                    .store
-                    .toggle_bookmark(url, title, ipc::now_secs())
-                    .map_err(|e| e.to_string())?;
-                Ok(Some(json!({ "bookmarked": on })))
-            }
-            "bookmark.remove" => {
-                let id = p.get("id").and_then(Value::as_i64).ok_or("missing id")?;
-                self.store.remove_bookmark(id).map_err(|e| e.to_string())?;
-                Ok(None)
-            }
-            "download.action" => {
-                let did = p.get("download_id").and_then(Value::as_u64).ok_or("missing download_id")?;
-                let action = p.get("action").and_then(Value::as_str).unwrap_or("");
-                let Some(idx) = self.downloads.iter().position(|d| d.id == did) else {
-                    return Err("unknown download".into());
-                };
-                let path = self.downloads[idx].path.clone();
-                match action {
-                    "open" if !sys::shell_open(&path) => return Err(format!("cannot open {path}")),
-                    "reveal" if !sys::shell_reveal(&path) => return Err(format!("cannot reveal {path}")),
-                    "remove" => {
-                        self.downloads.remove(idx);
-                    }
-                    "open" | "reveal" => {}
-                    other => return Err(format!("unsupported download action: {other}")),
-                }
-                self.emit("state.downloads", json!({ "downloads": self.downloads }));
-                self.mark_dirty();
-                Ok(None)
-            }
-            "download.clear_list" => {
-                self.downloads.retain(|d| d.state == DownloadState::InProgress);
-                self.emit("state.downloads", json!({ "downloads": self.downloads }));
-                self.mark_dirty();
-                Ok(None)
-            }
-            "settings.update" => {
-                let key = p.get("key").and_then(Value::as_str).ok_or("missing key")?;
-                let value = p.get("value").cloned().unwrap_or(Value::Null);
-                if matches!(source, Surface::Settings(_)) {
-                    self.update_preferences(key, &value)?;
-                    return Ok(Some(self.settings_payload()));
-                }
-                self.settings.apply(key, &value).map_err(|e| e.to_string())?;
-                #[cfg(target_os = "macos")]
-                if key == "download_dir" {
-                    *self.download_destination.borrow_mut() = PathBuf::from(self.download_dir());
-                }
-                if key == "history_cap" {
-                    self.store
-                        .vacuum_after_cap_change(self.settings.history_cap)
-                        .map_err(|e| e.to_string())?;
-                }
-                self.save_settings();
-                if key == "rail_collapsed" || key == "vertical_tabs" {
-                    self.apply_layout();
-                }
-                let payload = self.settings_payload();
-                self.emit("state.settings", payload.clone());
-                self.emit_tabs();
-                Ok(Some(payload))
-            }
-            "settings.open_folder" => {
-                let dir = self.data_dir.display().to_string();
-                if !sys::shell_open_folder(&dir) {
-                    return Err(format!("cannot open {dir}"));
-                }
-                Ok(None)
-            }
-            "settings.open" => {
-                let section = p.get("section").and_then(Value::as_str).unwrap_or("general");
-                self.open_settings_section(section, p.get("skill_draft").cloned());
-                Ok(None)
-            }
-            "settings.state" => Ok(Some(json!({
-                "section": self.settings_page.section,
-                "skill_draft": self.settings_page.skill_draft.take(),
-                "settings": self.settings_payload(), "downloads": self.downloads,
-            }))),
-            "settings.section" => {
-                let section = p.get("section").and_then(Value::as_str).unwrap_or("general");
-                if !settings_page::valid_section(section) { return Err("unknown settings section".into()); }
-                self.settings_page.section = section.to_string();
-                Ok(None)
-            }
-            "shell.focus_omnibox" => {
-                self.close_overlay();
-                self.emit("shell.focus_changed", json!({ "scope": "omnibox", "select_all": true }));
-                Ok(None)
-            }
-            "shell.focus_page" => {
-                self.close_overlay();
-                Ok(None)
-            }
-            "shell.open_palette" => {
-                self.open_palette();
-                Ok(None)
-            }
-            "shell.toggle_rail" => {
-                self.settings.rail_collapsed = !self.settings.rail_collapsed;
-                self.save_settings();
-                self.apply_layout();
-                let payload = self.settings_payload();
-                self.emit("state.settings", payload);
-                Ok(None)
-            }
-            crate::ai::proof::OVERLAY_STEP => {
-                // Measurement-only: building or destroying the overlay webview moves
-                // the process count, so this is reachable only inside a run started
-                // with `--proof` (`mode::active()` is false otherwise, and nothing in
-                // shipping code sends the command). Page webviews install only
-                // the selection probe handler, which feeds `PageProbe` and never this
-                // dispatcher, so this check guards a surface a page cannot reach.
-                if !crate::ai::mode::active() {
-                    return Err(format!(
-                        "{} is a measurement command; start the binary with --proof",
-                        crate::ai::proof::OVERLAY_STEP
-                    ));
-                }
-                let enable = p.get("enabled").and_then(Value::as_bool).unwrap_or(false);
-                let changed = if enable {
-                    // Idempotent by refusal: a second live overlay would double the
-                    // exact cost the harness is trying to measure.
-                    let build = self.overlay.is_none();
-                    if build {
-                        self.build_overlay_webview();
-                    }
-                    build
-                } else {
-                    // Dropping the `WebView` is the same teardown
-                    // `sleep_background_tabs` relies on: wry destroys the controller
-                    // and the browser process retires the renderer.
-                    let dropped = self.overlay.take().is_some();
-                    if dropped {
-                        self.note("overlay webview dropped (measurement mode)");
-                    }
-                    dropped
-                };
-                Ok(Some(json!({
-                    "overlay": self.overlay.is_some(),
-                    "changed": changed,
-                })))
-            }
-            crate::ai::proof::WAIT_STEP => {
-                // Measurement-only, same gate as the overlay step: this command
-                // mutates no shell state — its only effect is that the driver
-                // spends its settle window on it, which is what lets the harness
-                // watch a background tab with nothing in flight.
-                if !crate::ai::mode::active() {
-                    return Err(format!(
-                        "{} is a measurement command; start the binary with --proof",
-                        crate::ai::proof::WAIT_STEP
-                    ));
-                }
-                let ms = p
-                    .get("ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-                    .min(crate::ai::proof::MAX_WAIT_MS);
-                // One log line per window, so `browser.log` shows the page's own
-                // `tab N navigated:` lines landing *between* two of these — the
-                // evidence that a reload happened with no command in flight. It is
-                // the only thing this step does, and it is stderr plus one append.
-                self.note(format!(
-                    "proof: waiting {ms} ms with no command in flight"
-                ));
-                Ok(Some(json!({ "waited_ms": ms })))
-            }
-            "shell.close_top_overlay" => {
-                if self.overlay_rect.is_open() {
-                    self.close_overlay();
-                } else if self.panel != Panel::None {
-                    self.set_panel(Panel::None);
-                    self.emit("shell.focus_changed", json!({ "scope": "page" }));
-                } else if let Some(id) = self.active {
-                    if let Some(live) = self.live.get(&id) {
-                        let _ = live.webview.evaluate_script("window.stop()");
-                    }
-                }
-                Ok(None)
-            }
-            "shell.omnibox_dropdown" => {
-                let open = p.get("open").and_then(Value::as_bool).unwrap_or(false);
-                if open {
-                    let x = p.get("x").and_then(Value::as_i64).unwrap_or(0) as i32;
-                    let y = p.get("y").and_then(Value::as_i64).unwrap_or(0) as i32;
-                    let w = p.get("w").and_then(Value::as_i64).unwrap_or(480) as i32;
-                    self.open_dropdown(x, y, w);
-                } else {
-                    self.close_overlay();
-                }
-                Ok(None)
-            }
-            "shell.input_focus" => {
-                // No host-side flag needed: accelerator resolution reads the
-                // focused HWND, which is the shell while an input has focus.
-                Ok(None)
-            }
-            "shortcut" => {
-                let name = p.get("name").and_then(Value::as_str).unwrap_or("");
-                let args = p.get("args").cloned().unwrap_or(Value::Null);
-                self.perform_shortcut(name, args);
-                Ok(None)
-            }
-            "window.minimize" => {
-                if let Some(w) = self.window.as_ref() {
-                    w.set_minimized(true);
-                }
-                Ok(None)
-            }
-            "window.toggle_maximize" => {
-                self.toggle_window_maximize()?;
-                Ok(None)
-            }
-            "window.toggle_span" => self.toggle_window_span(),
-            "window.span_select" => self.select_span_monitors(p),
-            "window.state" => {
-                self.refresh_window_displays(true);
-                Ok(Some(self.window_payload()))
-            }
-            "window.drag" => {
-                self.restore_spanned_window()?;
-                if let Some(w) = self.window.as_ref() {
-                    let _ = w.drag_window();
-                }
-                Ok(None)
-            }
-            "window.resize" => {
-                use tao::window::ResizeDirection as D;
-                let dir = match p.get("dir").and_then(Value::as_str).unwrap_or("") {
-                    "n" => D::North,
-                    "s" => D::South,
-                    "e" => D::East,
-                    "w" => D::West,
-                    "ne" => D::NorthEast,
-                    "nw" => D::NorthWest,
-                    "se" => D::SouthEast,
-                    "sw" => D::SouthWest,
-                    _ => return Ok(None),
-                };
-                self.restore_spanned_window()?;
-                if let Some(w) = self.window.as_ref() {
-                    if !w.is_maximized() {
-                        let _ = w.drag_resize_window(dir);
-                    }
-                }
-                Ok(None)
-            }
-            "window.close" => {
-                if let Some(p) = self.proxy.as_ref() {
-                    let _ = p.send_event(AppMessage::Quit);
-                }
-                Ok(None)
-            }
-            "page.copy_url" => {
-                let url = self.active_tab().map(|t| t.url.clone()).unwrap_or_default();
-                self.emit("shell.copy", json!({ "text": url }));
-                Ok(None)
-            }
-            "diagnostics.self_test" => {
-                let report = self.self_test();
-                Ok(Some(report))
-            }
-            other => Err(format!("unknown command: {other}")),
-        }
-    }
-
-    fn open_url_with(&mut self, url: String, disposition: &str) {
+    fn wv_page_open(&mut self, url: String, disposition: &str) {
         match disposition {
             "new_tab" => {
-                self.create_tab(&url, self.active, true);
+                self.wv_tab_open(&url, self.active, true);
             }
             "new_tab_background" => {
-                self.create_tab(&url, self.active, false);
+                self.wv_tab_open(&url, self.active, false);
             }
             _ => {
                 if let Some(id) = self.active {
-                    self.navigate(id, &url, true);
+                    self.wv_page_navigate(id, &url, true);
                 } else if let Some(canvas) = self.canvas_shown {
                     let cell = self.canvas_of(canvas).map(|cv| cv.focus).unwrap_or(0);
-                    let _ = self.canvas_set(&json!({ "canvas_id": canvas.0, "cell": cell, "url": url }));
+                    let _ = self.wv_canvas_cell_open(&json!({ "canvas_id": canvas.0, "cell": cell, "url": url }));
                 }
             }
         }
     }
 
-    fn run_verb(&mut self, verb: &str) {
+    fn wv_ui_verb(&mut self, verb: &str) {
         let cmd = match verb {
-            "new-tab" => Some("tab.new"),
-            "new-canvas" => Some("canvas.create"),
-            "canvas-zoom" => Some("canvas.zoom"),
-            "close-tab" => Some("tab.close"),
-            "reopen-tab" => Some("tab.reopen_closed"),
-            "bookmark" => Some("tab.bookmark"),
-            "reload" => Some("nav.reload"),
-            "zoom-reset" => Some("tab.zoom_reset"),
+            "new-tab" => Some(("shell_tab", "open")),
+            "new-canvas" => Some(("shell_canvas", "open")),
+            "canvas-zoom" => Some(("shell_canvas", "zoom")),
+            "close-tab" => Some(("shell_tab", "close")),
+            "reopen-tab" => Some(("shell_tab", "reopen")),
+            "bookmark" => Some(("shell_bookmark", "toggle")),
+            "reload" => Some(("shell_page_navigation", "reload")),
+            "zoom-reset" => Some(("shell_page_zoom", "reset")),
             _ => None,
         };
-        if let Some(cmd) = cmd {
+        if let Some((cmd, operation)) = cmd {
             let req = Request {
                 id: None,
                 cmd: cmd.to_string(),
-                payload: json!({}),
+                payload: json!({ "operation": operation }),
             };
             if let Err(e) = self.run(&req) {
                 self.note(format!("verb {verb}: {e}"));
@@ -1816,11 +1168,11 @@ impl AppState {
             return;
         }
         match verb {
-            "pin-tab" => self.perform_shortcut("toggle_pin", Value::Null),
-            "downloads" => self.open_settings_section("downloads", None),
-            "history" => self.open_settings_section("history", None),
+            "pin-tab" => self.wv_ui_shortcut("toggle_pin", Value::Null),
+            "downloads" => self.wv_settings_section_open("downloads", None),
+            "history" => self.wv_settings_section_open("history", None),
             "settings" => {
-                self.open_settings();
+                self.wv_settings_open();
             }
             "toggle-rail" => {
                 self.settings.rail_collapsed = !self.settings.rail_collapsed;
@@ -1851,14 +1203,14 @@ impl AppState {
         let _ = webview;
     }
 
-    fn perform_shortcut(&mut self, name: &str, args: Value) {
+    fn wv_ui_shortcut(&mut self, name: &str, args: Value) {
         match name {
             "new_tab" => {
-                self.create_tab(tabs::NEWTAB_URL, self.active, true);
+                self.wv_tab_open(tabs::NEWTAB_URL, self.active, true);
             }
             "close_tab" => {
                 if let Some(id) = self.active.or(self.canvas_shown) {
-                    self.close_tab(id);
+                    self.wv_tab_close(id);
                 }
             }
             "close_window" => {
@@ -1876,31 +1228,31 @@ impl AppState {
                     self.tabs.at_index(n.saturating_sub(1) as usize)
                 };
                 if let Some(t) = target {
-                    self.activate(t);
+                    self.wv_tab_activate(t);
                 }
             }
             "reopen_closed" => {
-                let req = Request { id: None, cmd: "tab.reopen_closed".into(), payload: json!({}) };
+                let req = Request { id: None, cmd: "shell_tab".into(), payload: json!({ "operation": "reopen" }) };
                 let _ = self.run(&req);
             }
             "focus_omnibox" => {
-                self.close_overlay();
+                self.wv_ui_overlay_close();
                 self.emit("shell.focus_changed", json!({ "scope": "omnibox", "select_all": true }));
             }
             "cycle_focus" => self.emit("shell.focus_changed", json!({ "scope": "cycle" })),
-            "open_palette" => self.open_palette(),
+            "open_palette" => self.wv_ui_palette_open(),
             "ask_ai" => self.ai_open_ask(),
-            "close_palette" => self.close_overlay(),
+            "close_palette" => self.wv_ui_overlay_close(),
             "find" => {
-                self.close_overlay();
+                self.wv_ui_overlay_close();
                 if let Some(shell) = self.shell.as_ref() { let _ = shell.focus(); }
                 self.emit("shell.focus_changed", json!({ "scope": "find" }));
             }
             "find_next" | "find_prev" => {
                 self.emit("shell.find_action", json!({ "action": name }));
             }
-            "open_downloads" => self.open_settings_section("downloads", None),
-            "open_history" | "open_history_today" => self.open_settings_section("history", None),
+            "open_downloads" => self.wv_settings_section_open("downloads", None),
+            "open_history" | "open_history_today" => self.wv_settings_section_open("history", None),
             "page_back" | "page_forward" => {
                 if let Some(id) = self.active {
                     if let Some(live) = self.live.get(&id) {
@@ -1917,7 +1269,7 @@ impl AppState {
             }
             "home" => {
                 if let Some(id) = self.active {
-                    self.navigate(id, tabs::NEWTAB_URL, false);
+                    self.wv_page_navigate(id, tabs::NEWTAB_URL, false);
                 }
             }
             "reload" | "reload_ignoring_cache" => {
@@ -1930,16 +1282,16 @@ impl AppState {
                 }
             }
             "bookmark" => {
-                let req = Request { id: None, cmd: "tab.bookmark".into(), payload: json!({}) };
+                let req = Request { id: None, cmd: "shell_bookmark".into(), payload: json!({ "operation": "toggle" }) };
                 let _ = self.run(&req);
             }
             "bookmark_all_tabs" => {
-                let req = Request { id: None, cmd: "tab.bookmark_all".into(), payload: json!({}) };
+                let req = Request { id: None, cmd: "shell_bookmark".into(), payload: json!({ "operation": "all_tabs" }) };
                 let _ = self.run(&req);
             }
             "view_source" => {
                 if let Some(id) = self.active {
-                    self.navigate(id, ui::internal_page(ui::InternalPage::ViewSourceUnsupported), false);
+                    self.wv_page_navigate(id, ui::internal_page(ui::InternalPage::ViewSourceUnsupported), false);
                 }
             }
             "open_devtools" => {
@@ -1949,17 +1301,17 @@ impl AppState {
             }
             "zoom_in" | "zoom_out" | "zoom_reset" => {
                 let Some(id) = self.active else { return };
-                self.zoom_tab(id, name);
+                self.wv_page_zoom_step(id, name);
             }
             "zoom_fit" => {
                 if let Some(id) = self.active {
-                    if let Err(error) = self.fit_page_width(id) {
+                    if let Err(error) = self.wv_page_zoom_fit(id) {
                         self.note(format!("Fit to page width: {error}"));
                     }
                 }
             }
             "open_settings" => {
-                self.open_settings();
+                self.wv_settings_open();
             }
             "escape" => {
                 self.emit("shell.escape", json!({}));
@@ -1983,7 +1335,7 @@ impl AppState {
         }
     }
 
-    fn self_test(&mut self) -> Value {
+    fn wv_diagnostics_self_test(&mut self) -> Value {
         let pid = sys::current_pid();
         let tree = sys::process_tree(pid);
         let total: u64 = tree.iter().map(|p| p.working_set).sum();
@@ -2040,7 +1392,7 @@ impl AppState {
     }
 
     fn driver_script(&self) -> Vec<(&'static str, Value)> {
-        let u = |s: &str| json!({ "url": s, "disposition": "new_tab_background" });
+        let u = |s: &str| json!({ "operation": "open", "url": s, "background": true });
         let page = "https://example.com/";
         let w = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
         match self.driver_name.as_str() {
@@ -2066,10 +1418,10 @@ impl AppState {
                     let url = if i % 2 == 0 { page } else { w };
                     // "new_tab" activates, so a webview is really created and
                     // then destroyed by the close: this is the leak test.
-                    v.push(("nav.open", json!({ "url": url, "disposition": "new_tab" })));
+                    v.push(("shell_tab", json!({ "operation": "open", "url": url })));
                     // Omit tab_id: both commands fall back to the active tab.
-                    v.push(("tab.close", json!({})));
-                    v.push(("tab.select", json!({})));
+                    v.push(("shell_tab", json!({ "operation": "close",})));
+                    v.push(("shell_tab", json!({ "operation": "activate",})));
                 }
                 v
             }
@@ -2079,7 +1431,7 @@ impl AppState {
             "navloop" => {
                 let mut v = Vec::new();
                 for i in 0..30u64 {
-                    v.push(("nav.open", json!({ "url": if i % 2 == 0 { page } else { w }, "disposition": "new_tab" })));
+                    v.push(("shell_tab", json!({ "operation": "open", "url": if i % 2 == 0 { page } else { w } })));
                 }
                 v
             }
@@ -2092,48 +1444,48 @@ impl AppState {
                 // tab has id n+1. Open 5, activating each (which sleeps the
                 // previous one), then go back and forth to force rebuilds.
                 for i in 0..5 {
-                    v.push(("nav.open", u(if i % 2 == 0 { page } else { w })));
-                    v.push(("tab.select", json!({ "tab_id": i + 2 })));
+                    v.push(("shell_tab", u(if i % 2 == 0 { page } else { w })));
+                    v.push(("shell_tab", json!({ "operation": "activate", "tab_id": i + 2 })));
                 }
                 // Ping-pong between the last two: each hop is a slept-tab
                 // restore (webview destroyed on the way out).
                 for _ in 0..4 {
-                    v.push(("tab.select", json!({ "tab_id": 6 })));
-                    v.push(("tab.select", json!({ "tab_id": 5 })));
+                    v.push(("shell_tab", json!({ "operation": "activate", "tab_id": 6 })));
+                    v.push(("shell_tab", json!({ "operation": "activate", "tab_id": 5 })));
                 }
                 v
             }
             // Every omnibox query shape through the real classifier + ranker.
             "omnibox" => { vec![
-                ("omnibox.query", json!({ "text": "" })),
-                ("omnibox.query", json!({ "text": "exa" })),
-                ("omnibox.query", json!({ "text": "example.com" })),
-                ("omnibox.query", json!({ "text": "localhost:8080" })),
-                ("omnibox.query", json!({ "text": "[::1]:8080" })),
-                ("omnibox.query", json!({ "text": "HTTP://EXAMPLE.COM/Path?q=1#f" })),
-                ("omnibox.query", json!({ "text": "rust programming" })),
-                ("omnibox.query", json!({ "text": ">" })),
-                ("omnibox.query", json!({ "text": "> new" })),
-                ("omnibox.query", json!({ "text": ">set zoom 120" })),
-                ("omnibox.query", json!({ "text": "  spaces  " })),
-                ("omnibox.query", json!({ "text": "!!!???" })),
-                ("omnibox.query", json!({ "text": "a" })),
-                ("omnibox.query", json!({ "text": "file:///C:/Windows/win.ini" })),
-                ("omnibox.query", json!({ "text": "about:blank" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "exa" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "example.com" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "localhost:8080" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "[::1]:8080" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "HTTP://EXAMPLE.COM/Path?q=1#f" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "rust programming" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": ">" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "> new" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": ">set zoom 120" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "  spaces  " })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "!!!???" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "a" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "file:///C:/Windows/win.ini" })),
+                ("shell_omnibox", json!({ "operation": "query", "text": "about:blank" })),
             ]}
             // History/bookmark/download/settings operations, then a reload.
             "state" => { vec![
-                ("bookmark.toggle", json!({})),
-                ("bookmark.toggle", json!({})),
-                ("history.query", json!({ "text": "" })),
-                ("history.query", json!({ "text": "example" })),
-                ("history.query", json!({ "text": "%_%" })),
-                ("settings.update", json!({ "key": "zoom", "value": 125 })),
-                ("settings.update", json!({ "key": "rail_collapsed", "value": true })),
-                ("find.start", json!({})),
-                ("find.query", json!({ "text": "example" })),
-                ("find.next", json!({})),
-                ("find.stop", json!({})),
+                ("shell_bookmark", json!({ "operation": "toggle",})),
+                ("shell_bookmark", json!({ "operation": "toggle",})),
+                ("shell_history", json!({ "operation": "query", "text": "" })),
+                ("shell_history", json!({ "operation": "query", "text": "example" })),
+                ("shell_history", json!({ "operation": "query", "text": "%_%" })),
+                ("shell_settings", json!({ "operation": "set", "key": "zoom", "value": 125 })),
+                ("shell_settings", json!({ "operation": "set", "key": "rail_collapsed", "value": true })),
+                ("shell_page_find", json!({ "operation": "start",})),
+                ("shell_page_find", json!({ "operation": "query", "text": "example" })),
+                ("shell_page_find", json!({ "operation": "next",})),
+                ("shell_page_find", json!({ "operation": "stop",})),
             ]}
             _ => Vec::new(),
         }
@@ -2156,7 +1508,7 @@ impl AppState {
         // The harness's wait step carries its own duration, and `driver_call`
         // consumes the payload, so read it here: for that step the settle window
         // *is* the wait, and it is the only thing that happens.
-        let wait_ms = if cmd == crate::ai::proof::WAIT_STEP {
+        let wait_ms = if cmd == "shell_diagnostics" && payload["operation"] == "measure_wait" {
             payload
                 .get("ms")
                 .and_then(Value::as_u64)
@@ -2165,6 +1517,7 @@ impl AppState {
         } else {
             0
         };
+        let operation = payload["operation"].as_str().unwrap_or("").to_string();
         let ok = self.driver_call(cmd, payload);
         let dur_us = t0.elapsed().as_micros() as u64;
         let mut s = self.driver_snapshot();
@@ -2177,17 +1530,15 @@ impl AppState {
         // A navigation needs time to commit and reach the history write; a pure
         // command needs almost none. The latency figures quoted for tab restore
         // come from `us`, which excludes this window.
-        let settle = match cmd {
-            // Before the `proof.` prefix arm: this step's payload says how long the
-            // observation window is, and it is minutes rather than milliseconds.
-            c if c == crate::ai::proof::WAIT_STEP => Duration::from_millis(wait_ms),
-            c if c.starts_with("nav.") || c == "tab.select" => Duration::from_millis(900),
+        let settle = match (cmd, operation.as_str()) {
+            ("shell_diagnostics", "measure_wait") => Duration::from_millis(wait_ms),
+            ("shell_page_navigate", _) | ("shell_tab", "open" | "activate") => Duration::from_millis(900),
             // A measurement step: the overlay arm creates a whole WebView2 controller
             // and its first navigation, where the startup log shows roughly 400 ms for
             // the webview plus whatever the page takes. The 900 ms navigation window is
             // not enough for a fresh controller, and sampling too early would attribute
             // a late-arriving renderer to the next step.
-            c if c.starts_with(crate::ai::proof::OVERLAY_STEP_PREFIX) => Duration::from_millis(2_500),
+            ("shell_diagnostics", "measure_overlay") => Duration::from_millis(2_500),
             _ => Duration::from_millis(30),
         };
         self.driver_step += 1;
@@ -2274,7 +1625,7 @@ impl AppState {
 
     // ---- 5. webviews ----------------------------------------------------
 
-    pub(crate) fn build_webview(&mut self, id: TabId) {
+    pub(crate) fn wv_webview_create(&mut self, id: TabId) {
         if self.live.contains_key(&id) {
             return;
         }
@@ -2632,6 +1983,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
         driver_total: 0,
         driver_snaps: None,
         ai: crate::ai::session::AiSession::new(),
+        api: api::State::default(),
     };
     if let Some(w) = settings_warn {
         state.note(w);
@@ -2704,6 +2056,11 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
     let event_loop = builder.build();
     let proxy = event_loop.create_proxy();
     shared.borrow_mut().proxy = Some(proxy.clone());
+    let api_proxy = proxy.clone();
+    match crate::api_server::ApiServer::start(&dir, move |request| api_proxy.send_event(AppMessage::ApiRequest(request)).map_err(|_| "the browser is closing".to_string())) {
+        Ok(server) => shared.borrow_mut().api.server = Some(server),
+        Err(error) => shared.borrow_mut().note(format!("shell API unavailable: {error}")),
+    }
     shared.borrow_mut().omnibox_worker = Some(omnibox_worker::start(dir.join("data.db"), proxy.clone()));
 
     // ---- window ---------------------------------------------------------
@@ -2875,6 +2232,9 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
                     shared.borrow_mut().reply(source, reply);
                 }
             }
+            Event::UserEvent(AppMessage::ApiRequest(request)) => {
+                shared.borrow_mut().wv_api_external(request);
+            }
             Event::UserEvent(AppMessage::TabTitle(id, title)) => {
                 let mut s = shared.borrow_mut();
                 s.on_title(id, title);
@@ -2882,18 +2242,18 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             Event::UserEvent(AppMessage::NewWindow(opener, url)) => {
                 let mut s = shared.borrow_mut();
                 if url.starts_with("http://") || url.starts_with("https://") {
-                    s.open_from_page(opener, &url);
+                    s.wv_page_popup_open(opener, &url);
                 }
             }
             Event::UserEvent(AppMessage::OpenPdf(id, url)) => {
-                shared.borrow_mut().navigate(id, &url, false);
+                shared.borrow_mut().wv_page_navigate(id, &url, false);
             }
             #[cfg(windows)]
             Event::UserEvent(AppMessage::DroppedPdf(id, url)) => {
                 let mut s = shared.borrow_mut();
                 if s.live.contains_key(&id) {
-                    s.activate(id);
-                    s.navigate(id, &url, false);
+                    s.wv_tab_activate(id);
+                    s.wv_page_navigate(id, &url, false);
                 }
             }
             #[cfg(windows)]
@@ -2942,7 +2302,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             Event::UserEvent(AppMessage::RuntimeZoom(id, factor)) => {
                 let mut s = shared.borrow_mut();
                 if s.live.contains_key(&id) && factor.is_finite() && factor > 0.0 {
-                    if s.has_native_pdf(id) { s.canvas_focus_tab(id); }
+                    if s.has_native_pdf(id) { s.wv_canvas_page_focus(id); }
                     if let Some(tab) = s.tabs.get_mut(id) { tab.zoom = factor; }
                     s.emit("tab.zoom_changed", json!({ "tab_id": id.0, "factor": factor }));
                     s.mark_dirty();
@@ -2970,15 +2330,14 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             Event::UserEvent(AppMessage::AiReadExtra(task, tab)) => {
                 shared.borrow_mut().ai_read_extra_now(task, tab);
             }
-            Event::UserEvent(AppMessage::AgentEval(id)) => {
-                shared.borrow_mut().agent_eval_run(id);
+            Event::UserEvent(AppMessage::ApiEval(id)) => {
+                shared.borrow_mut().wv_eval_run(id);
             }
-            Event::UserEvent(AppMessage::AgentEvalDone(id, raw)) => {
-                shared.borrow_mut().agent_eval_done(id, raw);
+            Event::UserEvent(AppMessage::ApiEvalDone(id, raw)) => {
+                shared.borrow_mut().wv_eval_done(id, raw);
             }
-            Event::UserEvent(AppMessage::DevtoolsDone(generation, id, result)) => {
-                let mut s = shared.borrow_mut();
-                if s.ai.link_generation == generation { s.devtools_done(id, result); }
+            Event::UserEvent(AppMessage::DevtoolsDone(id, result)) => {
+                shared.borrow_mut().wv_site_data_done(id, result);
             }
             Event::UserEvent(AppMessage::AgentJob(id, raw)) => {
                 shared.borrow_mut().agent_job_done(id, raw);
@@ -3002,7 +2361,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
                 let name = shortcut_name(&shortcut);
                 let args = shortcut_args(&shortcut);
                 AppState::emit_public(&shared, "shell.shortcut", json!({ "name": name, "args": args }));
-                shared.borrow_mut().perform_shortcut(name, args);
+                shared.borrow_mut().wv_ui_shortcut(name, args);
             }
             Event::UserEvent(AppMessage::PageProbe(tab, raw)) => {
                 let mut s = shared.borrow_mut();
@@ -3052,6 +2411,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             Event::UserEvent(AppMessage::Flush) => {
                 let mut s = shared.borrow_mut();
                 s.ai_tick();
+                s.wv_api_prune();
                 s.lifecycle_tick();
                 s.refresh_window_displays(false);
                 if matches!(s.session_dirty_at, Some(t) if Instant::now() >= t) {
@@ -3062,13 +2422,13 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
                 let mut s = shared.borrow_mut();
                 s.self_test_url_pending = true;
                 if let Some(id) = s.active {
-                    s.navigate(id, &url, true);
+                    s.wv_page_navigate(id, &url, true);
                 }
             }
             Event::UserEvent(AppMessage::SelfTestNavigated) => {
                 let report = {
                     let mut s = shared.borrow_mut();
-                    s.self_test()
+                    s.wv_diagnostics_self_test()
                 };
                 let path = shared.borrow().data_dir.join("self-test.json");
                 if let Ok(text) = serde_json::to_string_pretty(&report) {
@@ -3511,7 +2871,7 @@ fn dispatch_accelerator(shared: &Shared, msg: *const std::ffi::c_void) -> bool {
                 Ok(s) => s,
                 Err(_) => return false,
             };
-            s.perform_shortcut(name, args);
+            s.wv_ui_shortcut(name, args);
             true
         }
     }

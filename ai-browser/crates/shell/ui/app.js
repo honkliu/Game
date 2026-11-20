@@ -169,7 +169,7 @@
       b.setAttribute('aria-selected', String(!!t.active));
       b.title = t.title;
       b.innerHTML = iconFor(t);
-      b.addEventListener('click', () => invoke('tab.select', { tab_id: t.id }));
+      b.addEventListener('click', () => invoke('shell_tab', { operation: 'activate', tab_id: t.id }));
       b.addEventListener('contextmenu', (e) => { e.preventDefault(); openItemMenu(t, e.clientX, e.clientY); });
       el.railPinnedGrid.appendChild(b);
     }
@@ -202,11 +202,11 @@
         <span class="group-dot"></span><span class="group-name"></span><span class="group-count"></span>`;
       head.querySelector('.group-name').textContent = g.name;
       head.querySelector('.group-count').textContent = String((byGroup.get(gid) || []).length);
-      head.addEventListener('click', () => invoke('group.collapse', { group_id: gid, collapsed: !g.collapsed }));
+      head.addEventListener('click', () => invoke('shell_tab_group', { operation: 'collapsed_set', group_id: gid, collapsed: !g.collapsed }));
       head.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          invoke('group.collapse', { group_id: gid, collapsed: !g.collapsed });
+          invoke('shell_tab_group', { operation: 'collapsed_set', group_id: gid, collapsed: !g.collapsed });
         }
       });
       frag.appendChild(head);
@@ -254,7 +254,7 @@
         empty.className = 'cv-empty';
         empty.style.cssText = `left:${c.body.x - c.frame.x}px;top:${c.body.y - c.frame.y}px;width:${c.body.w}px;height:${c.body.h}px`;
         empty.textContent = '';
-        empty.addEventListener('click', () => invoke('canvas.focus', { cell: c.index }));
+        empty.addEventListener('click', () => invoke('shell_canvas', { operation: 'cell_focus', cell: c.index }));
         cell.appendChild(empty);
       }
       layer.appendChild(cell);
@@ -269,7 +269,7 @@
       const h = document.createElement('div');
       h.className = 'cv-divider ' + (d.vertical ? 'is-vertical' : 'is-horizontal');
       h.style.cssText = geom;
-      h.addEventListener('dblclick', () => invoke('canvas.resize', { reset: true }));
+      h.addEventListener('dblclick', () => invoke('shell_canvas', { operation: 'resize', reset: true }));
       h.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return;
         e.preventDefault();
@@ -280,7 +280,7 @@
         const send = () => {
           const pos = d.vertical ? pending.clientX : pending.clientY;
           pending = null;
-          invoke('canvas.resize', { vertical: d.vertical, index: d.index, row: d.row, pos });
+          invoke('shell_canvas', { operation: 'resize', vertical: d.vertical, index: d.index, row: d.row, pos });
         };
         const move = (ev) => { if (!pending) requestAnimationFrame(send); pending = ev; };
         const up = () => {
@@ -338,7 +338,7 @@
         cleanup();
         dragged = true;
         event.preventDefault();
-        invoke('window.drag', {});
+        invoke('shell_window', { operation: 'drag' });
       };
       window.addEventListener('pointermove', move, true);
       window.addEventListener('pointerup', cleanup, true);
@@ -350,10 +350,10 @@
       if (dragged) { e.preventDefault(); return; }
       if (e.target.closest('.tab-close')) {
         e.stopPropagation();
-        invoke('tab.close', { tab_id: t.id });
+        invoke('shell_tab', { operation: 'close', tab_id: t.id });
         return;
       }
-      invoke('tab.select', { tab_id: t.id });
+      invoke('shell_tab', { operation: 'activate', tab_id: t.id });
     });
     row.addEventListener('contextmenu', (e) => { e.preventDefault(); openItemMenu(t, e.clientX, e.clientY); });
     row.addEventListener('keydown', (e) => railKey(e, row, t));
@@ -385,11 +385,11 @@
         break;
       case 'Enter':
         e.preventDefault();
-        invoke('tab.select', { tab_id: t.id });
+        invoke('shell_tab', { operation: 'activate', tab_id: t.id });
         break;
       case 'Delete':
         e.preventDefault();
-        invoke('tab.close', { tab_id: t.id });
+        invoke('shell_tab', { operation: 'close', tab_id: t.id });
         break;
       case ' ':
       case 'Shift+F10':
@@ -481,7 +481,7 @@
 
   async function queryOmnibox(text, seq = ++omniSeq, complete = false) {
     try {
-      const res = await invoke('omnibox.query', { text, limit: 10 });
+      const res = await invoke('shell_omnibox', { operation: 'query', text, limit: 10 });
       if (seq !== omniSeq || omniComposing || document.activeElement !== el.omnibox) return;
       if (res && res.superseded) return;
       omniTyped = text;
@@ -557,22 +557,22 @@
       return;
     }
     if (r.kind === 'command') {
-      invoke('omnibox.activate', { text: el.omnibox.value, verb: r.verb });
+      invoke('shell_omnibox', { operation: 'activate', text: el.omnibox.value, verb: r.verb });
     } else if (r.kind === 'tab') {
-      invoke('tab.select', { tab_id: r.tab_id });
+      invoke('shell_tab', { operation: 'activate', tab_id: r.tab_id });
       closeDropdown();
       focusPage();
     } else if (r.kind === 'find') {
-      invoke('omnibox.activate', { text: el.omnibox.value });
+      invoke('shell_omnibox', { operation: 'activate', text: el.omnibox.value });
     } else {
-      invoke('omnibox.activate', { text: el.omnibox.value, url: r.url });
+      invoke('shell_omnibox', { operation: 'activate', text: el.omnibox.value, url: r.url });
     }
     closeDropdown();
   }
 
   function submitOmnibox() {
     if (omniInline && el.omnibox.value === omniInline && !state.omnibox.explicitSelection) {
-      invoke('omnibox.activate', { text: el.omnibox.value });
+      invoke('shell_omnibox', { operation: 'activate', text: el.omnibox.value });
       closeDropdown();
       el.omnibox.blur();
       return;
@@ -584,7 +584,7 @@
     }
     const text = el.omnibox.value;
     if (!text.trim()) return;
-    invoke('omnibox.activate', { text });
+    invoke('shell_omnibox', { operation: 'activate', text });
     closeDropdown();
     el.omnibox.blur();
   }
@@ -601,7 +601,7 @@
     closeDropdown();
     el.omnibox.blur();
     // The host moves OS focus back to the active page webview.
-    invoke('shell.focus_page', {}).catch(() => {});
+    invoke('shell_ui', { operation: 'page_focus' }).catch(() => {});
     if (window.__native && window.__native.focusPage) window.__native.focusPage();
   }
 
@@ -623,20 +623,20 @@
     closeMonitorPicker();
     const isCanvas = !!(t && t.canvas);
     const items = custom || (isCanvas ? [
-      { label: 'Zoom focused page', run: () => invoke('canvas.zoom', { canvas_id: t.id }) },
+      { label: 'Zoom focused page', run: () => invoke('shell_canvas', { operation: 'zoom', canvas_id: t.id }) },
       ...GRIDS.map(([c, r]) => ({
-        label: `Layout ${c} × ${r}`, run: () => invoke('canvas.layout', { canvas_id: t.id, cols: c, rows: r }),
+        label: `Layout ${c} × ${r}`, run: () => invoke('shell_canvas', { operation: 'layout_set', canvas_id: t.id, cols: c, rows: r }),
       })),
       { sep: true },
-      { label: 'Close canvas', run: () => invoke('tab.close', { tab_id: t.id }), danger: true },
+      { label: 'Close canvas', run: () => invoke('shell_tab', { operation: 'close', tab_id: t.id }), danger: true },
     ] : [
-      { label: 'Reload tab', run: () => invoke('nav.reload', { tab_id: t.id }) },
-      { label: t.pinned ? 'Unpin tab' : 'Pin tab', run: () => invoke(t.pinned ? 'tab.unpin' : 'tab.pin', { tab_id: t.id }) },
-      { label: 'Duplicate tab', run: () => invoke('tab.duplicate', {}) },
+      { label: 'Reload tab', run: () => invoke('shell_page_navigation', { operation: 'reload', tab_id: t.id }) },
+      { label: t.pinned ? 'Unpin tab' : 'Pin tab', run: () => invoke('shell_tab', { operation: t.pinned ? 'unpin' : 'pin', tab_id: t.id }) },
+      { label: 'Duplicate tab', run: () => invoke('shell_tab', { operation: 'duplicate' }) },
       { label: 'Copy URL', run: () => navigator.clipboard.writeText(t.url).catch(() => {}), },
       { sep: true },
-      { label: 'Close tab', run: () => invoke('tab.close', { tab_id: t.id }), danger: true },
-      { label: 'Close others', run: () => state.tabs.filter((o) => o.id !== t.id).forEach((o) => invoke('tab.close', { tab_id: o.id })) },
+      { label: 'Close tab', run: () => invoke('shell_tab', { operation: 'close', tab_id: t.id }), danger: true },
+      { label: 'Close others', run: () => state.tabs.filter((o) => o.id !== t.id).forEach((o) => invoke('shell_tab', { operation: 'close', tab_id: o.id })) },
     ]);
     el.itemMenu.innerHTML = '';
     let focusIdx = 0;
@@ -657,7 +657,7 @@
       el.itemMenu.appendChild(b);
     });
     el.itemMenu.hidden = false;
-    invoke('shell.menu', { open: true });
+    invoke('shell_ui', { operation: 'menu_set', open: true });
     el.itemMenu.style.left = `${Math.min(x, window.innerWidth - 220)}px`;
     el.itemMenu.style.top = `${Math.min(y, window.innerHeight - 200)}px`;
     const first = el.itemMenu.querySelector('.menu-item');
@@ -665,7 +665,7 @@
   }
 
   function closeItemMenu() {
-    if (!el.itemMenu.hidden) invoke('shell.menu', { open: false });
+    if (!el.itemMenu.hidden) invoke('shell_ui', { operation: 'menu_set', open: false });
     el.itemMenu.hidden = true;
     el.itemMenu.innerHTML = '';
   }
@@ -731,11 +731,11 @@
   async function openMonitorPicker() {
     if (!monitorPicker.hidden) return;
     closeItemMenu();
-    state.window = await invoke('window.state', {});
+    state.window = await invoke('shell_window', { operation: 'state_get' });
     const saved = state.window.selected_layout;
     monitorDraft = saved ? { ...saved, display_ids: [...saved.display_ids] } : { cols: 2, rows: 1, display_ids: ['', ''] };
     monitorSaving = false;
-    await invoke('shell.menu', { open: true });
+    await invoke('shell_ui', { operation: 'menu_set', open: true });
     monitorPicker.hidden = false;
     $('#monitor-picker-backdrop').hidden = false;
     $('#win-span-menu').setAttribute('aria-expanded', 'true');
@@ -749,7 +749,7 @@
     monitorPicker.hidden = true;
     $('#monitor-picker-backdrop').hidden = true;
     $('#win-span-menu').setAttribute('aria-expanded', 'false');
-    invoke('shell.menu', { open: false });
+    invoke('shell_ui', { operation: 'menu_set', open: false });
     $('#win-span-menu').focus();
   }
 
@@ -764,7 +764,7 @@
     monitorSaving = true;
     renderMonitorPicker();
     try {
-      await invoke('window.span_select', monitorDraft);
+      await invoke('shell_window', { ...monitorDraft, operation: 'span_select' });
       monitorSaving = false;
       closeMonitorPicker();
     } catch (error) {
@@ -796,7 +796,7 @@
       if (q) searchedTabs.add(tab.id);
       else searchedTabs.delete(tab.id);
     }
-    invoke(kind || 'find.query', { query: q, highlight_all: true })
+    invoke('shell_page_find', { operation: kind || 'query', query: q, highlight_all: true })
       .then((r) => { if (seq === findSeq && r) renderFind(r); })
       .catch((e) => console.error('find', e));
   }
@@ -810,7 +810,7 @@
     if (typeof query === 'string') el.findInput.value = query;
     el.findInput.focus();
     el.findInput.select();
-    findQuery('find.start');
+    findQuery('start');
   }
 
   function closeFind() {
@@ -819,7 +819,7 @@
     el.findInput.removeAttribute('aria-invalid');
     el.findInput.title = 'Find in page (Ctrl+F)';
     searchedTabs.delete(activeTab()?.id);
-    invoke('find.stop', {}).catch(() => {});
+    invoke('shell_page_find', { operation: 'stop' }).catch(() => {});
   }
 
   function refreshFindTarget() {
@@ -833,7 +833,7 @@
   el.findInput.addEventListener('compositionend', () => { findComposing = false; findQuery(); });
   el.findInput.addEventListener('keydown', (e) => {
     if (e.isComposing || findComposing) return;
-    if (e.key === 'Enter') { e.preventDefault(); findQuery(e.shiftKey ? 'find.prev' : 'find.next'); }
+    if (e.key === 'Enter') { e.preventDefault(); findQuery(e.shiftKey ? 'previous' : 'next'); }
     else if (e.key === 'Escape') { e.preventDefault(); closeFind(); focusPage(); }
   });
 
@@ -871,9 +871,9 @@
         b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
         actions.appendChild(b);
       };
-      if (d.state !== 'in_progress') mk('Open', false, () => invoke('download.action', { download_id: d.id, action: 'open' }));
-      mk('Show in folder', false, () => invoke('download.action', { download_id: d.id, action: 'reveal' }));
-      mk('Remove', true, () => invoke('download.action', { download_id: d.id, action: 'remove' }));
+      if (d.state !== 'in_progress') mk('Open', false, () => invoke('shell_download', { download_id: d.id, operation: 'open' }));
+      mk('Show in folder', false, () => invoke('shell_download', { download_id: d.id, operation: 'reveal' }));
+      mk('Remove', true, () => invoke('shell_download', { download_id: d.id, operation: 'entry_remove' }));
       li.addEventListener('contextmenu', (e) => { e.preventDefault(); openDownloadMenu(d, e.clientX, e.clientY); });
       li.addEventListener('keydown', (e) => downloadKey(e, li, i));
       el.downloadsList.appendChild(li);
@@ -883,10 +883,10 @@
 
   function openDownloadMenu(d, x, y) {
     const items = [
-      { label: 'Open', run: () => invoke('download.action', { download_id: d.id, action: 'open' }) },
-      { label: 'Show in folder', run: () => invoke('download.action', { download_id: d.id, action: 'reveal' }) },
+      { label: 'Open', run: () => invoke('shell_download', { download_id: d.id, operation: 'open' }) },
+      { label: 'Show in folder', run: () => invoke('shell_download', { download_id: d.id, operation: 'reveal' }) },
       { sep: true },
-      { label: 'Remove from list', danger: true, run: () => invoke('download.action', { download_id: d.id, action: 'remove' }) },
+      { label: 'Remove from list', danger: true, run: () => invoke('shell_download', { download_id: d.id, operation: 'entry_remove' }) },
     ];
     el.itemMenu.innerHTML = '';
     items.forEach((it) => {
@@ -903,7 +903,7 @@
       el.itemMenu.appendChild(b);
     });
     el.itemMenu.hidden = false;
-    invoke('shell.menu', { open: true });
+    invoke('shell_ui', { operation: 'menu_set', open: true });
     el.itemMenu.style.left = `${Math.min(x, window.innerWidth - 220)}px`;
     el.itemMenu.style.top = `${Math.min(y, window.innerHeight - 160)}px`;
     const first = el.itemMenu.querySelector('.menu-item');
@@ -918,7 +918,7 @@
       e.preventDefault();
       const d = state.downloads.find((x) => String(x.id) === li.dataset.id);
       if (d) {
-        invoke('download.action', { download_id: d.id, action: e.altKey ? 'reveal' : 'open' }).catch(() => {});
+        invoke('shell_download', { download_id: d.id, operation: e.altKey ? 'reveal' : 'open' }).catch(() => {});
       }
     } else if (e.key === 'Shift+F10' || e.key === 'ContextMenu') {
       e.preventDefault();
@@ -928,49 +928,49 @@
     }
   }
 
-  el.downloadsClear.addEventListener('click', () => invoke('download.clear_list', {}));
-  el.downloadsClose.addEventListener('click', () => invoke('shortcut', { name: 'escape' }));
+  el.downloadsClear.addEventListener('click', () => invoke('shell_download', { operation: 'list_clear' }));
+  el.downloadsClose.addEventListener('click', () => invoke('shell_ui', { operation: 'shortcut', name: 'escape' }));
 
   // ── toolbars ─────────────────────────────────────────────────────────
-  el.back.addEventListener('click', () => invoke('nav.back', {}));
-  el.forward.addEventListener('click', () => invoke('nav.forward', {}));
-  el.reload.addEventListener('click', () => invoke('nav.reload', {}));
-  el.star.addEventListener('click', () => invoke('tab.bookmark', {}));
-  el.downloadsBtn.addEventListener('click', () => invoke('shortcut', { name: 'open_downloads' }));
-  document.getElementById('btn-ai').addEventListener('click', () => invoke('shortcut', { name: 'ask_ai' }));
-  el.settings.addEventListener('click', () => invoke('settings.open', {}));
-  el.newTab.addEventListener('click', () => invoke('tab.new', {}));
+  el.back.addEventListener('click', () => invoke('shell_page_navigation', { operation: 'back' }));
+  el.forward.addEventListener('click', () => invoke('shell_page_navigation', { operation: 'forward' }));
+  el.reload.addEventListener('click', () => invoke('shell_page_navigation', { operation: 'reload' }));
+  el.star.addEventListener('click', () => invoke('shell_bookmark', { operation: 'toggle' }));
+  el.downloadsBtn.addEventListener('click', () => invoke('shell_ui', { operation: 'shortcut', name: 'open_downloads' }));
+  document.getElementById('btn-ai').addEventListener('click', () => invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' }));
+  el.settings.addEventListener('click', () => invoke('shell_settings', { operation: 'open' }));
+  el.newTab.addEventListener('click', () => invoke('shell_tab', { operation: 'open' }));
   el.newCanvas.addEventListener('click', () => {
     const r = el.newCanvas.getBoundingClientRect();
     openItemMenu(null, r.left, r.bottom + 2, GRIDS.map(([c, r2]) => ({
-      label: `${c} × ${r2} canvas  (${c * r2} pages)`, run: () => invoke('canvas.create', { cols: c, rows: r2 }),
+      label: `${c} × ${r2} canvas  (${c * r2} pages)`, run: () => invoke('shell_canvas', { operation: 'open', cols: c, rows: r2 }),
     })));
   });
-  $('#cv-zoom').addEventListener('click', () => invoke('canvas.zoom', {}));
-  $('#cv-close').addEventListener('click', () => state.canvas && invoke('canvas.clear', { cell: state.canvas.focus }));
+  $('#cv-zoom').addEventListener('click', () => invoke('shell_canvas', { operation: 'zoom' }));
+  $('#cv-close').addEventListener('click', () => state.canvas && invoke('shell_canvas', { operation: 'cell_close', cell: state.canvas.focus }));
   $('#cv-layout').addEventListener('click', (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     if (state.canvas) openItemMenu({ canvas: true, id: state.canvas.id }, r.left - 140, r.bottom);
   });
-  el.railToggle.addEventListener('click', () => invoke('shell.toggle_rail', {}));
-  $('#win-min').addEventListener('click', () => invoke('window.minimize', {}));
-  $('#win-max').addEventListener('click', () => invoke('window.toggle_maximize', {}));
+  el.railToggle.addEventListener('click', () => invoke('shell_ui', { operation: 'tab_rail_toggle' }));
+  $('#win-min').addEventListener('click', () => invoke('shell_window', { operation: 'minimize' }));
+  $('#win-max').addEventListener('click', () => invoke('shell_window', { operation: 'maximize_toggle' }));
   $('#win-span').addEventListener('click', async () => {
     try {
-      const result = await invoke('window.toggle_span', {});
+      const result = await invoke('shell_window', { operation: 'span_toggle' });
       if (result?.needs_selection) await openMonitorPicker();
     } catch (error) { toast(error.message || String(error)); }
   });
   $('#win-span-menu').addEventListener('click', () => openMonitorPicker().catch(error => toast(error.message || String(error))));
-  $('#win-close').addEventListener('click', () => invoke('window.close', {}));
+  $('#win-close').addEventListener('click', () => invoke('shell_window', { operation: 'close' }));
   const dragArea = $('#win-drag');
-  dragArea.addEventListener('mousedown', (e) => { if (e.button === 0 && e.detail < 2) invoke('window.drag', {}); });
-  dragArea.addEventListener('dblclick', () => invoke('window.toggle_maximize', {}));
+  dragArea.addEventListener('mousedown', (e) => { if (e.button === 0 && e.detail < 2) invoke('shell_window', { operation: 'drag' }); });
+  dragArea.addEventListener('dblclick', () => invoke('shell_window', { operation: 'maximize_toggle' }));
   for (const edge of document.querySelectorAll('.win-edge')) {
-    edge.addEventListener('mousedown', (e) => { if (e.button === 0) invoke('window.resize', { dir: edge.dataset.dir }); });
+    edge.addEventListener('mousedown', (e) => { if (e.button === 0) invoke('shell_window', { operation: 'resize', dir: edge.dataset.dir }); });
   }
   for (const [id, name] of [['zoom-in', 'zoom_in'], ['zoom-out', 'zoom_out'], ['zoom-label', 'zoom_reset'], ['zoom-fit', 'zoom_fit']]) {
-    $('#' + id).addEventListener('click', () => invoke('shortcut', { name }));
+    $('#' + id).addEventListener('click', () => invoke('shell_ui', { operation: 'shortcut', name }));
   }
 
   el.omniboxForm.addEventListener('submit', (e) => { e.preventDefault(); submitOmnibox(); });
@@ -1023,7 +1023,7 @@
     if (!monitorPicker.hidden && topology !== monitorTopology) { monitorTopology = topology; renderMonitorPicker(); }
   });
   on('app.ready', () => {
-    invoke('diagnostics.self_test', {}).catch(() => {});
+    invoke('shell_diagnostics', { operation: 'self_test' }).catch(() => {});
   });
 
   on('state.tabs', (p) => {
@@ -1095,8 +1095,8 @@
   });
   on('shell.find_action', (p) => {
     if (!p) return;
-    if (p.action === 'find_next') findQuery('find.next');
-    else if (p.action === 'find_prev') findQuery('find.prev');
+    if (p.action === 'find_next') findQuery('next');
+    else if (p.action === 'find_prev') findQuery('previous');
   });
   on('shell.shortcut', (p) => {
     if (!p) return;
@@ -1118,7 +1118,7 @@
       case 'close_tab_or_word': {
         if (document.activeElement === el.omnibox || document.activeElement === el.findInput) {
           const inp = document.activeElement;
-          if (inp.value.length === 0) invoke('shortcut', { name: 'close_tab' });
+          if (inp.value.length === 0) invoke('shell_ui', { operation: 'shortcut', name: 'close_tab' });
           // Otherwise the key has already been swallowed; the native edit
           // control did not see it. Delete a word explicitly.
           else deleteWord(inp);
@@ -1131,7 +1131,7 @@
   });
   on('shell.ctrl_w', () => {
     if (document.activeElement === el.omnibox || document.activeElement === el.findInput) {
-      if (document.activeElement.value.length === 0) invoke('shortcut', { name: 'close_tab' });
+      if (document.activeElement.value.length === 0) invoke('shell_ui', { operation: 'shortcut', name: 'close_tab' });
       else deleteWord(document.activeElement);
     }
   });
@@ -1194,13 +1194,13 @@
 
   // ── boot ─────────────────────────────────────────────────────────────
   applyTheme();
-  invoke('shell.ready', {}).then(() => {
+  invoke('shell_ui', { operation: 'ready' }).then(() => {
     // W1: report the first animation frame after the shell has painted.
     requestAnimationFrame(() => {
       const t = performance.now();
-      invoke('diagnostics.self_test', {}).then(() => console.info(`[shell] first paint at ${t.toFixed(1)} ms (document)`)).catch(() => {});
+      invoke('shell_diagnostics', { operation: 'self_test' }).then(() => console.info(`[shell] first paint at ${t.toFixed(1)} ms (document)`)).catch(() => {});
     });
-  }).catch((e) => console.error('shell.ready', e));
+  }).catch((e) => console.error('shell_ui ready', e));
 
   window.addEventListener('resize', () => {
     // The host owns geometry; this listener exists only so the dropdown

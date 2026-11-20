@@ -48,8 +48,8 @@ function PromptCard({ p }: { p: AgentState['prompts'][number] }) {
       <div class="ag-help">{p.help}</div>
       <textarea class="ag-edit" rows={p.name === 'system' ? 16 : 8} spellcheck={false} value={text} onInput={(e) => setText(e.currentTarget.value)} />
       <div>
-        <button type="button" class="chip-btn is-accent" onClick={() => void a.run('Saving…', () => call('prompt.save', { name: p.name, text }))}>Save</button>{' '}
-        <button type="button" class="chip-btn" onClick={() => void a.run('Resetting…', () => call('prompt.reset', { name: p.name }))}>Reset to default</button>{' '}
+        <button type="button" class="chip-btn is-accent" onClick={() => void a.run('Saving…', () => call('shell_agent_prompt', 'save', { name: p.name, text }))}>Save</button>{' '}
+        <button type="button" class="chip-btn" onClick={() => void a.run('Resetting…', () => call('shell_agent_prompt', 'reset', { name: p.name }))}>Reset to default</button>{' '}
         {a.view}
       </div>
     </section>
@@ -63,7 +63,7 @@ function InstructionsTab({ s }: { s: AgentState }) {
     <>
       <p class="ag-help">Your own standing instructions. They are added to every agent run (the system prompt's {'{{custom_instructions}}'} placeholder).</p>
       <textarea class="ag-edit" rows={12} spellcheck={false} value={text} placeholder="e.g. Always answer in British English. Prefer primary sources. Keep answers short." onInput={(e) => setText(e.currentTarget.value)} />
-      <div><button type="button" class="chip-btn is-accent" onClick={() => void a.run('Saving…', () => call('config.set', { custom_instructions: text }))}>Save</button> {a.view}</div>
+      <div><button type="button" class="chip-btn is-accent" onClick={() => void a.run('Saving…', () => call('shell_agent', 'config_set', { custom_instructions: text }))}>Save</button> {a.view}</div>
     </>
   );
 }
@@ -71,12 +71,12 @@ function InstructionsTab({ s }: { s: AgentState }) {
 function ModelTab() {
   const refresh = async () => {
     await refreshStatus();
-    await native.invoke('ai.models', {}).catch(() => undefined);
+    await native.invoke('shell_ai', { operation: 'models_list' }).catch(() => undefined);
   };
   return <ModelsSettings connections={aiStatus.value?.provider?.connections ?? []} disabled={busy.value || aiStatus.value?.busy}
-    onSave={async payload => { await native.invoke('ai.provider.set', payload); await refresh(); }}
+    onSave={async payload => { await native.invoke('shell_ai', { ...payload, operation: 'provider_set' }); await refresh(); }}
     onDelete={async id => {
-      await native.invoke('ai.provider.delete', { id });
+      await native.invoke('shell_ai', { operation: 'provider_delete', id });
       if (model.value.startsWith(id + '/')) setModel('');
       await refresh();
     }} />;
@@ -90,7 +90,7 @@ function GeneralTab({ s }: { s: AgentState }) {
     <>
       <label class="ag-check"><input type="checkbox" checked={auto} onChange={(e) => setAuto(e.currentTarget.checked)} /><span> Run actions without asking (click, type, navigate and non-read-only MCP tools). Off is safer.</span></label>
       <label class="ag-check">Max tool rounds per run <input type="number" min={1} max={60} class="ag-num" value={rounds} onInput={(e) => setRounds(e.currentTarget.value)} /></label>
-      <div><button type="button" class="chip-btn is-accent" onClick={() => void a.run('Saving…', () => call('config.set', { auto_approve: auto, max_rounds: Number(rounds) || 25 }))}>Save</button> {a.view}</div>
+      <div><button type="button" class="chip-btn is-accent" onClick={() => void a.run('Saving…', () => call('shell_agent', 'config_set', { auto_approve: auto, max_rounds: Number(rounds) || 25 }))}>Save</button> {a.view}</div>
       <p class="ag-help">Model endpoints and keys are on the Models tab.</p>
     </>
   );
@@ -112,14 +112,14 @@ function SkillsTab({ s }: { s: AgentState }) {
         <section class="ag-card" key={k.id}>
           <div class="ag-card-h">
             <b>{k.name}</b>{k.builtin ? <span class="ag-badge">built-in</span> : null}
-            <select class="ag-mode" value={k.mode} onChange={(e) => call<AgentState>('skill.mode', { id: k.id, mode: e.currentTarget.value }).then((r) => { agentState.value = r; }).catch((err) => setStatus(errText(err), 'error'))}>
+            <select class="ag-mode" value={k.mode} onChange={(e) => call<AgentState>('shell_agent_skill', 'mode_set', { id: k.id, mode: e.currentTarget.value }).then((r) => { agentState.value = r; }).catch((err) => setStatus(errText(err), 'error'))}>
               {MODES.map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
           </div>
           <div class="ag-help">{k.description}</div>
           <div>
-            <button type="button" class="chip-btn" onClick={() => call<SkillInfo>('skill.get', { id: k.id }).then((skill) => setEditing({ skill, isNew: false })).catch((err) => setStatus(errText(err), 'error'))}>Edit</button>{' '}
-            {k.builtin ? null : <button type="button" class="chip-btn is-danger" onClick={() => { if (confirm(`Delete skill "${k.name}"?`)) void call<AgentState>('skill.delete', { id: k.id }).then((r) => { agentState.value = r; }); }}>Delete</button>}
+            <button type="button" class="chip-btn" onClick={() => call<SkillInfo>('shell_agent_skill', 'get', { id: k.id }).then((skill) => setEditing({ skill, isNew: false })).catch((err) => setStatus(errText(err), 'error'))}>Edit</button>{' '}
+            {k.builtin ? null : <button type="button" class="chip-btn is-danger" onClick={() => { if (confirm(`Delete skill "${k.name}"?`)) void call<AgentState>('shell_agent_skill', 'delete', { id: k.id }).then((r) => { agentState.value = r; }); }}>Delete</button>}
           </div>
         </section>
       ))}
@@ -136,7 +136,7 @@ function SkillEditor({ e, done }: { e: { skill: Partial<SkillInfo>; isNew: boole
   const [ins, setIns] = useState(k.instructions ?? '');
   const a = useAction();
   const save = async () => {
-    const r = await a.run('Saving…', () => call('skill.save', {
+    const r = await a.run('Saving…', () => call('shell_agent_skill', 'save', {
       id: k.id || '', name, description: desc, mode, instructions: ins,
       triggers: trig.split(',').map((x) => x.trim()).filter(Boolean),
     }));
@@ -169,7 +169,7 @@ function McpTab({ s }: { s: AgentState }) {
       <p class="ag-help">MCP servers add tools to the agent. Tools that are not read-only ask for approval unless you mark the server trusted.</p>
       <div>
         <button type="button" class="chip-btn is-accent" onClick={() => setEditing({ id: '', name: '', url: '', command: '', args: [], enabled: true, trust: false })}>Add server</button>{' '}
-        <button type="button" class="chip-btn" onClick={() => void call<AgentState>('mcp.sync').then(set)}>Reconnect all</button>
+        <button type="button" class="chip-btn" onClick={() => void call<AgentState>('shell_agent_mcp', 'sync').then(set)}>Reconnect all</button>
       </div>
       {!s.mcp.length ? <p class="overlay-empty">No MCP servers yet.</p> : null}
       {s.mcp.map((m) => (
@@ -188,8 +188,8 @@ function McpTab({ s }: { s: AgentState }) {
           ) : null}
           <div>
             <button type="button" class="chip-btn" onClick={() => setEditing(m)}>Edit</button>{' '}
-            <button type="button" class="chip-btn" onClick={() => void call<AgentState>('mcp.retry', { id: m.id }).then(set).catch((e) => setStatus(errText(e), 'error'))}>Retry</button>{' '}
-            <button type="button" class="chip-btn is-danger" onClick={() => { if (confirm(`Remove server "${m.name}"?`)) void call<AgentState>('mcp.delete', { id: m.id }).then(set); }}>Delete</button>
+            <button type="button" class="chip-btn" onClick={() => void call<AgentState>('shell_agent_mcp', 'retry', { id: m.id }).then(set).catch((e) => setStatus(errText(e), 'error'))}>Retry</button>{' '}
+            <button type="button" class="chip-btn is-danger" onClick={() => { if (confirm(`Remove server "${m.name}"?`)) void call<AgentState>('shell_agent_mcp', 'delete', { id: m.id }).then(set); }}>Delete</button>
           </div>
         </section>
       ))}
@@ -211,7 +211,7 @@ function McpEditor({ m, done }: { m: Partial<McpServer>; done: () => void }) {
     const payload: Record<string, unknown> = { id: m.id || '', name, enabled, trust };
     if (kind === 'url') Object.assign(payload, { url, command: '', args: [], ...(token ? { token } : {}) });
     else Object.assign(payload, { url: '', command: cmd, args: args.split(/\s+/).filter(Boolean) });
-    if (await a.run('Saving…', () => call('mcp.save', payload))) done();
+    if (await a.run('Saving…', () => call('shell_agent_mcp', 'save', payload))) done();
   };
   return (
     <>
@@ -255,7 +255,7 @@ export function SettingsPanel() {
         {tab === 'model' ? <ModelTab /> : !s ? <p class="overlay-empty">Loading…</p>
           : tab === 'tools' ? <ToolsSettings tools={s.tools || []} error={s.tools_error}
               onEditMcp={() => { settingsTab.value = 'mcp'; }}
-              onChange={async (op, payload) => { agentState.value = await call<AgentState>(op, payload); }} />
+              onChange={async (operation, payload) => { agentState.value = await call<AgentState>('shell_agent_tool', operation, payload); }} />
           : tab === 'prompts' ? <PromptsTab s={s} />
           : tab === 'instructions' ? <InstructionsTab s={s} />
           : tab === 'skills' ? <SkillsTab s={s} />

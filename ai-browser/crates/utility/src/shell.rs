@@ -16,7 +16,7 @@ pub trait ShellLink: Send + Sync {
     /// `Ok(ResponsePayload::Failure(..))`.
     fn call(
         &self,
-        method: Method,
+        name: &str,
         params: &serde_json::Value,
         control: &TaskControl,
     ) -> Result<ResponsePayload, Failure>;

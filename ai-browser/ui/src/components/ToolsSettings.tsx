@@ -33,15 +33,15 @@ export function ToolsSettings({ tools, error, onChange, onEditMcp }: Props) {
     tool={editing} busy={busy} message={message} cancel={() => setEditing(null)}
     configureMcp={onEditMcp}
     save={async definition => {
-      if (await act('tools.definition.save', { id: editing.id, definition })) setEditing(null);
+      if (await act('definition_save', { id: editing.id, definition })) setEditing(null);
     }}
     reset={async () => {
-      if (await act('tools.definition.reset', { id: editing.id })) setEditing(null);
+      if (await act('definition_reset', { id: editing.id })) setEditing(null);
     }} />;
   if (editing) return <HttpEditor key={editing === 'new' ? 'new' : editing.id}
     existing={editing === 'new' ? undefined : editing}
     save={async payload => {
-      if (await act('tools.http.save', payload)) setEditing(null);
+      if (await act('http_save', payload)) setEditing(null);
     }} cancel={() => setEditing(null)} busy={busy} message={message} />;
   return <>
     <p class="ag-help">Only enabled tools are sent to the model. Browser operations, network access, skills and MCP tools are all listed here. Existing enabled tools are preserved on upgrade.</p>
@@ -61,7 +61,7 @@ export function ToolsSettings({ tools, error, onChange, onEditMcp }: Props) {
         onChange={event => {
           const enabled = event.currentTarget.checked;
           setPendingToggle({ id: tool.id, enabled });
-          void act('tools.enable', { id: tool.id, enabled });
+          void act('enabled_set', { id: tool.id, enabled });
         }} />
         <span>Enabled{tool.read_only ? ' (read-only)' : ' (may change data)'}</span></label>
       <details><summary>Model tool definition (tools field)</summary>
@@ -76,7 +76,7 @@ export function ToolsSettings({ tools, error, onChange, onEditMcp }: Props) {
           onClick={() => { setMessage(''); setEditing(tool); }}>Edit</button>{' '}
         {tool.http ? <button type="button" class="chip-btn is-danger" disabled={busy}
           aria-label={`Delete ${tool.id}`} onClick={() => {
-            if (confirm(`Delete HTTP tool "${tool.title}"?`)) void act('tools.http.delete', { id: tool.id });
+            if (confirm(`Delete HTTP tool "${tool.title}"?`)) void act('http_delete', { id: tool.id });
           }}>Delete</button> : null}
       </div>
     </section>)}

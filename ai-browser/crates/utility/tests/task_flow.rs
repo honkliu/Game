@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use ai_platform_contract::config::AiConfig;
 use ai_platform_contract::contract::{CancelReason, TaskOutcome, TaskRequestView};
 use ai_platform_contract::failure::{Failure, FailureKind};
-use ai_platform_contract::frame::{Method, ResponsePayload};
+use ai_platform_contract::frame::ResponsePayload;
 use ai_platform_contract::identity::DocumentToken;
 use ai_platform_contract::model::BrowserEvent;
 use ai_utility::control::{now_ms, StopReason, TaskControl};
@@ -80,9 +80,8 @@ fn action_result(approval_required: bool, granted: bool, blocked_by: Option<&str
 
 fn plain_shell() -> FakeShell {
     FakeShell::new(|method, _params, _control| match method {
-        Method::GetSnapshot => Ok(ResponsePayload::Ok(snapshot(10, 1))),
-        Method::DispatchAction => Ok(ResponsePayload::Ok(action_result(false, true, None))),
-        _ => Err(Failure::unsupported("test.unexpected")),
+        "shell_page_snapshot" => Ok(ResponsePayload::Ok(snapshot(10, 1))),
+        _ => Ok(ResponsePayload::Ok(action_result(false, true, None))),
     })
 }
 
@@ -139,7 +138,7 @@ fn extractive_answer_streams_densely_and_cites_verbatim() {
     let routed = events.iter().find(|e| e["event"] == "routed").expect("routed event");
     assert_eq!(routed["chosen"]["provider_id"], "extractive");
     assert_eq!(events.last().unwrap()["stage"], "finished");
-    assert_eq!(shell.called(Method::GetSnapshot), 1);
+    assert_eq!(shell.called("shell_page_snapshot"), 1);
 }
 
 #[test]
@@ -214,7 +213,7 @@ fn kill_switches_and_bad_config_fail_closed() {
     cfg.flags.ai_enabled = false;
     let outcome = run(&shell, &Tabs::default(), &view("ask", QUESTION, json!({})), &cfg);
     assert_eq!(failed(&outcome).kind, FailureKind::Blocked);
-    assert_eq!(shell.called(Method::GetSnapshot), 0, "no capture when AI is off");
+    assert_eq!(shell.called("shell_page_snapshot"), 0, "no capture when AI is off");
 
     let shell = plain_shell();
     let mut cfg = AiConfig::default();
@@ -233,7 +232,7 @@ fn navigation_during_snapshot_makes_the_task_stale_and_dispatches_nothing() {
     let tabs = Arc::new(Tabs::default());
     let shell_tabs = Arc::clone(&tabs);
     let shell = FakeShell::new(move |method, _p, control| match method {
-        Method::GetSnapshot => {
+        "shell_page_snapshot" => {
             // The browser reports the navigation while the snapshot is in flight.
             let out = shell_tabs.apply(&BrowserEvent::DocumentDestroyed { document: DocumentToken(10) });
             assert_eq!(out.dead, vec![DocumentToken(10)]);
@@ -245,7 +244,7 @@ fn navigation_during_snapshot_makes_the_task_stale_and_dispatches_nothing() {
     let outcome = run(&shell, &tabs, &view("act", "open link 0", json!({})), &AiConfig::default());
     let failure = failed(&outcome);
     assert_eq!((failure.kind, failure.code.as_str()), (FailureKind::Stale, "task.document_replaced"));
-    assert_eq!(shell.called(Method::DispatchAction), 0);
+    assert_eq!(shell.action_calls().len(), 0);
 }
 
 #[test]
@@ -255,7 +254,7 @@ fn a_task_on_an_already_replaced_document_never_reads_it() {
     let shell = plain_shell();
     let outcome = run(&shell, &tabs, &view("ask", QUESTION, json!({})), &AiConfig::default());
     assert_eq!(failed(&outcome).kind, FailureKind::Stale);
-    assert_eq!(shell.called(Method::GetSnapshot), 0);
+    assert_eq!(shell.called("shell_page_snapshot"), 0);
 }
 
 #[test]
@@ -273,7 +272,7 @@ fn staleness_during_the_model_call_withholds_the_answer() {
     let control = Arc::new(TaskControl::new(0));
     let stopper = Arc::clone(&control);
     let shell = FakeShell::new(move |method, _p, _c| match method {
-        Method::GetSnapshot => {
+        "shell_page_snapshot" => {
             let stopper = Arc::clone(&stopper);
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(200));
@@ -333,44 +332,48 @@ fn act_opens_only_a_snapshot_link_with_the_snapshot_url() {
     let shell = plain_shell();
     let outcome = run(&shell, &Tabs::default(), &view("act", "open link 1", json!({})), &AiConfig::default());
     assert!(matches!(outcome, TaskOutcome::Answered(_)), "{outcome:?}");
-    let sent = shell.calls_of(Method::DispatchAction);
+    let sent = shell.action_calls();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0]["action_kind"], "open_tab");
     assert_eq!(sent[0]["expected_document"], 10);
     assert_eq!(sent[0]["target"]["opaque_target"]["link_id"], "l1");
     assert_eq!(sent[0]["arguments"]["url"], "https://shop.example/contact");
+    let canonical = shell.calls_of("shell_tab");
+    assert_eq!(canonical[0]["operation"], "open");
+    assert_eq!(canonical[0]["url"], "https://shop.example/contact");
+    assert_eq!(canonical[0]["_task"], sent[0]);
 
     let shell = plain_shell();
     let outcome = run(&shell, &Tabs::default(), &view("act", "open link 7", json!({})), &AiConfig::default());
     assert!(matches!(outcome, TaskOutcome::NoAnswer(_)), "{outcome:?}");
-    assert_eq!(shell.called(Method::DispatchAction), 0, "an unknown link is never invented");
+    assert_eq!(shell.action_calls().len(), 0, "an unknown link is never invented");
 }
 
 #[test]
 fn act_by_link_text() {
     let shell = plain_shell();
     run(&shell, &Tabs::default(), &view("act", "go to Contact support", json!({})), &AiConfig::default());
-    assert_eq!(shell.calls_of(Method::DispatchAction)[0]["arguments"]["url"], "https://shop.example/contact");
+    assert_eq!(shell.action_calls()[0]["arguments"]["url"], "https://shop.example/contact");
 }
 
 #[test]
 fn act_handles_denial_policy_block_and_failure_results() {
     let denied = FakeShell::new(|m, _, _| match m {
-        Method::GetSnapshot => Ok(ResponsePayload::Ok(snapshot(10, 1))),
+        "shell_page_snapshot" => Ok(ResponsePayload::Ok(snapshot(10, 1))),
         _ => Ok(ResponsePayload::Ok(action_result(true, false, None))),
     });
     let outcome = run(&denied, &Tabs::default(), &view("act", "open link 0", json!({})), &AiConfig::default());
     assert_eq!(failed(&outcome).code, "action.approval_denied");
 
     let blocked = FakeShell::new(|m, _, _| match m {
-        Method::GetSnapshot => Ok(ResponsePayload::Ok(snapshot(10, 1))),
+        "shell_page_snapshot" => Ok(ResponsePayload::Ok(snapshot(10, 1))),
         _ => Ok(ResponsePayload::Ok(action_result(false, false, Some("kill_switch")))),
     });
     let outcome = run(&blocked, &Tabs::default(), &view("act", "open link 0", json!({})), &AiConfig::default());
     assert_eq!(failed(&outcome).kind, FailureKind::Blocked);
 
     let stale = FakeShell::new(|m, _, _| match m {
-        Method::GetSnapshot => Ok(ResponsePayload::Ok(snapshot(10, 1))),
+        "shell_page_snapshot" => Ok(ResponsePayload::Ok(snapshot(10, 1))),
         _ => Ok(ResponsePayload::Failure(Failure::stale("action.document_replaced"))),
     });
     let outcome = run(&stale, &Tabs::default(), &view("act", "open link 0", json!({})), &AiConfig::default());
@@ -378,12 +381,12 @@ fn act_handles_denial_policy_block_and_failure_results() {
 
     // A non-fatal failure is an observation; the extractive planner then gives up honestly.
     let flaky = FakeShell::new(|m, _, _| match m {
-        Method::GetSnapshot => Ok(ResponsePayload::Ok(snapshot(10, 1))),
+        "shell_page_snapshot" => Ok(ResponsePayload::Ok(snapshot(10, 1))),
         _ => Ok(ResponsePayload::Failure(Failure::unavailable("action.tab_busy"))),
     });
     let outcome = run(&flaky, &Tabs::default(), &view("act", "open link 0", json!({})), &AiConfig::default());
     assert!(matches!(outcome, TaskOutcome::NoAnswer(_)), "{outcome:?}");
-    assert_eq!(flaky.called(Method::DispatchAction), 1);
+    assert_eq!(flaky.action_calls().len(), 1);
 }
 
 #[test]
@@ -391,7 +394,7 @@ fn act_respects_ceiling_and_config_and_domain_policy() {
     let shell = plain_shell();
     let observe = view_with(1, 10, 1, "act", "open link 0", "observe", 0, json!({}));
     assert_eq!(failed(&run(&shell, &Tabs::default(), &observe, &AiConfig::default())).kind, FailureKind::Blocked);
-    assert_eq!(shell.called(Method::GetSnapshot), 0);
+    assert_eq!(shell.called("shell_page_snapshot"), 0);
 
     let mut cfg = AiConfig::default();
     cfg.flags.max_action_level = "observe".into();
@@ -403,7 +406,7 @@ fn act_respects_ceiling_and_config_and_domain_policy() {
     let shell = plain_shell();
     let outcome = run(&shell, &Tabs::default(), &view("act", "open link 0", json!({})), &cfg);
     assert!(matches!(outcome, TaskOutcome::NoAnswer(_)), "{outcome:?}");
-    assert_eq!(shell.called(Method::DispatchAction), 0, "automation-denied domains are observe-only");
+    assert_eq!(shell.action_calls().len(), 0, "automation-denied domains are observe-only");
 }
 
 #[test]
@@ -414,7 +417,7 @@ fn model_driven_act_loop_is_bounded_and_refuses_invented_targets() {
     let outcome = run(&shell, &Tabs::default(), &view("act", "open the secret page", json!({})), &http_config(&server.base_url));
     assert_eq!(failed(&outcome).code, "act.step_limit");
     assert_eq!(server.requests().len(), 6);
-    assert_eq!(shell.called(Method::DispatchAction), 0);
+    assert_eq!(shell.action_calls().len(), 0);
     let last = server.requests().pop().unwrap();
     assert!(last.body["messages"][1]["content"].as_str().unwrap().contains("link_id is not in the page links"));
 
@@ -422,7 +425,7 @@ fn model_driven_act_loop_is_bounded_and_refuses_invented_targets() {
     let server = FakeServer::start(script_for(r#"{"action":"open_tab","link_id":"l0","url":"https://evil.example"}"#));
     let shell = plain_shell();
     run(&shell, &Tabs::default(), &view("act", "open pricing", json!({})), &http_config(&server.base_url));
-    let sent = shell.calls_of(Method::DispatchAction);
+    let sent = shell.action_calls();
     assert!(!sent.is_empty());
     assert_eq!(sent[0]["arguments"]["url"], "https://shop.example/pricing");
 }

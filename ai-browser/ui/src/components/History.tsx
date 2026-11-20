@@ -24,7 +24,7 @@ export function History() {
       <div class="ag-list">
         {error ? <p class="ag-error">{error}</p> : rows === null ? <p class="overlay-empty">Loading…</p> : !rows.length ? <p class="overlay-empty">No saved conversations yet.</p> : rows.map((c) => (
           <div class="ag-row" key={c.id}>
-            <button type="button" class="ag-row-main" onClick={() => void native.invoke('ai.conversation.open', { id: c.id }).catch(e => setError(String(e)))}>
+            <button type="button" class="ag-row-main" onClick={() => void native.invoke('shell_ai', { operation: 'conversation_open', id: c.id }).catch(e => setError(String(e)))}>
               <b>{c.title || c.id}</b><small>{c.updated ? new Date(c.updated).toLocaleString() : ''}</small>
             </button>
             <button type="button" class="chip-btn is-danger" onClick={() => void deleteConversation(c.id).catch(() => undefined).then(() => load(q))}>Delete</button>

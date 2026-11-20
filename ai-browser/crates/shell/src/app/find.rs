@@ -1,11 +1,11 @@
 use super::*;
 
 impl AppState {
-    pub(super) fn find_query(&mut self, command: &str, params: &Value) -> Result<Option<Value>, String> {
-        let tab = self.active.ok_or("no active page")?;
+    pub(super) fn wv_page_find(&mut self, command: &str, params: &Value) -> Result<Option<Value>, String> {
+        let tab = self.wv_page_target(params)?;
         self.find_seq += 1;
         let sequence = self.find_seq;
-        let query = if command == "find.stop" { "" } else {
+        let query = if command == "stop" { "" } else {
             params["query"].as_str().or_else(|| params["text"].as_str()).unwrap_or("")
         };
         if query.chars().count() > 1_000 {
@@ -15,8 +15,8 @@ impl AppState {
         let previous = prior.map_or(0, |result| result.active as i64);
         let total = prior.map_or(0, |result| result.total);
         let index = match command {
-            "find.next" => previous,
-            "find.prev" => previous - 2,
+            "next" => previous,
+            "previous" => previous - 2,
             _ => 0,
         };
         let script = format!("({})({},{},{},{},{},{})", include_str!("../../ui/find.js"),
@@ -30,7 +30,7 @@ impl AppState {
             pdf.find(query.to_string(), index, move |raw| {
                 let _ = proxy.send_event(AppMessage::FindDone(tab, sequence, raw));
             })?;
-            if command == "find.stop" {
+            if command == "stop" {
                 self.find = None;
                 self.emit("find.result", json!({ "closed": true }));
             } else {
@@ -39,7 +39,7 @@ impl AppState {
             }
             return Ok(None);
         }
-        if command == "find.stop" {
+        if command == "stop" {
             self.find = None;
             if let Some(live) = self.live.get(&tab) {
                 let _ = live.webview.evaluate_script(&script);

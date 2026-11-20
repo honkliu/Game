@@ -10,14 +10,14 @@ use serde_json::{json, Value};
 
 use super::ai_glue::is_readable_url;
 use super::AppState;
-use crate::ai::session::{AgentEval, Chain};
+use super::operations::{Evaluation, Chain};
 use crate::tabs::TabId;
 
 const DISMISS_SCRIPT: &str = include_str!("dismiss.js");
 
 impl AppState {
     /// The pages a dismiss request means, in reading order.
-    pub(super) fn dismiss_targets(&self, args: &Value) -> Result<Vec<TabId>, String> {
+    pub(super) fn wv_popups_targets(&self, args: &Value) -> Result<Vec<TabId>, String> {
         let scope = args.get("scope").and_then(Value::as_str).unwrap_or("cell");
         let explicit = ["cell", "row", "col", "tab_id"].iter().any(|k| args.get(*k).is_some());
         let mut targets: Vec<TabId> = match (scope, self.canvas_shown) {
@@ -46,26 +46,28 @@ impl AppState {
 
     /// Start dismissing in every target, one after another. `reply` answers the agent's
     /// request `id` with the summary; otherwise the summary is announced as an event.
-    pub(super) fn dismiss_start(&mut self, id: u64, targets: Vec<TabId>, reply: bool) {
+    pub(super) fn wv_popups_dismiss(&mut self, id: u64, targets: Vec<TabId>, reply: bool) {
         let mut rest: Vec<u64> = targets.iter().rev().map(|t| t.0).collect();
         let Some(first) = rest.pop() else { return };
         let tab = TabId(first);
-        self.agent_wake(tab);
-        let eval = AgentEval {
+        self.wv_page_wake(tab);
+        let caller = self.api.pending.get(&id).map(|p| p.caller).unwrap_or(self.wv_api_caller());
+        let eval = Evaluation {
             tab: first,
             document: self.ai.identity.current(first),
-            run: reply.then_some(self.ai.agent_run),
+            caller: caller.id,
+            run: (reply && caller.builtin && caller.id != 0 && self.ai.agent_run != 0).then_some(self.ai.agent_run),
             script: DISMISS_SCRIPT.to_string(),
             attempts: 0,
             is_read: false,
             chain: Some(Chain { rest, results: Vec::new(), reply }),
         };
-        self.ai.agent_evals.insert(id, eval);
-        self.agent_schedule(id, 0);
+        self.api.evals.insert(id, eval);
+        self.wv_eval_schedule(id, 0);
     }
 
     /// One target answered (or failed): record it and move to the next, or finish.
-    pub(super) fn dismiss_step(&mut self, id: u64, mut eval: AgentEval, raw: &str) {
+    pub(super) fn wv_popups_step(&mut self, id: u64, mut eval: Evaluation, raw: &str) {
         let mut row = serde_json::from_str::<String>(raw)
             .ok()
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -80,17 +82,16 @@ impl AppState {
                 eval.tab = next;
                 eval.document = self.ai.identity.current(next);
                 eval.chain = Some(chain);
-                self.ai.agent_evals.insert(id, eval);
-                return self.agent_schedule(id, 0);
+                self.api.evals.insert(id, eval);
+                return self.wv_eval_schedule(id, 0);
             }
             chain.results.push(json!({ "tab_id": next, "error": "the page is not open" }));
         }
         let total: u64 = chain.results.iter().filter_map(|r| r.get("dismissed").and_then(Value::as_u64)).sum();
         let summary = json!({ "dismissed": total, "pages": chain.results });
+        self.emit("page.popups_dismissed", summary.clone());
         if chain.reply {
-            self.agent_reply_ok(id, summary);
-        } else {
-            self.emit("page.popups_dismissed", summary);
+            self.wv_reply_ok(id, summary);
         }
     }
 }

@@ -21,7 +21,7 @@ async function waitFor(fn, timeout = 15000) {
 const cases = [
   ['shell attaches', async () => { assert.ok(app.shell); }],
   ['navigate opens the fixture page', async () => {
-    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/` });
     const pg = await app.pageWith(/127\.0\.0\.1:\d+\/$/);
     assert.ok(pg);
     await pg.waitForSelector('#btn');
@@ -38,24 +38,24 @@ const cases = [
     }
   }],
   ['window.open("") then location=url opens a tab (sina-style)', async () => {
-    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/` });
     const pg = await app.pageWith(/127\.0\.0\.1:\d+\/$/);
     await pg.waitForSelector('#btn');
     await pg.evaluate((u) => { const w = window.open('', '_blank'); w.location.href = u; }, `${base}/other`);
     await waitFor(() => app.ctx.pages().some((p) => /\/other$/.test(p.url())));
   }],
   ['target=_blank link opens a new tab', async () => {
-    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/` });
     const pg = await app.pageWith(/127\.0\.0\.1:\d+\/$/);
     await pg.click('#blank');
     await waitFor(() => app.ctx.pages().some((p) => /\/other$/.test(p.url())));
   }],
   ['ask pane opens and answers (general question)', async () => {
-    await app.invoke('shortcut', { name: 'ask_ai' });
+    await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
     const side = await app.pageWith(/sidebar\.html/);
     await side.evaluate(() => { const s = document.getElementById('agent-switch'); if (s && s.checked) s.click(); });
     assert.ok(side);
-    const r = await app.invoke('ai.ask', { question: 'PING', intent: 'ask', selection: false });
+    const r = await app.invoke('shell_ai', { operation: 'ask', question: 'PING', intent: 'ask', selection: false });
     assert.ok(r.accepted, JSON.stringify(r));
     await waitFor(() => model.calls.length >= 1);
     const c = model.calls[0];
@@ -66,25 +66,25 @@ const cases = [
     const side = await app.pageWith(/sidebar\.html/);
     await side.evaluate(() => { const s = document.getElementById('agent-switch'); if (s && s.checked) s.click(); });
     const n = model.calls.length;
-    await app.invoke('ai.ask', { question: 'second question', intent: 'ask', selection: false });
+    await app.invoke('shell_ai', { operation: 'ask', question: 'second question', intent: 'ask', selection: false });
     await waitFor(() => model.calls.length > n);
     const msgs = model.calls[model.calls.length - 1].body.messages;
     assert.ok(msgs.some((m) => m.role === 'assistant' && /PONG/.test(m.content)), 'history missing');
     await waitFor(async () => (await side.textContent('#ask-log')).includes('Echo'));
   }],
   ['new chat clears history', async () => {
-    await app.invoke('ai.history.clear', {});
+    await app.invoke('shell_ai', { operation: 'history_clear' });
     const n = model.calls.length;
-    await app.invoke('ai.ask', { question: 'fresh', intent: 'ask', selection: false });
+    await app.invoke('shell_ai', { operation: 'ask', question: 'fresh', intent: 'ask', selection: false });
     await waitFor(() => model.calls.length > n);
     const msgs = model.calls[model.calls.length - 1].body.messages;
     assert.ok(!msgs.some((m) => m.role === 'assistant'));
   }],
   ['provider.set persists config', async () => {
-    const r = await app.invoke('ai.provider.set', { base_url: `http://127.0.0.1:${model.port}/v1`, model_id: 'fake-model', api_key: 'new-key' });
+    const r = await app.invoke('shell_ai', { operation: 'provider_set', base_url: `http://127.0.0.1:${model.port}/v1`, model_id: 'fake-model', api_key: 'new-key' });
     assert.ok(r);
     const n = model.calls.length;
-    await app.invoke('ai.ask', { question: 'PING', intent: 'ask', selection: false });
+    await app.invoke('shell_ai', { operation: 'ask', question: 'PING', intent: 'ask', selection: false });
     await waitFor(() => model.calls.length > n);
     assert.equal(model.calls[model.calls.length - 1].auth, 'Bearer new-key');
   }],

@@ -17,12 +17,12 @@ const waitFor = async (fn, timeout = 20000) => {
   while (Date.now() < end) { const v = await fn(); if (v) return v; await sleep(150); }
   throw new Error('timed out');
 };
-const selection = async () => (await app.invoke('agent.context', {})).page.selection || '';
+const selection = async () => (await app.invoke('shell_agent', { operation: 'context_get' })).page.selection || '';
 let page;
 
 await run([
   ['setup: article page', async () => {
-    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/` });
     page = await app.pageWith(/127\.0\.0\.1:\d+\/$/);
     await page.waitForSelector('#btn');
     await sleep(800);
@@ -49,7 +49,7 @@ await run([
     assert.ok(await waitFor(() => overlay.evaluate(() => !!document.querySelector('.sel-toolbar'))), 'toolbar shown');
   }],
   ['chat replies render Markdown and a link click opens a new tab', async () => {
-    await app.invoke('shortcut', { name: 'ask_ai' });
+    await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
     const side = await app.pageWith(/sidebar\.html/);
     await side.evaluate(() => { const s = document.getElementById('agent-switch'); if (s && s.checked) s.click(); });
     await side.waitForSelector('#ask-input');

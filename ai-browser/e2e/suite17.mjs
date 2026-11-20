@@ -7,7 +7,7 @@ import { launch, startFixtures, run, sleep, nativeHitBounds } from './harness.mj
 const fx = await startFixtures();
 const debugPort = 16000 + Math.floor(Math.random() * 30000);
 let app = await launch({ debugPort, withProvider: false });
-const state = () => app.invoke('window.state');
+const state = () => app.invoke('shell_window', { operation: 'state_get' });
 const waitFor = async fn => {
   const end = Date.now() + 15000;
   while (Date.now() < end) {
@@ -24,12 +24,12 @@ let initial;
 let chosen;
 const restart = async edit => {
   const profilePath = app.profile;
-  await app.invoke('window.close').catch(() => {});
+  await app.invoke('shell_window', { operation: 'close' }).catch(() => {});
   await waitFor(() => app.child.exitCode !== null);
   await app.browser.close();
   if (edit) edit(path.join(app.data, 'settings.json'));
   app = await launch({ debugPort, withProvider: false, profilePath });
-  await waitFor(() => app.invoke('window.state'));
+  await waitFor(() => app.invoke('shell_window', { operation: 'state_get' }));
 };
 let failed;
 try {
@@ -41,7 +41,7 @@ try {
       assert.equal(await app.shell.locator('#win-span').getAttribute('aria-pressed'), 'false');
       await nativeHitBounds(app.shell, '#win-span', app.child.pid);
       if (!initial.can_span) {
-        await assert.rejects(app.invoke('window.toggle_span'), /second display/);
+        await assert.rejects(app.invoke('shell_window', { operation: 'span_toggle' }), /second display/);
         assert.ok(same((await state()).bounds, initial.bounds));
       } else {
         const displays = initial.displays.filter(display => display.id);
@@ -58,7 +58,7 @@ try {
     ['one click fills two displays and a second restores the original window', async () => {
       if (!initial.can_span) return console.log('SKIP  second display not available; geometry cases covered by unit tests');
       const base = `http://127.0.0.1:${fx.port}`;
-      await app.invoke('canvas.create', { cols: 2, rows: 1, urls: [`${base}/?span=0`, `${base}/?span=1`] });
+      await app.invoke('shell_canvas', { operation: 'open', cols: 2, rows: 1, urls: [`${base}/?span=0`, `${base}/?span=1`] });
       await click('#win-span-menu');
       await app.shell.locator('#monitor-picker').waitFor({ state: 'visible' });
       await nativeHitBounds(app.shell, '#monitor-slot-0', app.child.pid);
@@ -77,7 +77,7 @@ try {
       const viewport = await app.shell.evaluate(() => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio }));
       assert.ok(Math.abs(viewport.width * viewport.dpr - spanned.client_bounds.width) <= 2, JSON.stringify({ viewport, bounds: spanned.client_bounds }));
       assert.ok(Math.abs(viewport.height * viewport.dpr - spanned.client_bounds.height) <= 2, JSON.stringify({ viewport, bounds: spanned.client_bounds }));
-      const canvas = await app.invoke('canvas.state');
+      const canvas = await app.invoke('shell_canvas', { operation: 'state_get' });
       assert.ok(canvas.cells.every(cell => cell.body.w > 100 && cell.body.x + cell.body.w <= viewport.width + 1));
       await click('#win-span');
       await waitFor(async () => { const s = await state(); return !s.spanning && same(s.bounds, initial.bounds); });
@@ -93,7 +93,7 @@ try {
       assert.equal(await app.shell.locator('#monitor-picker-apply').isDisabled(), true);
       await click('#monitor-picker-cancel');
       assert.deepEqual((await state()).selected_layout, { cols: 2, rows: 1, display_ids: chosen });
-      await assert.rejects(app.invoke('window.span_select', { cols: 2, rows: 1, display_ids: [chosen[0], chosen[0]], span: false }), /different connected/);
+      await assert.rejects(app.invoke('shell_window', { operation: 'span_select', cols: 2, rows: 1, display_ids: [chosen[0], chosen[0]], span: false }), /different connected/);
       assert.deepEqual((await state()).selected_layout.display_ids, chosen);
     }],
     ['spanning from maximized restores maximize and retains the original normal bounds', async () => {
@@ -120,14 +120,14 @@ try {
       if (!initial.can_span) return;
       await click('#win-span');
       await waitFor(async () => (await state()).spanning);
-      await app.invoke('window.minimize');
+      await app.invoke('shell_window', { operation: 'minimize' });
       await waitFor(async () => (await state()).minimized);
       assert.equal((await state()).spanning, true);
-      await app.invoke('window.toggle_span');
+      await app.invoke('shell_window', { operation: 'span_toggle' });
       await waitFor(async () => { const s = await state(); return !s.spanning && !s.minimized && same(s.bounds, initial.bounds); });
     }],
     ['the extra control leaves the vertical toolbar clickable', async () => {
-      await app.invoke('settings.update', { key: 'vertical_tabs', value: true });
+      await app.invoke('shell_settings', { operation: 'set', key: 'vertical_tabs', value: true });
       await nativeHitBounds(app.shell, '#win-span', app.child.pid);
       const boxes = await app.shell.evaluate(() => {
         const controls = document.getElementById('win-ctl').getBoundingClientRect();
@@ -139,7 +139,7 @@ try {
       assert.equal(await app.shell.locator('#win-drag').isVisible(), true);
     }],
     ['a crowded restored header keeps a drag handle and tabs distinguish clicks from window drags', async () => {
-      await app.invoke('settings.update', { key: 'vertical_tabs', value: false });
+      await app.invoke('shell_settings', { operation: 'set', key: 'vertical_tabs', value: false });
       if (initial.can_span) {
         await click('#win-span');
         await waitFor(async () => (await state()).spanning);
@@ -156,8 +156,8 @@ try {
         const commands = [];
         ipc.postMessage = body => {
           const message = JSON.parse(body);
-          if (['window.drag', 'tab.select', 'tab.close'].includes(message.cmd)) {
-            commands.push(message.cmd);
+          if (['shell_window', 'shell_tab'].includes(message.cmd)) {
+            commands.push([message.cmd, message.payload.operation]);
             window.__native._reply({ id: message.id, ok: true, data: null });
           } else original.call(ipc, body);
         };
@@ -189,16 +189,16 @@ try {
           return { commands, width: drag.width, right: drag.right, controls: controls.left, overflow: list.scrollWidth > list.clientWidth };
         } finally { ipc.postMessage = original; }
       });
-      assert.deepEqual(result.commands, ['tab.select', 'window.drag', 'tab.close', 'window.drag']);
+      assert.deepEqual(result.commands, [['shell_tab', 'activate'], ['shell_window', 'drag'], ['shell_tab', 'close'], ['shell_window', 'drag']]);
       assert.ok(result.width >= 48 && result.right <= result.controls + 1, JSON.stringify(result));
       assert.equal(result.overflow, true);
       await nativeHitBounds(app.shell, '#win-drag', app.child.pid);
-      await app.invoke('shell.ready');
+      await app.invoke('shell_ui', { operation: 'ready' });
     }],
     ['exact assignments persist across restart and disconnected displays reopen the picker', async () => {
       if (!initial.can_span) return;
       const reversed = [...chosen].reverse();
-      await app.invoke('window.span_select', { cols: 2, rows: 1, display_ids: reversed, span: false });
+      await app.invoke('shell_window', { operation: 'span_select', cols: 2, rows: 1, display_ids: reversed, span: false });
       await restart();
       assert.deepEqual((await state()).selected_layout.display_ids, reversed);
       const before = (await state()).bounds;
@@ -221,7 +221,7 @@ try {
     }],
   ]);
 } finally {
-  if ((await state().catch(() => null))?.spanning) await app.invoke('window.toggle_span').catch(() => {});
+  if ((await state().catch(() => null))?.spanning) await app.invoke('shell_window', { operation: 'span_toggle' }).catch(() => {});
   await app.close();
   fx.close();
 }

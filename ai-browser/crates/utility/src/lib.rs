@@ -4,6 +4,7 @@
 pub mod act;
 pub mod agent;
 pub mod audit;
+pub mod browser;
 pub mod control;
 pub mod prompt;
 pub mod provider;

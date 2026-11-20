@@ -45,6 +45,6 @@ impl AppState {
         let keep = self.canvas_shown.and_then(|id| self.canvas_of(id))
             .map(|canvas| canvas.members())
             .unwrap_or_else(|| self.active.into_iter().collect());
-        self.sleep_background_tabs(&keep);
+        self.wv_webviews_suspend_background(&keep);
     }
 }

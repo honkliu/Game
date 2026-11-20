@@ -30,21 +30,21 @@ async function waitFor(fn, timeout = 20000) {
   while (Date.now() < end) { const v = await fn(); if (v) return v; await sleep(200); }
   throw new Error('timed out');
 }
-const status = () => app.invoke('ai.status', {});
+const status = () => app.invoke('shell_ai', { operation: 'status_get' });
 let side;
 const sideText = async () => side.textContent('#ask-log');
 
 const cases = [
   ['setup: article tab + sidebar', async () => {
-    await app.invoke('nav.open', { url: `${base}/`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/` });
     await (await app.pageWith(/127\.0\.0\.1:\d+\/$/)).waitForSelector('#btn');
-    await app.invoke('shortcut', { name: 'ask_ai' });
+    await app.invoke('shell_ui', { operation: 'shortcut', name: 'ask_ai' });
     side = await app.pageWith(/sidebar\.html/);
     await side.evaluate(() => { const s = document.getElementById('agent-switch'); if (s && s.checked) s.click(); });
     assert.ok(side);
   }],
   ['omnibox classifies AI tasks, leaves searches alone', async () => {
-    const q = (text) => app.invoke('omnibox.query', { text });
+    const q = (text) => app.invoke('shell_omnibox', { operation: 'query', text });
     assert.equal((await q('summarize this page')).mode, 'ask');
     assert.equal((await q('@ai why is the sky blue')).mode, 'ask');
     assert.equal((await q('compare these tabs')).mode, 'ask');
@@ -53,13 +53,13 @@ const cases = [
   }],
   ['omnibox @ai runs a task and shows the answer in the pane', async () => {
     const n = model.calls.length;
-    await app.invoke('omnibox.activate', { text: '@ai say hello' });
+    await app.invoke('shell_omnibox', { operation: 'activate', text: '@ai say hello' });
     await waitFor(() => model.calls.length > n);
     await waitFor(async () => (await sideText()).includes('say hello'));
   }],
   ['omnibox "summarize this page" sends a page-grounded summary request', async () => {
     const n = model.calls.length;
-    await app.invoke('omnibox.activate', { text: 'summarize this page' });
+    await app.invoke('shell_omnibox', { operation: 'activate', text: 'summarize this page' });
     await waitFor(() => model.calls.length > n);
     const all = model.calls[model.calls.length - 1].body.messages.map((m) => m.content).join('\n');
     assert.ok(/Returns are accepted within 30 days/.test(all), 'page text missing from prompt');
@@ -71,16 +71,16 @@ const cases = [
     }
   }],
   ['multi-tab: header lists other tabs, question reads a ticked tab', async () => {
-    await app.invoke('nav.open', { url: `${base}/inject`, disposition: 'new_tab_background' });
+    await app.invoke('shell_tab', { operation: 'open', url: `${base}/inject`, background: true });
     await app.pageWith(/\/inject$/);
     await sleep(1500);
     const st = await waitFor(async () => { const s = await status(); return s.other_tabs && s.other_tabs.length ? s : null; });
     const other = st.other_tabs[0];
     assert.ok(other.title || other.host);
     await waitFor(async () => (await side.locator('.ask-tab-opt').count()) > 0);
-    await app.invoke('ai.history.clear', {});
+    await app.invoke('shell_ai', { operation: 'history_clear' });
     const n = model.calls.length;
-    const r = await app.invoke('ai.ask', { question: 'Lisbon price?', intent: 'ask', selection: false, tabs: [other.tab_id] });
+    const r = await app.invoke('shell_ai', { operation: 'ask', question: 'Lisbon price?', intent: 'ask', selection: false, tabs: [other.tab_id] });
     assert.ok(r.accepted);
     await waitFor(() => model.calls.length > n);
     const all = JSON.stringify(model.calls[model.calls.length - 1].body.messages);
@@ -97,36 +97,36 @@ const cases = [
     assert.notEqual(before, globalThis.otherTab);
   }],
   ['without ticking, other tabs are not read', async () => {
-    await app.invoke('tab.select', { tab_id: before0() });
+    await app.invoke('shell_tab', { operation: 'activate', tab_id: before0() });
     await sleep(800);
-    await app.invoke('ai.history.clear', {});
+    await app.invoke('shell_ai', { operation: 'history_clear' });
     const n = model.calls.length;
-    await app.invoke('ai.ask', { question: 'plain question', intent: 'ask', selection: false });
+    await app.invoke('shell_ai', { operation: 'ask', question: 'plain question', intent: 'ask', selection: false });
     await waitFor(() => model.calls.length > n);
     assert.ok(!JSON.stringify(model.calls[model.calls.length - 1].body.messages).includes('Flights to Lisbon'));
   }],
   ['act: model opens a link by id as a candidate tab', async () => {
-    await app.invoke('ai.ask', { question: 'open the other page', intent: 'act', selection: false });
+    await app.invoke('shell_ai', { operation: 'ask', question: 'open the other page', intent: 'act', selection: false });
     await waitFor(async () => (await side.locator('.ask-cand').count()) > 0);
     const tabs = (await status()).other_tabs || [];
     assert.ok(tabs.length > 0, 'candidate tab was not opened');
   }],
   ['stop cancels a slow task', async () => {
     nextDelay = 6000;
-    const r = await app.invoke('ai.ask', { question: 'slow one', intent: 'ask', selection: false });
+    const r = await app.invoke('shell_ai', { operation: 'ask', question: 'slow one', intent: 'ask', selection: false });
     await sleep(800);
-    await app.invoke('ai.stop', {});
+    await app.invoke('shell_ai', { operation: 'stop' });
     await waitFor(async () => !(await status()).busy, 5000);
     nextDelay = 0;
     assert.ok(r.accepted);
   }],
   ['navigating away makes an in-flight answer stale', async () => {
     nextDelay = 3000;
-    await app.invoke('tab.select', { tab_id: before0() });
+    await app.invoke('shell_tab', { operation: 'activate', tab_id: before0() });
     await sleep(600);
-    await app.invoke('ai.ask', { question: 'will go stale', intent: 'ask', selection: false });
+    await app.invoke('shell_ai', { operation: 'ask', question: 'will go stale', intent: 'ask', selection: false });
     await sleep(500);
-    await app.invoke('nav.open', { url: `${base}/other`, disposition: 'current' });
+    await app.invoke('shell_page_navigate', { url: `${base}/other` });
     await sleep(4500);
     nextDelay = 0;
     const html = await side.innerHTML('#ask-log');

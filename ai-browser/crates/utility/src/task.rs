@@ -187,7 +187,7 @@ fn execute(
     })
     .map_err(|_| Failure::unsupported("contract.encode_failed"))?;
     let asked = Instant::now();
-    let response = env.shell.call(Method::GetSnapshot, &request, control)?;
+    let response = env.shell.call("shell_page_snapshot", &request, control)?;
     let snapshot: SnapshotView = match response {
         ResponsePayload::Failure(failure) => return Err(failure),
         ResponsePayload::Ok(value) => serde_json::from_value(value)
