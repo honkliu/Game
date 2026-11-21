@@ -484,7 +484,20 @@ impl AppState {
         Ok(Some(json!({ "closed": page.0 })))
     }
 
-    /// Closing a page (Ctrl+W, the rail) inside a canvas clears its cell.
+    pub(super) fn wv_canvas_focused_cell_clear(&mut self, canvas: TabId) {
+        let Some(cv) = self.tabs.get_mut(canvas).and_then(|t| t.canvas.as_mut()) else { return };
+        let closed = cv.clear_focused_cell();
+        if closed.is_empty() {
+            self.wv_tab_close(canvas);
+            return;
+        }
+        for page in closed {
+            self.wv_canvas_page_destroy(page);
+        }
+        self.canvas_refresh(canvas);
+    }
+
+    /// Closing a page via the rail or API reveals the previous layer.
     pub(super) fn wv_canvas_member_close(&mut self, canvas: TabId, page: TabId) {
         let cell = self.canvas_of(canvas).and_then(|cv| cv.cell_of(page));
         if let Some(cell) = cell {

@@ -1126,7 +1126,7 @@ impl AppState {
         let Some(window) = self.window.as_ref() else { return };
         match builder.build_as_child(window) {
             Ok(wv) => {
-                self.install_devtools_shortcut(&wv);
+                self.install_browser_shortcuts(&wv);
                 self.sidebar = Some(wv);
                 self.note("ai sidebar webview ready");
             }

@@ -149,6 +149,20 @@ impl Canvas {
         self.cells.get(self.focus).copied().flatten()
     }
 
+    /// Clear a whole cell stack and advance to the next occupied cell, wrapping.
+    pub fn clear_focused_cell(&mut self) -> Vec<TabId> {
+        let Some(cell) = (0..self.capacity()).map(|offset| (self.focus + offset) % self.capacity())
+            .find(|&cell| self.cells[cell].is_some()) else { return Vec::new() };
+        let mut closed: Vec<_> = self.cells[cell].take().into_iter().collect();
+        if let Some(stack) = self.layers.get_mut(cell) {
+            closed.append(stack);
+        }
+        self.popup_next.retain(|page, _| !closed.contains(page));
+        self.focus = (1..self.capacity()).map(|offset| (cell + offset) % self.capacity())
+            .find(|&next| self.cells[next].is_some()).unwrap_or(cell);
+        closed
+    }
+
     /// Change the grid shape. Pages keep their reading order; the ones that no longer
     /// fit are returned so the caller can close them.
     pub fn reshape(&mut self, cols: usize, rows: usize) -> Vec<TabId> {
@@ -559,6 +573,40 @@ mod tests {
         assert_eq!(c.uncover(0), Some(TabId(1)));
         assert_eq!(c.occupied(), 0);
         assert!(c.all_members().is_empty());
+    }
+
+    #[test]
+    fn clearing_focused_cells_discards_layers_and_advances_in_reading_order() {
+        let mut c = Canvas::new(2, 2);
+        for cell in 0..4 { c.cover(cell, TabId(cell as u64 + 1)); }
+        c.popup_target(TabId(2));
+        c.cover(1, TabId(5));
+        c.cover(1, TabId(6));
+        c.popup_target(TabId(6));
+        c.focus = 1;
+        assert_eq!(c.clear_focused_cell(), vec![TabId(6), TabId(2), TabId(5)]);
+        assert!(!c.popup_next.contains_key(&TabId(2)));
+        assert!(!c.popup_next.contains_key(&TabId(6)));
+        assert_eq!(c.focus, 2);
+        assert_eq!(c.clear_focused_cell(), vec![TabId(3)]);
+        assert_eq!(c.focus, 3);
+        assert_eq!(c.clear_focused_cell(), vec![TabId(4)]);
+        assert_eq!(c.focus, 0);
+        assert_eq!(c.clear_focused_cell(), vec![TabId(1)]);
+        assert!(c.clear_focused_cell().is_empty());
+        assert!(c.all_members().is_empty());
+    }
+
+    #[test]
+    fn clearing_cells_skips_empty_slots_including_the_focused_slot() {
+        let mut c = Canvas::new(2, 2);
+        c.cover(0, TabId(1));
+        c.cover(3, TabId(2));
+        c.focus = 1;
+        assert_eq!(c.clear_focused_cell(), vec![TabId(2)]);
+        assert_eq!(c.focus, 0);
+        assert_eq!(c.clear_focused_cell(), vec![TabId(1)]);
+        assert!(c.clear_focused_cell().is_empty());
     }
 
     #[test]

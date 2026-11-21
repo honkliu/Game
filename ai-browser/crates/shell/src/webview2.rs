@@ -93,7 +93,8 @@ pub fn install_zoom_changed(webview: &wry::WebView, on_zoom: impl Fn(f64) + 'sta
     }
 }
 
-pub fn install_devtools_shortcut(webview: &wry::WebView, on_open: impl Fn() + 'static) -> windows::core::Result<()> {
+pub fn install_browser_shortcuts(webview: &wry::WebView, on_shortcut: impl Fn(crate::keys::Shortcut) + 'static) -> windows::core::Result<()> {
+    use crate::keys::{self, Mods, Outcome, Shortcut};
     use webview2_com::AcceleratorKeyPressedEventHandler;
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
@@ -111,17 +112,22 @@ pub fn install_devtools_shortcut(webview: &wry::WebView, on_open: impl Fn() + 's
                 let mut kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
                 args.VirtualKey(&mut key)?;
                 args.KeyEventKind(&mut kind)?;
-                if key != crate::keys::vk::F12
-                    || !matches!(kind, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN | COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
-                    || [0x10, 0x11, 0x12].into_iter().any(|key| GetKeyState(key) < 0) {
+                if !matches!(kind, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN | COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) {
                     return Ok(());
                 }
+                let mods = Mods {
+                    ctrl: GetKeyState(0x11) < 0,
+                    alt: GetKeyState(0x12) < 0,
+                    shift: GetKeyState(0x10) < 0,
+                };
+                let Outcome::Consume(shortcut @ (Shortcut::CloseTab | Shortcut::NextTab | Shortcut::PrevTab | Shortcut::OpenDevtools))
+                    = keys::resolve(key, mods, false) else { return Ok(()) };
                 args.SetHandled(true)?;
                 let mut lparam = 0;
                 args.KeyEventLParam(&mut lparam)?;
-                if lparam & (1 << 30) == 0 {
+                if shortcut != Shortcut::OpenDevtools || lparam & (1 << 30) == 0 {
                     // Queue the action: windowed accelerator callbacks block cross-process COM.
-                    on_open();
+                    on_shortcut(shortcut);
                 }
                 Ok(())
             })),

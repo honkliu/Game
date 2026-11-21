@@ -1145,14 +1145,14 @@ impl AppState {
         self.emit("shell.command_done", json!({ "verb": verb }));
     }
 
-    fn install_devtools_shortcut(&mut self, webview: &WebView) {
+    fn install_browser_shortcuts(&mut self, webview: &WebView) {
         #[cfg(windows)]
         {
             let proxy = self.proxy();
-            if let Err(error) = crate::webview2::install_devtools_shortcut(webview, move || {
-                let _ = proxy.send_event(AppMessage::NativeShortcut(Shortcut::OpenDevtools));
+            if let Err(error) = crate::webview2::install_browser_shortcuts(webview, move |shortcut| {
+                let _ = proxy.send_event(AppMessage::NativeShortcut(shortcut));
             }) {
-                self.note(format!("DevTools keyboard handler: {error}"));
+                self.note(format!("Browser keyboard handler: {error}"));
             }
         }
         #[cfg(not(windows))]
@@ -1165,7 +1165,9 @@ impl AppState {
                 self.wv_tab_open(tabs::NEWTAB_URL, self.active, true);
             }
             "close_tab" => {
-                if let Some(id) = self.active.or(self.canvas_shown) {
+                if let Some(canvas) = self.canvas_shown {
+                    self.wv_canvas_focused_cell_clear(canvas);
+                } else if let Some(id) = self.active {
                     self.wv_tab_close(id);
                 }
             }
@@ -1707,7 +1709,7 @@ impl AppState {
 
         match built {
             Ok(wv) => {
-                self.install_devtools_shortcut(&wv);
+                self.install_browser_shortcuts(&wv);
                 #[cfg(windows)]
                 {
                     let proxy = self.proxy();
@@ -2630,7 +2632,7 @@ fn build_shell(shared: &Shared) {
     let Some(window) = s.window.as_ref() else { return };
     match builder.build_as_child(window) {
         Ok(wv) => {
-            s.install_devtools_shortcut(&wv);
+            s.install_browser_shortcuts(&wv);
             // Remember the shell's child HWND: keystrokes going to it are the
             // shell's own, so the accelerator hook must not intercept them.
             #[cfg(windows)]
@@ -2679,7 +2681,7 @@ impl AppState {
         let Some(window) = self.window.as_ref() else { return };
         match builder.build_as_child(window) {
             Ok(wv) => {
-                self.install_devtools_shortcut(&wv);
+                self.install_browser_shortcuts(&wv);
                 self.overlay = Some(wv);
                 self.note("overlay webview ready (0x0)");
             }
