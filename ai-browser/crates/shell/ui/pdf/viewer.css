@@ -47,8 +47,7 @@ body { min-height: 100vh; font: 14px system-ui, sans-serif; color: var(--fg); }
 .textLayer span.markedContent { top: 0; height: 0; }
 
 
-html { scrollbar-color: var(--thumb) var(--bg); }
-::-webkit-scrollbar { width: 14px; height: 14px; background: var(--bg); }
+::-webkit-scrollbar { width: 7px; height: 7px; background: var(--bg); }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--thumb); border: 3px solid var(--bg); border-radius: 8px; }
+::-webkit-scrollbar-thumb { background: var(--thumb); border: 1px solid var(--bg); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--thumb-hover); }

@@ -96,7 +96,9 @@ pub fn configure<'a>(
     environment: Option<&Environment>,
     trusted_ui: bool,
 ) -> WebViewBuilder<'a> {
-    let builder = builder.with_devtools(!trusted_ui);
+    let builder = builder
+        .with_initialization_script(include_str!("../ui/scrollbars.js"))
+        .with_devtools(!trusted_ui);
     #[cfg(windows)]
     {
         use wry::WebViewBuilderExtWindows;
