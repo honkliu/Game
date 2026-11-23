@@ -1877,6 +1877,8 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
         }
     };
     let (saved, session_warn) = session::load(&dir.join("session.json"));
+    #[cfg(target_os = "macos")]
+    let restoring_window = saved.is_some();
 
     let mut state = AppState {
         data_dir: dir.clone(),
@@ -2050,6 +2052,14 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
             .with_min_inner_size(tao::dpi::LogicalSize::new(640.0, 480.0))
             .with_decorations(false)
             .with_visible(false);
+        #[cfg(target_os = "macos")]
+        if restoring_window {
+            // Session geometry is saved in physical pixels, not Retina points.
+            b = b.with_inner_size(tao::dpi::PhysicalSize::new(
+                restored_window.width,
+                restored_window.height,
+            ));
+        }
         #[cfg(windows)]
         {
             use tao::platform::windows::{IconExtWindows, WindowBuilderExtWindows};
@@ -2122,6 +2132,9 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
         s.note(format!("window + shell created at {ready_ms} ms"));
         s.apply_layout();
         if let Some(w) = s.window.as_ref() {
+            #[cfg(target_os = "macos")]
+            platform::macos::show_window(w);
+            #[cfg(not(target_os = "macos"))]
             w.set_visible(true);
         }
     }
@@ -2196,6 +2209,12 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
         let _keep_native_events = &native_events;
         *control_flow = ControlFlow::WaitUntil(Instant::now() + TICK);
         match event {
+            #[cfg(target_os = "macos")]
+            Event::Reopen { .. } => {
+                if let Some(window) = shared.borrow().window.as_ref() {
+                    platform::macos::show_window(window);
+                }
+            }
             Event::WindowEvent { window_id: id, event, .. } if Some(id) == window_id => {
                 handle_window_event(&shared, event, control_flow)
             }

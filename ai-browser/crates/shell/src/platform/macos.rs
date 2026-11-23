@@ -9,7 +9,7 @@ use objc2::runtime::AnyObject;
 use objc2::{msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSApplication, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSMenu,
-    NSMenuItem,
+    NSMenuItem, NSScreen, NSWindow,
 };
 use objc2_foundation::{NSError, NSProcessInfo, NSString};
 use objc2_web_kit::WKContentWorld;
@@ -152,6 +152,39 @@ pub fn capture(
                 Some(&completion),
             );
     }
+}
+
+pub fn show_window(window: &Window) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let app = NSApplication::sharedApplication(mtm);
+    app.unhide(None);
+    window.set_minimized(false);
+    // AppKit frame and screen rectangles share point coordinates across mixed-DPI displays.
+    let native = unsafe { &*(window.ns_window() as *const NSWindow) };
+    let frame = native.frame();
+    let screens = NSScreen::screens(mtm);
+    let reachable = screens.iter().any(|screen| {
+        let visible = screen.visibleFrame();
+        let right = (frame.origin.x + frame.size.width).min(visible.origin.x + visible.size.width);
+        let left = frame.origin.x.max(visible.origin.x);
+        let top = frame.origin.y + frame.size.height;
+        let bottom = (top - 36.0).max(visible.origin.y);
+        right - left >= 96.0 && top.min(visible.origin.y + visible.size.height) - bottom >= 18.0
+    });
+    if !reachable {
+        if let Some(screen) = screens.firstObject() {
+            let visible = screen.visibleFrame();
+            let mut restored = frame;
+            restored.size.width = restored.size.width.min(visible.size.width);
+            restored.size.height = restored.size.height.min(visible.size.height);
+            restored.origin.x = visible.origin.x + (visible.size.width - restored.size.width) / 2.0;
+            restored.origin.y = visible.origin.y + visible.size.height - restored.size.height;
+            // Tao queues geometry updates; restore the whole frame synchronously on the main thread.
+            native.setFrame_display(restored, true);
+        }
+    }
+    window.set_visible(true);
+    window.set_focus();
 }
 
 pub struct EventMonitor(Retained<AnyObject>);
