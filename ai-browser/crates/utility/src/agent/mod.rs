@@ -530,7 +530,7 @@ fn run_inner(env: &Env, run_id: u64, params: &Value, control: &TaskControl) -> R
     let stash = Mutex::new(Stash::default());
     let loaded = Mutex::new(std::mem::take(&mut loaded_ids));
     let budget = model.context_window as usize * CHARS_PER_TOKEN * 7 / 10;
-    let max_rounds = config.max_rounds.clamp(1, 60);
+    let max_rounds = config.max_rounds.max(1);
     let mut last_text = String::new();
 
     for round in 1..=max_rounds {

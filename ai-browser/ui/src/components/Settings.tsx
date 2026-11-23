@@ -89,7 +89,7 @@ function GeneralTab({ s }: { s: AgentState }) {
   return (
     <>
       <label class="ag-check"><input type="checkbox" checked={auto} onChange={(e) => setAuto(e.currentTarget.checked)} /><span> Run actions without asking (click, type, navigate and non-read-only MCP tools). Off is safer.</span></label>
-      <label class="ag-check">Max tool rounds per run <input type="number" min={1} max={60} class="ag-num" value={rounds} onInput={(e) => setRounds(e.currentTarget.value)} /></label>
+      <label class="ag-check">Max tool rounds per run <input type="number" min={1} class="ag-num" value={rounds} onInput={(e) => setRounds(e.currentTarget.value)} /></label>
       <div><button type="button" class="chip-btn is-accent" onClick={() => void a.run('Saving…', () => call('shell_agent', 'config_set', { auto_approve: auto, max_rounds: Number(rounds) || 25 }))}>Save</button> {a.view}</div>
       <p class="ag-help">Model endpoints and keys are on the Models tab.</p>
     </>

@@ -169,7 +169,7 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
                 c.custom_instructions = v.chars().take(8_000).collect();
             }
             if let Some(v) = p.get("max_rounds").and_then(Value::as_u64) {
-                c.max_rounds = v.clamp(1, 60) as u32;
+                c.max_rounds = u32::try_from(v.max(1)).map_err(|_| "max_rounds is too large")?;
             }
             store.save_config(&c)?;
             Ok(state(store, hub))

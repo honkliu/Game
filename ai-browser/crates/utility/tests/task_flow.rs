@@ -13,7 +13,9 @@ use ai_platform_contract::failure::{Failure, FailureKind};
 use ai_platform_contract::frame::ResponsePayload;
 use ai_platform_contract::identity::DocumentToken;
 use ai_platform_contract::model::BrowserEvent;
+use ai_utility::agent::{self, admin, mcp, store::Store, Approvals};
 use ai_utility::control::{now_ms, StopReason, TaskControl};
+use ai_utility::provider::Catalog;
 use ai_utility::tabs::Tabs;
 use ai_utility::task::{self, TaskEnv};
 use common::*;
@@ -411,6 +413,45 @@ fn act_respects_ceiling_and_config_and_domain_policy() {
     let outcome = run(&shell, &Tabs::default(), &view("act", "open link 0", json!({})), &cfg);
     assert!(matches!(outcome, TaskOutcome::NoAnswer(_)), "{outcome:?}");
     assert_eq!(shell.action_calls().len(), 0, "automation-denied domains are observe-only");
+}
+
+#[test]
+fn agent_round_limit_respects_the_saved_setting_above_and_below_sixty() {
+    let server = FakeServer::start(Script {
+        status: 200,
+        steps: vec![
+            Step::Data(json!({"choices":[{"delta":{"tool_calls":[{
+                "index":0,"id":"read-page","type":"function",
+                "function":{"name":"shell_page_read","arguments":"{}"}
+            }]}}]}).to_string()),
+            finish_chunk("tool_calls", None),
+            Step::Raw("data: [DONE]\n\n".into()),
+        ],
+    });
+    let catalog = Catalog::from_config(&http_config(&server.base_url));
+    for rounds in [2, 65] {
+        let dir = std::env::temp_dir().join(format!("agent-round-limit-{}-{}-{rounds}", std::process::id(), now_ms()));
+        let store = Store::new(&dir);
+        let hub = mcp::Hub::default();
+        let state = admin::handle(&store, &hub, &catalog, &json!({
+            "method":"shell_agent", "operation":"config_set", "max_rounds":rounds
+        })).unwrap();
+        assert_eq!(state["config"]["max_rounds"], rounds);
+        assert_eq!(store.load_config().unwrap().max_rounds, rounds);
+        let shell = plain_shell();
+        let approvals = Approvals::default();
+        let env = agent::Env { shell: &shell, approvals: &approvals, store: &store, catalog: &catalog, mcp: &hub };
+        agent::run(&env, &json!({ "run_id":1, "messages":[{"role":"user","content":"Read the page"}] }), &TaskControl::new(now_ms() + 30_000));
+        let notifications = shell.notifications.lock().unwrap();
+        let events: Vec<&Value> = notifications.iter()
+            .filter(|(method, _)| *method == ai_platform_contract::frame::Method::AgentEvent)
+            .map(|(_, event)| event).collect();
+        let done = events.iter().find(|event| event["type"] == "done").expect("agent must finish at the configured limit");
+        assert_eq!(done["rounds"], rounds);
+        assert_eq!(events.iter().filter(|event| event["type"] == "round").count(), rounds as usize);
+        assert_eq!(shell.called("shell_page_read"), rounds as usize);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[test]

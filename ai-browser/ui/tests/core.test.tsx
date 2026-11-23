@@ -6,7 +6,7 @@ import { Markdown } from '../src/markdown';
 import { contextSignature, reconcileEdit } from '../src/context';
 import { COMMANDS } from '../src/mcp';
 import { fromMessages, newAgentTurn, newAskTurn, reduceAgent, toMessages } from '../src/reducers';
-import type { AgentContext } from '../src/types';
+import type { AgentContext, AgentState } from '../src/types';
 import type { ConfiguredTool } from '../src/types';
 import { ToolsSettings } from '../src/components/ToolsSettings';
 import { act } from 'preact/test-utils';
@@ -17,6 +17,29 @@ import { ctx as liveContext } from '../src/store';
 import { agentOn, promptHistory, sendMessage, turns } from '../src/store';
 import { Composer } from '../src/components/Composer';
 import { Transcript } from '../src/components/Transcript';
+import { SettingsPanel } from '../src/components/Settings';
+import { agentState, settingsTab } from '../src/store';
+
+describe('agent round settings', () => {
+  it('accepts and saves the configured limit without a sixty-round ceiling', async () => {
+    const previousState = agentState.value;
+    const previousTab = settingsTab.value;
+    const state: AgentState = { config: { auto_approve: false, custom_instructions: '', max_rounds: 25 }, skills: [], prompts: [], mcp: [] };
+    const invoke = vi.spyOn(window.__shell!, 'invoke').mockResolvedValue(state);
+    const host = document.createElement('div');
+    try {
+      act(() => { agentState.value = state; settingsTab.value = 'general'; render(<SettingsPanel />, host); });
+      const input = host.querySelector<HTMLInputElement>('input[type="number"]')!;
+      act(() => { input.value = '125'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+      expect(input.validity.valid).toBe(true);
+      await act(async () => host.querySelector<HTMLButtonElement>('button')!.click());
+      expect(invoke).toHaveBeenCalledWith('shell_agent', { operation: 'config_set', auto_approve: false, max_rounds: 125 });
+    } finally {
+      act(() => { render(null, host); agentState.value = previousState; settingsTab.value = previousTab; });
+      invoke.mockRestore();
+    }
+  });
+});
 
 describe('transcript speaker attribution', () => {
   it('keeps provider thinking and progress notes visible while running, after completion and when restored', () => {
