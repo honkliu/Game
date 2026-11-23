@@ -28,7 +28,7 @@ impl UiState {
         self.sequence += 1;
         self.turns.push_back(json!({
             "kind": "agent", "runId": run, "question": question,
-            "status": "running", "thinking": [], "tools": [], "text": "",
+            "status": "running", "thinking": [], "reasoning": "", "tools": [], "text": "",
             "rounds": 0, "echo": echo,
         }));
         self.trim();
@@ -63,7 +63,7 @@ impl UiState {
     }
 
     pub fn record(&mut self, event: &str, payload: &mut Value) {
-        if !matches!(event, "agent.event" | "ai.answer" | "ai.delta" | "ai.stage" | "ai.answer.stale") {
+        if !matches!(event, "agent.event" | "ai.answer" | "ai.delta" | "ai.thinking" | "ai.stage" | "ai.answer.stale") {
             return;
         }
         self.sequence += 1;
@@ -72,8 +72,14 @@ impl UiState {
             let run = payload["run_id"].as_u64().unwrap_or(0);
             let Some(turn) = self.turns.iter_mut().find(|t| t["runId"] == run) else { return };
             match payload["type"].as_str().unwrap_or("") {
-                "round" => turn["rounds"] = payload["n"].clone(),
+                "round" => {
+                    if !text(turn, "reasoning").is_empty() && payload["n"].as_u64() > turn["rounds"].as_u64() {
+                        append(turn, "reasoning", "\n\n");
+                    }
+                    turn["rounds"] = payload["n"].clone();
+                }
                 "delta" => append(turn, "text", &text(payload, "text")),
+                "thinking" => append(turn, "reasoning", &text(payload, "text")),
                 "tool_start" => {
                     let thinking = text(turn, "text");
                     if !thinking.trim().is_empty() {
@@ -141,7 +147,7 @@ impl UiState {
             if event == "ai.answer" && !self.turns.iter().any(|t| t["turnId"] == id) {
                 self.turns.push_back(json!({
                     "kind": "ask", "turnId": id, "status": "pending", "question": "",
-                    "streamed": "", "text": "", "citations": [], "stale": false,
+                    "streamed": "", "reasoning": "", "text": "", "citations": [], "stale": false,
                     "provider": "offline", "model": "", "elapsedMs": 0, "failure": null,
                 }));
             }
@@ -155,6 +161,7 @@ impl UiState {
                     if payload["stale"] == true { turn["stale"] = json!(true); }
                 }
                 "ai.delta" => append(turn, "streamed", &text(payload, "text")),
+                "ai.thinking" => append(turn, "reasoning", &text(payload, "text")),
                 "ai.stage" if payload["stage"] == "routed" => {
                     turn["routeLabel"] = json!(text(payload, "model"));
                 }
@@ -173,11 +180,14 @@ mod tests {
     fn completed_agent_state_survives_without_a_ui_and_clears_for_new_chat() {
         let mut state = UiState::default();
         state.begin_agent(7, "question", json!({}));
+        state.record("agent.event", &mut json!({ "run_id": 7, "type": "thinking", "text": "Check " }));
+        state.record("agent.event", &mut json!({ "run_id": 7, "type": "thinking", "text": "the page" }));
         state.record("agent.event", &mut json!({ "run_id": 7, "type": "delta", "text": "partial" }));
         state.record("agent.event", &mut json!({ "run_id": 7, "type": "done", "text": "answer", "rounds": 1 }));
         let snapshot = state.snapshot();
         assert_eq!(snapshot["turns"][0]["status"], "done");
         assert_eq!(snapshot["turns"][0]["text"], "answer");
+        assert_eq!(snapshot["turns"][0]["reasoning"], "Check the page");
         state.clear_finished();
         assert_eq!(state.snapshot()["turns"], json!([]));
     }
@@ -187,9 +197,11 @@ mod tests {
         let mut state = UiState::default();
         state.record("ai.answer", &mut json!({ "turn_id": 1, "question": "q", "status": "pending" }));
         state.clear_finished();
+        state.record("ai.thinking", &mut json!({ "turn_id": 1, "text": "Check sources" }));
         state.record("ai.delta", &mut json!({ "turn_id": 1, "text": "stream" }));
         state.record("ai.answer", &mut json!({ "turn_id": 1, "status": "ok", "text": "final", "citations": [{"ordinal":1}] }));
         assert_eq!(state.snapshot()["turns"].as_array().unwrap().len(), 1);
         assert_eq!(state.snapshot()["turns"][0]["text"], "final");
+        assert_eq!(state.snapshot()["turns"][0]["reasoning"], "Check sources");
     }
 }

@@ -3,8 +3,8 @@
 //! Hard rules this file exists to keep:
 //! - The API key lives in a private field, is never formatted, logged or put in an
 //!   error detail, and redirects are disabled so it cannot follow one elsewhere.
-//! - `reasoning_content` is observed (to know the model was thinking) and then
-//!   dropped; it is never streamed, stored or returned.
+//! - Provider-supplied thinking streams separately from answer text and is never
+//!   included in the answer parser or tool arguments.
 //! - Page content is only ever in the request body; nothing here logs a body,
 //!   a response, or a prompt.
 //! - Cancellation does not depend on the socket: the blocking read runs on its
@@ -144,7 +144,7 @@ fn apply_usage(state: &mut StreamState, usage: &Value) {
 }
 
 impl StreamState {
-    fn apply_chunk(&mut self, chunk: &Value, on_delta: &mut dyn FnMut(&str)) -> Result<(), Failure> {
+    fn apply_chunk(&mut self, chunk: &Value, on_delta: &mut dyn FnMut(&str), on_thinking: &mut dyn FnMut(&str)) -> Result<(), Failure> {
         self.saw_data = true;
         if chunk.get("error").is_some() {
             return Err(Failure::unavailable("provider.stream_error"));
@@ -153,11 +153,14 @@ impl StreamState {
             apply_usage(self, usage);
         }
         let Some(choice) = chunk.pointer("/choices/0") else { return Ok(()) };
+        if let Some(piece) = choice.pointer("/delta/reasoning_content").and_then(Value::as_str).filter(|s| !s.is_empty())
+            .or_else(|| choice.pointer("/delta/reasoning").and_then(Value::as_str).filter(|s| !s.is_empty())) {
+            on_thinking(piece);
+        }
         if let Some(piece) = choice.pointer("/delta/content").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             self.text.push_str(piece);
             on_delta(piece);
         }
-        // `delta.reasoning_content` / `delta.reasoning` are deliberately not read.
         if let Some(calls) = choice.pointer("/delta/tool_calls").and_then(Value::as_array) {
             for call in calls {
                 let index = call.get("index").and_then(Value::as_u64).unwrap_or(0).min(63) as usize;
@@ -184,7 +187,7 @@ impl StreamState {
         Ok(())
     }
 
-    fn apply_line(&mut self, line: &str, on_delta: &mut dyn FnMut(&str)) -> Result<(), Failure> {
+    fn apply_line(&mut self, line: &str, on_delta: &mut dyn FnMut(&str), on_thinking: &mut dyn FnMut(&str)) -> Result<(), Failure> {
         let line = line.trim();
         if line.is_empty() || line.starts_with(':') {
             return Ok(());
@@ -195,7 +198,7 @@ impl StreamState {
                 return Ok(());
             }
             return match serde_json::from_str::<Value>(payload) {
-                Ok(chunk) => self.apply_chunk(&chunk, on_delta),
+                Ok(chunk) => self.apply_chunk(&chunk, on_delta, on_thinking),
                 Err(_) => Err(Failure::unsupported("provider.reply_unreadable")),
             };
         }
@@ -206,7 +209,7 @@ impl StreamState {
     }
 
     /// A server that ignored `stream: true` answers with one JSON body.
-    fn finish_non_streaming(&mut self, on_delta: &mut dyn FnMut(&str)) -> Result<(), Failure> {
+    fn finish_non_streaming(&mut self, on_delta: &mut dyn FnMut(&str), on_thinking: &mut dyn FnMut(&str)) -> Result<(), Failure> {
         if self.saw_data || self.other.is_empty() {
             return Ok(());
         }
@@ -216,6 +219,10 @@ impl StreamState {
         }
         if let Some(usage) = body.get("usage").filter(|u| u.is_object()) {
             apply_usage(self, usage);
+        }
+        if let Some(thinking) = body.pointer("/choices/0/message/reasoning_content").and_then(Value::as_str).filter(|s| !s.is_empty())
+            .or_else(|| body.pointer("/choices/0/message/reasoning").and_then(Value::as_str).filter(|s| !s.is_empty())) {
+            on_thinking(thinking);
         }
         if let Some(content) = body.pointer("/choices/0/message/content").and_then(Value::as_str) {
             if !content.is_empty() {
@@ -238,7 +245,7 @@ impl StreamState {
 }
 
 impl OpenAiCompatibleProvider {
-    fn stream(&self, body: String, control: &TaskControl, on_delta: &mut dyn FnMut(&str)) -> Result<StreamState, Failure> {
+    fn stream(&self, body: String, control: &TaskControl, on_delta: &mut dyn FnMut(&str), on_thinking: &mut dyn FnMut(&str)) -> Result<StreamState, Failure> {
         if let Some(failure) = control.failure() {
             return Err(failure);
         }
@@ -250,7 +257,7 @@ impl OpenAiCompatibleProvider {
         loop {
             match rx.recv_timeout(POLL) {
                 Ok(Msg::Line(line)) => {
-                    state.apply_line(&line, on_delta)?;
+                    state.apply_line(&line, on_delta, on_thinking)?;
                     if let Some(failure) = control.failure() {
                         return Err(failure);
                     }
@@ -264,7 +271,7 @@ impl OpenAiCompatibleProvider {
                 }
             }
         }
-        state.finish_non_streaming(on_delta)?;
+        state.finish_non_streaming(on_delta, on_thinking)?;
         if let Some(failure) = control.failure() {
             return Err(failure);
         }
@@ -282,6 +289,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         request: &ChatRequest,
         control: &TaskControl,
         on_delta: &mut dyn FnMut(&str),
+        on_thinking: &mut dyn FnMut(&str),
     ) -> Result<ChatReply, Failure> {
         let mut body = json!({
             "model": request.model_id,
@@ -295,7 +303,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             body["tools"] = Value::Array(request.tools.clone());
             body["tool_choice"] = json!("auto");
         }
-        let state = self.stream(body.to_string(), control, on_delta)?;
+        let state = self.stream(body.to_string(), control, on_delta, on_thinking)?;
         let calls = state.calls.into_iter().filter(|c| !c.name.is_empty()).collect();
         Ok(ChatReply { text: state.text, tool_calls: calls, finish_reason: state.finish_reason })
     }
@@ -305,6 +313,16 @@ impl ModelProvider for OpenAiCompatibleProvider {
         request: &CompletionRequest,
         control: &TaskControl,
         on_delta: &mut dyn FnMut(&str),
+    ) -> Result<ProviderReply, Failure> {
+        self.complete_with_thinking(request, control, on_delta, &mut |_| {})
+    }
+
+    fn complete_with_thinking(
+        &self,
+        request: &CompletionRequest,
+        control: &TaskControl,
+        on_delta: &mut dyn FnMut(&str),
+        on_thinking: &mut dyn FnMut(&str),
     ) -> Result<ProviderReply, Failure> {
         let messages: Vec<Value> = request.messages.iter().map(|m| json!({"role": m.role, "content": m.content})).collect();
         let body = json!({
@@ -317,7 +335,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             "max_tokens": request.max_tokens,
         })
         .to_string();
-        let state = self.stream(body, control, on_delta)?;
+        let state = self.stream(body, control, on_delta, on_thinking)?;
         Ok(ProviderReply {
             text: state.text,
             finish_reason: state.finish_reason,
@@ -340,19 +358,46 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_text_is_never_collected() {
+    fn thinking_streams_separately_from_answer_and_tool_calls() {
         let mut state = StreamState::default();
         let mut deltas = Vec::new();
+        let mut thinking = Vec::new();
         let mut sink = |s: &str| deltas.push(s.to_string());
+        let mut thought_sink = |s: &str| thinking.push(s.to_string());
         state
-            .apply_line(r#"data: {"choices":[{"delta":{"reasoning_content":"SECRET"}}]}"#, &mut sink)
+            .apply_line(r#"data: {"choices":[{"delta":{"reasoning_content":"Checking "}}]}"#, &mut sink, &mut thought_sink)
             .unwrap();
         state
-            .apply_line(r#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}],"usage":{"reasoning_tokens":7}}"#, &mut sink)
+            .apply_line(r#"data: {"choices":[{"delta":{"reasoning_content":"","reasoning":"the page."}}]}"#, &mut sink, &mut thought_sink)
+            .unwrap();
+        state
+            .apply_line(r#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}],"usage":{"reasoning_tokens":7}}"#, &mut sink, &mut thought_sink)
             .unwrap();
         assert_eq!(state.text, "hi");
         assert_eq!(deltas, ["hi"]);
+        assert_eq!(thinking.concat(), "Checking the page.");
+        assert!(state.calls.is_empty());
         assert_eq!(state.reasoning_tokens, Some(7));
         assert_eq!(state.finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn non_streaming_thinking_is_separate_and_error_bodies_are_not_displayed() {
+        for field in ["reasoning_content", "reasoning"] {
+            let mut state = StreamState::default();
+            let body = json!({"choices":[{"message":{"content":"Answer",field:"Check the facts"},"finish_reason":"stop"}]});
+            let mut deltas = String::new();
+            let mut thinking = String::new();
+            state.apply_line(&body.to_string(), &mut |s| deltas.push_str(s), &mut |s| thinking.push_str(s)).unwrap();
+            state.finish_non_streaming(&mut |s| deltas.push_str(s), &mut |s| thinking.push_str(s)).unwrap();
+            assert_eq!(deltas, "Answer");
+            assert_eq!(state.text, "Answer");
+            assert_eq!(thinking, "Check the facts");
+        }
+        let mut state = StreamState::default();
+        let mut called = false;
+        assert!(state.apply_chunk(&json!({"error":{"message":"private"},"choices":[{"delta":{"reasoning_content":"private"}}]}),
+            &mut |_| {}, &mut |_| called = true).is_err());
+        assert!(!called);
     }
 }

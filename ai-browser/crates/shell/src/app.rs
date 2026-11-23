@@ -27,8 +27,6 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tao::window::{Window, WindowBuilder, WindowId};
 use wry::http::Request as HttpRequest;
 use wry::{WebContext, WebView, WebViewBuilder};
-#[cfg(windows)]
-use wry::WebViewExtWindows;
 
 use crate::downloads::{self, Download, DownloadState};
 use crate::history::{self, HistoryQuery};
@@ -186,15 +184,6 @@ pub struct AppState {
     shell_ready_ms: Option<u64>,
     dpi_scale: f64,
     system_dark: bool,
-    /// True while the shell reports a text field focused (Alt-nav suppression,
-    /// `Ctrl+W` → word delete).
-    #[cfg(windows)]
-    shell_focus_in_input: bool,
-    /// HWND of the shell webview's child window; keystrokes for it are the
-    /// shell's own and must not be intercepted twice.
-    #[cfg(windows)]
-    shell_hwnd: isize,
-
     session_dirty_at: Option<Instant>,
     last_nav_emit: HashMap<TabId, Instant>,
     navigation_seq: u64,
@@ -1195,6 +1184,7 @@ impl AppState {
             }
             "focus_omnibox" => {
                 self.wv_ui_overlay_close();
+                if let Some(shell) = self.shell.as_ref() { let _ = shell.focus(); }
                 self.emit("shell.focus_changed", json!({ "scope": "omnibox", "select_all": true }));
             }
             "cycle_focus" => self.emit("shell.focus_changed", json!({ "scope": "cycle" })),
@@ -1272,7 +1262,11 @@ impl AppState {
                 self.wv_settings_open();
             }
             "escape" => {
-                self.emit("shell.escape", json!({}));
+                if self.overlay_rect.is_open() {
+                    self.wv_ui_overlay_close();
+                } else {
+                    self.emit("shell.escape", json!({}));
+                }
             }
             "item_menu" => self.emit("shell.item_menu", json!({})),
             "toggle_rail" => {
@@ -1929,10 +1923,6 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
         shell_ready_ms: None,
         dpi_scale: 1.0,
         system_dark: false,
-        #[cfg(windows)]
-        shell_focus_in_input: false,
-        #[cfg(windows)]
-        shell_hwnd: 0,
         session_dirty_at: None,
         last_nav_emit: HashMap::new(),
         typed_target: None,
@@ -2633,10 +2623,6 @@ fn build_shell(shared: &Shared) {
     match builder.build_as_child(window) {
         Ok(wv) => {
             s.install_browser_shortcuts(&wv);
-            // Remember the shell's child HWND: keystrokes going to it are the
-            // shell's own, so the accelerator hook must not intercept them.
-            #[cfg(windows)]
-            { s.shell_hwnd = wv.hwnd().0 as isize; }
             s.shell = Some(wv);
             s.note("shell webview ready");
         }
@@ -2777,11 +2763,11 @@ impl AppState {
     }
 }
 
-/// Decode a `MSG` into (vk, mods) and consult `keys::resolve`.
+/// Route top-level key messages through the same map as WebView accelerators.
 #[cfg(windows)]
 fn dispatch_accelerator(shared: &Shared, msg: *const std::ffi::c_void) -> bool {
+    use tao::platform::windows::WindowExtWindows;
     use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_SYSKEYDOWN};
-    use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
     // SAFETY: tao passes a valid `*mut MSG` that lives for the call.
     let msg = unsafe { &*(msg as *const windows::Win32::UI::WindowsAndMessaging::MSG) };
     if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
@@ -2799,58 +2785,35 @@ fn dispatch_accelerator(shared: &Shared, msg: *const std::ffi::c_void) -> bool {
         return false;
     }
 
-    let (focused_is_input, shell_hwnd) = {
+    let proxy = {
         let s = match shared.try_borrow() {
             Ok(s) => s,
             // A re-entrant call while a command handler mutates state: let the
             // key through rather than panic.
             Err(_) => return false,
         };
-        (s.shell_focus_in_input, s.shell_hwnd)
+        let Some(window) = s.window.as_ref() else { return false };
+        // Child WebViews have their own accelerator callback. Only handle
+        // top-level messages here, so one key cannot take both dispatch paths.
+        if msg.hwnd.0 as isize != window.hwnd() {
+            return false;
+        }
+        s.proxy()
     };
 
-    // If focus is inside the shell webview, its JS handles the key. Focus in a
-    // page webview is a different HWND owned by msedgewebview2.exe.
-    // SAFETY: GetFocus returns the thread's focus HWND or null.
-    let focus = unsafe { GetFocus() };
-    if !focus.is_invalid() && focus.0 as isize == shell_hwnd
-        && !(vk == keys::vk::F12 && mods == Mods::NONE) {
-        return false;
-    }
-
-    match keys::resolve(vk, mods, focused_is_input) {
+    match keys::resolve_native(vk, mods) {
         Outcome::Pass => false,
         Outcome::Consume(sc) => {
-            let name = shortcut_name(&sc);
-            let args = shortcut_args(&sc);
-            // `emit` calls `evaluate_script` on the shell. That is a synchronous
-            // COM call into WebView2, which can pump messages and re-enter this
-            // very hook; a `RefCell` borrow held across it would turn into a
-            // `BorrowMutError` panic inside a Win32 callback. Borrow, act, and
-            // release before any script runs.
-            {
-                let mut s = match shared.try_borrow_mut() {
-                    Ok(s) => s,
-                    Err(_) => return false,
-                };
-                s.note(format!("accelerator: {name}"));
+            if sc == Shortcut::OpenDevtools && msg.lParam.0 & (1 << 30) != 0 {
+                return true;
             }
-            // The shell owns focus/UI effects; ask it first, then apply the
-            // host-side effect so the action never depends on shell focus.
-            AppState::emit_public(shared, "shell.shortcut", json!({ "name": name, "args": args }));
-            let mut s = match shared.try_borrow_mut() {
-                Ok(s) => s,
-                Err(_) => return false,
-            };
-            s.wv_ui_shortcut(name, args);
-            true
+            proxy.send_event(AppMessage::NativeShortcut(sc)).is_ok()
         }
     }
 }
 
 impl AppState {
-    /// Emit a host→UI event on a *fresh* borrow. Used where the caller must not
-    /// already hold one (the Win32 message hook).
+    /// Emit a host→UI event without an existing state borrow.
     fn emit_public(shared: &Shared, event: &str, payload: Value) {
         if let Ok(mut s) = shared.try_borrow_mut() {
             s.emit(event, payload);

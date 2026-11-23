@@ -71,6 +71,7 @@ const model = await listen((req, res) => {
         function: { name, arguments: JSON.stringify(args) } }] };
     } else delta = { content: search && tools.at(-1)?.content.includes('COMPLETE-DOCUMENT-CONTENT') ? 'MOONSHOT-OK' : 'CONFIGURED-ONLY' };
     res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: 'Checking the fixture page.' }, finish_reason: null }] })}\n\n`);
     res.write(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: null }] })}\n\n`);
     res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: delta.tool_calls ? 'tool_calls' : 'stop' }] })}\n\n`);
     res.end('data: [DONE]\n\n');
@@ -182,28 +183,33 @@ try {
       await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 1 });
       assert.equal((await inspectColors()).line, canvas.line);
     }],
-    ['Tools exposes migrated browser, HTTP and MCP tools and saves disable switches', async () => {
+    ['Tools defaults all tools on and one switch disables every tool', async () => {
       await app.shell.locator('#btn-ai').click();
       side = await app.pageWith(/sidebar\.html/);
       chat = side;
       await side.waitForSelector('#ag-input');
       const state = await mgmt('shell_agent', 'state_get');
+      assert.equal(state.tools_enabled, true);
+      assert.ok(state.tools.every(tool => tool.enabled));
       assert.ok(state.tools.some(tool => tool.id === 'shell_page_read' && tool.source === 'browser' && tool.enabled));
       assert.ok(state.tools.some(tool => tool.id === 'fetch_url' && tool.source === 'local'));
       assert.ok(state.tools.some(tool => tool.id === 'web_search' && tool.http.url.includes('duckduckgo')));
       await mgmt('shell_agent_mcp', 'save', { id: 'fixture', name: 'Fixture', url: `${apiBase}/mcp`, enabled: true });
       await openTools();
       await side.locator('[data-tool-id="mcp_fixture__echo"]').waitFor();
-      for (const id of ['fetch_url', 'web_search', 'mcp_fixture__echo']) {
-        await side.getByRole('checkbox', { name: `Enable ${id}`, exact: true }).uncheck();
-        await waitFor(async () => !(await mgmt('shell_agent', 'state_get')).tools.find(tool => tool.id === id).enabled);
-      }
+      assert.equal(await side.getByRole('checkbox').count(), 1);
+      await side.getByRole('checkbox', { name: 'Enable tools', exact: true }).uncheck();
+      await waitFor(async () => (await mgmt('shell_agent', 'state_get')).tools_enabled === false);
+      assert.ok((await mgmt('shell_agent', 'state_get')).tools.every(tool => !tool.enabled));
+      await side.reload();
+      await side.getByRole('checkbox', { name: 'Enable tools', exact: true }).waitFor();
+      assert.equal(await side.getByRole('checkbox', { name: 'Enable tools', exact: true }).isChecked(), false);
       await backToChat();
       const answer = await ask('Show only configured tools.');
       assert.match(answer.content, /CONFIGURED-ONLY/);
-      const names = calls.at(-1).tools.map(tool => tool.function.name);
-      assert.ok(names.includes('shell_tab'));
-      for (const id of ['fetch_url', 'web_search', 'mcp_fixture__echo']) assert.ok(!names.includes(id), `${id} must not be sent to the model`);
+      assert.equal(calls.at(-1).tools?.length || 0, 0, 'no tools are sent when the global switch is off');
+      await chat.getByLabel('River thinking', { exact: true }).filter({ hasText: 'Checking the fixture page.' }).waitFor();
+      assert.ok(!answer.content.includes('Checking the fixture page.'), 'thinking stays out of the answer');
       assert.equal(requests.length, 0, 'disabled search performs no request');
     }],
     ['the HTTP editor replaces DuckDuckGo with MoonShot POST search and document GET', async () => {
@@ -213,13 +219,14 @@ try {
       await side.getByLabel('URL', { exact: true }).fill(`${apiBase}/v1/search`);
       await side.getByRole('button', { name: 'Save', exact: true }).click();
       await side.locator('[data-tool-id="web_search"]').waitFor();
-      await side.getByRole('checkbox', { name: 'Enable web_search', exact: true }).check();
-      await waitFor(async () => (await mgmt('shell_agent', 'state_get')).tools.find(tool => tool.id === 'web_search').enabled);
       await side.getByRole('button', { name: 'Add HTTP tool', exact: true }).click();
       await side.getByRole('button', { name: 'Document lookup template', exact: true }).click();
       await side.getByLabel('URL', { exact: true }).fill(`${apiBase}/v1/documents/{{document_id}}`);
       await side.getByRole('button', { name: 'Save', exact: true }).click();
       await side.locator('[data-tool-id="get_search_document"]').waitFor();
+      assert.equal((await mgmt('shell_agent', 'state_get')).tools_enabled, false, 'editing and adding tools does not change the global switch');
+      await side.getByRole('checkbox', { name: 'Enable tools', exact: true }).check();
+      await waitFor(async () => (await mgmt('shell_agent', 'state_get')).tools_enabled === true);
       assert.equal(requests.length, 0, 'configuring tools does not execute them');
       await backToChat();
       await side.getByRole('button', { name: 'New', exact: true }).click();
@@ -233,23 +240,25 @@ try {
       ]);
       const names = calls[0].tools.map(tool => tool.function.name);
       assert.ok(names.includes('web_search') && names.includes('get_search_document'));
-      assert.ok(!names.includes('fetch_url') && !names.includes('mcp_fixture__echo'));
+      assert.ok(names.includes('fetch_url') && names.includes('mcp_fixture__echo'));
+      for (const name of ['shell_cookie', 'shell_storage', 'shell_page_zoom']) assert.ok(names.includes(name));
     }],
-    ['tool definitions and disabled choices persist through pane reload', async () => {
+    ['thinking, tool definitions and the single switch persist through pane reload', async () => {
       await side.reload();
       await side.waitForFunction(() => !!window.__shell);
+      await side.getByLabel('River thinking', { exact: true }).filter({ hasText: 'Checking the fixture page.' }).waitFor();
       await openTools();
-      assert.equal(await side.getByRole('checkbox', { name: 'Enable fetch_url', exact: true }).isChecked(), false);
-      assert.equal(await side.getByRole('checkbox', { name: 'Enable mcp_fixture__echo', exact: true }).isChecked(), false);
-      assert.equal(await side.getByRole('checkbox', { name: 'Enable web_search', exact: true }).isChecked(), true);
+      assert.equal(await side.getByRole('checkbox').count(), 1);
+      assert.equal(await side.getByRole('checkbox', { name: 'Enable tools', exact: true }).isChecked(), true);
       const config = JSON.parse(fs.readFileSync(path.join(app.data, 'agent.json'), 'utf8'));
       assert.equal(config.tools.http.find(tool => tool.id === 'web_search').url, `${apiBase}/v1/search`);
       assert.equal(config.tools.http.length, 2);
-      assert.equal(config.tools.enabled.fetch_url, false);
-      assert.equal(config.tools.enabled.get_search_document, true);
+      assert.equal(config.tools.enabled, true);
     }],
     ['browser APIs keep canonical names while editable definitions and nonbrowser aliases retain their handlers', async () => {
       await openTools();
+      await side.getByRole('checkbox', { name: 'Enable tools', exact: true }).uncheck();
+      await waitFor(async () => (await mgmt('shell_agent', 'state_get')).tools_enabled === false);
       const edit = async (id, name) => {
         await side.getByRole('button', { name: `Edit ${id}`, exact: true }).click();
         await side.getByLabel('Model tool name', { exact: true }).fill(name);
@@ -269,10 +278,10 @@ try {
       await edit('shell_page_read', 'read_current_page');
       await edit('fetch_skill', 'read_skill_definition');
       await edit('mcp_fixture__echo', 'configured_echo');
-      assert.equal(await side.getByRole('checkbox', { name: 'Enable mcp_fixture__echo', exact: true }).isChecked(), false,
-        'editing does not enable a disabled tool');
-      await side.getByRole('checkbox', { name: 'Enable mcp_fixture__echo', exact: true }).check();
-      await waitFor(async () => (await mgmt('shell_agent', 'state_get')).tools.find(tool => tool.id === 'mcp_fixture__echo').enabled);
+      assert.equal(await side.getByRole('checkbox', { name: 'Enable tools', exact: true }).isChecked(), false,
+        'editing does not enable tools globally');
+      await side.getByRole('checkbox', { name: 'Enable tools', exact: true }).check();
+      await waitFor(async () => (await mgmt('shell_agent', 'state_get')).tools_enabled === true);
       await edit('shell_page_navigate', 'propose_page');
       await side.getByRole('button', { name: 'Edit web_search', exact: true }).click();
       await side.getByLabel('Model tool name', { exact: true }).fill('moonshot_search');
@@ -308,7 +317,7 @@ try {
       await openTools();
       const state = await mgmt('shell_agent', 'state_get');
       assert.equal(state.tools.find(tool => tool.id === 'web_search').name, 'moonshot_search');
-      assert.equal(state.tools.find(tool => tool.id === 'fetch_url').enabled, false);
+      assert.equal(state.tools.find(tool => tool.id === 'fetch_url').enabled, true);
     }],
     ['definitions can be restored and MCP connections remain editable from the tool editor', async () => {
       await openTools();
@@ -322,6 +331,22 @@ try {
       await side.getByRole('button', { name: 'Edit MCP connection', exact: true }).click();
       await side.getByRole('button', { name: 'Add server', exact: true }).waitFor();
       assert.ok((await side.locator('.ag-card').filter({ hasText: 'Fixture' }).innerText()).includes(`${apiBase}/mcp`));
+    }],
+    ['cited-answer mode also shows thinking separately and retains it through reload', async () => {
+      aliases = false;
+      search = false;
+      await backToChat();
+      await chat.getByRole('button', { name: 'New', exact: true }).click();
+      if (await chat.locator('#agent-switch').isChecked()) {
+        await chat.locator('label.switch').filter({ has: chat.locator('#agent-switch') }).click();
+      }
+      const answer = await ask('Summarize this page.');
+      assert.match(answer.content, /CONFIGURED-ONLY/);
+      assert.ok(!answer.content.includes('Checking the fixture page.'));
+      await chat.getByLabel('River thinking', { exact: true }).filter({ hasText: 'Checking the fixture page.' }).waitFor();
+      await chat.reload();
+      await chat.getByLabel('River thinking', { exact: true }).filter({ hasText: 'Checking the fixture page.' }).waitFor();
+      assert.match(await chat.locator('.ask-answer').innerText(), /CONFIGURED-ONLY/);
     }],
   ]);
 } finally {

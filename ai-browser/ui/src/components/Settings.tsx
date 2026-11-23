@@ -253,7 +253,7 @@ export function SettingsPanel() {
   return (
       <div class="ag-body settings-agent-body">
         {tab === 'model' ? <ModelTab /> : !s ? <p class="overlay-empty">Loading…</p>
-          : tab === 'tools' ? <ToolsSettings tools={s.tools || []} error={s.tools_error}
+          : tab === 'tools' ? <ToolsSettings tools={s.tools || []} enabled={s.tools_enabled} error={s.tools_error}
               onEditMcp={() => { settingsTab.value = 'mcp'; }}
               onChange={async (operation, payload) => { agentState.value = await call<AgentState>('shell_agent_tool', operation, payload); }} />
           : tab === 'prompts' ? <PromptsTab s={s} />

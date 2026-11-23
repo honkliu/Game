@@ -191,6 +191,7 @@ export interface AgentState {
   prompts: PromptInfo[];
   mcp: McpServer[];
   tools?: ConfiguredTool[];
+  tools_enabled?: boolean;
   tools_error?: string | null;
 }
 
@@ -215,6 +216,8 @@ export interface ChatMessage {
   content: string;
   tools?: ToolSummary[];
   meta?: string;
+  reasoning?: string;
+  thinking?: string[];
 }
 
 export interface Approval {
@@ -255,6 +258,7 @@ export interface AgentTurn {
   status: 'running' | 'done' | 'error';
   runId: number;
   thinking: string[];
+  reasoning?: string;
   tools: ToolRow[];
   text: string;
   rounds: number;
@@ -268,6 +272,7 @@ export interface AgentTurn {
 }
 
 export interface AskTurn {
+  reasoning?: string;
   kind: 'ask';
   id: number;
   turnId: number;
@@ -292,6 +297,7 @@ export type AgentEvent = { state_seq?: number } & (
   | { type: 'start'; run_id: number; model?: string }
   | { type: 'round'; run_id: number; n: number }
   | { type: 'delta'; run_id: number; text: string }
+  | { type: 'thinking'; run_id: number; text: string }
   | { type: 'tool_start'; run_id: number; call_id: string; name: string; args?: string }
   | { type: 'approval'; run_id: number; call_id: string; name: string; args?: string; server?: string }
   | { type: 'tool_end'; run_id: number; call_id: string; ok: boolean; ms?: number; preview?: string }

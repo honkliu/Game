@@ -901,11 +901,7 @@ impl AppState {
     }
 
     pub(super) fn wv_ui_omnibox_focus(&mut self) -> Result<Option<Value>, String> {
-        self.wv_ui_overlay_close();
-        self.emit(
-            "shell.focus_changed",
-            json!({ "scope": "omnibox", "select_all": true }),
-        );
+        self.wv_ui_shortcut("focus_omnibox", Value::Null);
         Ok(None)
     }
 

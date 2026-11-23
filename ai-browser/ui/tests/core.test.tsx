@@ -5,7 +5,7 @@ import { render } from 'preact';
 import { Markdown } from '../src/markdown';
 import { contextSignature, reconcileEdit } from '../src/context';
 import { COMMANDS } from '../src/mcp';
-import { fromMessages, newAgentTurn, reduceAgent, toMessages } from '../src/reducers';
+import { fromMessages, newAgentTurn, newAskTurn, reduceAgent, toMessages } from '../src/reducers';
 import type { AgentContext } from '../src/types';
 import type { ConfiguredTool } from '../src/types';
 import { ToolsSettings } from '../src/components/ToolsSettings';
@@ -19,6 +19,36 @@ import { Composer } from '../src/components/Composer';
 import { Transcript } from '../src/components/Transcript';
 
 describe('transcript speaker attribution', () => {
+  it('keeps provider thinking and progress notes visible while running, after completion and when restored', () => {
+    const previous = turns.value;
+    const host = document.createElement('div');
+    try {
+      let turn = { ...newAgentTurn(1, 'Read this page'), runId: 7 };
+      turn = reduceAgent(turn, { type: 'thinking', run_id: 7, text: 'Checking ' });
+      turn = reduceAgent(turn, { type: 'thinking', run_id: 7, text: '**the page**.' });
+      turn = reduceAgent(turn, { type: 'delta', run_id: 7, text: 'I will read the page.' });
+      turn = reduceAgent(turn, { type: 'tool_start', run_id: 7, call_id: 'read', name: 'shell_page_read' });
+      act(() => { turns.value = [turn]; render(<Transcript onStarter={() => {}} />, host); });
+      const visibleThinking = () => host.querySelector('[aria-label="River thinking"]')!;
+      expect(visibleThinking().textContent).toContain('Checking the page.');
+      expect(visibleThinking().textContent).toContain('I will read the page.');
+      expect(visibleThinking().closest('details')).toBeNull();
+      turn = reduceAgent(turn, { type: 'done', run_id: 7, text: 'Final answer', rounds: 1 });
+      act(() => { turns.value = [turn]; });
+      expect(visibleThinking().textContent).toContain('Checking the page.');
+      expect(host.querySelector('.ag-answer')?.textContent?.trim()).toBe('Final answer');
+      const saved = toMessages([turn]);
+      act(() => { turns.value = fromMessages(saved, () => 2); });
+      expect(visibleThinking().textContent).toContain('Checking the page.');
+      expect(visibleThinking().textContent).toContain('I will read the page.');
+      act(() => { turns.value = [{ ...newAskTurn(3, 10, 'Question'), status: 'ok', text: 'Cited answer', reasoning: 'Checking sources.' }]; });
+      expect(visibleThinking().textContent).toContain('Checking sources.');
+      expect(host.querySelector('.ask-answer')?.textContent?.trim()).toBe('Cited answer');
+    } finally {
+      act(() => { render(null, host); turns.value = previous; });
+    }
+  });
+
   it('distinguishes external questions, River answers and internal model rounds', () => {
     const previous = turns.value;
     const host = document.createElement('div');
@@ -321,22 +351,38 @@ describe('contract with the shared shell catalog', () => {
         body: { query: '{{query}}' },
       },
     };
-    it('shows targets and sends explicit enable changes, reporting save failures', async () => {
+    it('uses one default-on tools switch and restores it after save failures', async () => {
       const host = document.createElement('div');
       let rejectSave!: (error: Error) => void;
       const change = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectSave = reject; }));
-      await act(() => render(<ToolsSettings tools={[search]} onChange={change} />, host));
+      await act(() => render(<ToolsSettings tools={[search, { ...search, id: 'shell_cookie', source: 'browser', http: undefined }]} onChange={change} />, host));
       expect(host.textContent).toContain(search.target);
+      expect(host.querySelectorAll('input[type="checkbox"]')).toHaveLength(1);
+      expect(host.querySelector<HTMLInputElement>('[aria-label="Enable tools"]')!.checked).toBe(true);
       await act(async () => {
-        const checkbox = host.querySelector<HTMLInputElement>('input[aria-label="Enable web_search"]')!;
+        const checkbox = host.querySelector<HTMLInputElement>('input[aria-label="Enable tools"]')!;
         checkbox.checked = false;
         checkbox.dispatchEvent(new Event('change', { bubbles: true }));
       });
-      expect(change).toHaveBeenCalledWith('enabled_set', { id: 'web_search', enabled: false });
-      expect(host.querySelector<HTMLInputElement>('input[aria-label="Enable web_search"]')!.checked).toBe(false);
+      expect(change).toHaveBeenCalledWith('enabled_set', { enabled: false });
+      expect(host.querySelector<HTMLInputElement>('input[aria-label="Enable tools"]')!.checked).toBe(false);
       await act(async () => rejectSave(new Error('Cannot save configuration')));
-      expect(host.querySelector<HTMLInputElement>('input[aria-label="Enable web_search"]')!.checked).toBe(true);
+      expect(host.querySelector<HTMLInputElement>('input[aria-label="Enable tools"]')!.checked).toBe(true);
       expect(host.textContent).toContain('Cannot save configuration');
+    });
+    it('can turn tools back on globally and reflects the saved state', async () => {
+      const host = document.createElement('div');
+      const change = vi.fn().mockResolvedValue(undefined);
+      await act(() => render(<ToolsSettings tools={[search]} enabled={false} onChange={change} />, host));
+      const checkbox = () => host.querySelector<HTMLInputElement>('[aria-label="Enable tools"]')!;
+      expect(checkbox().checked).toBe(false);
+      await act(async () => {
+        checkbox().checked = true;
+        checkbox().dispatchEvent(new Event('change', { bubbles: true }));
+        render(<ToolsSettings tools={[search]} enabled={true} onChange={change} />, host);
+      });
+      expect(change).toHaveBeenCalledWith('enabled_set', { enabled: true });
+      expect(checkbox().checked).toBe(true);
     });
     it('edits browser, local and MCP definitions without changing handler IDs', async () => {
       for (const [source, id] of [['browser', 'shell_page_read'], ['local', 'fetch_url'], ['mcp', 'mcp_fixture__echo']] as const) {
@@ -384,12 +430,14 @@ describe('contract with the shared shell catalog', () => {
       });
       await act(async () => buttons().find(button => button.textContent === 'Save')!.click());
       expect(change).toHaveBeenCalledWith('http_save', expect.objectContaining({
-        editing: true, enabled: true,
+        editing: true,
         tool: expect.objectContaining({
           id: 'web_search', method: 'POST', url: 'http://localhost:3010/v1/search',
           body: { mode: 'text', query: '{{query}}', offset: 0, limit: 10 },
         }),
       }));
+      const payload = change.mock.calls[0]![1];
+      expect(payload).not.toHaveProperty('enabled');
     });
   });
 });

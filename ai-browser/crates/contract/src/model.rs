@@ -236,6 +236,8 @@ pub enum TaskEvent {
     /// A chunk of the model's *answer text*. Never reasoning text. `seq` starts at
     /// 0 and is dense, so the shell can detect a dropped frame.
     Delta { task: TaskId, seq: u64, text: String },
+    /// Provider-supplied thinking for display, separate from answer text.
+    Thinking { task: TaskId, text: String },
 }
 
 impl TaskEvent {
@@ -243,7 +245,7 @@ impl TaskEvent {
         match self {
             TaskEvent::Stage(progress) => progress.task,
             TaskEvent::Routed(decision) => decision.task,
-            TaskEvent::Delta { task, .. } => *task,
+            TaskEvent::Delta { task, .. } | TaskEvent::Thinking { task, .. } => *task,
         }
     }
 

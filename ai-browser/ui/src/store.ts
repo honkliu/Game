@@ -471,6 +471,11 @@ export function startStore() {
     }
   });
 
+  on('ai.thinking', (p) => {
+    observeSessionEvent(p);
+    turns.value = turns.value.map((t) => (t.kind === 'ask' && t.turnId === p?.turn_id && t.status === 'pending'
+      ? { ...t, reasoning: ((t.reasoning || '') + String(p.text || '')).slice(0, 128_000) } : t));
+  });
   on('ai.delta', (p) => {
     observeSessionEvent(p);
     turns.value = turns.value.map((t) => (t.kind === 'ask' && t.turnId === p?.turn_id && t.status === 'pending' ? { ...t, streamed: t.streamed + String(p.text || '') } : t));

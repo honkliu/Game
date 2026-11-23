@@ -1,4 +1,4 @@
-//! Persisted tool selection and explicitly configured HTTP tools.
+//! Persisted global tool availability and explicitly configured HTTP tools.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -16,14 +16,38 @@ use super::{
 
 const MAX_RESPONSE: u64 = 2 * 1024 * 1024;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolConfig {
-    #[serde(default)]
-    pub enabled: BTreeMap<String, bool>,
+    #[serde(default = "enabled_by_default", deserialize_with = "deserialize_enabled")]
+    pub enabled: bool,
     #[serde(default)]
     pub http: Vec<HttpTool>,
     #[serde(default)]
     pub overrides: BTreeMap<String, ToolOverride>,
+}
+
+fn enabled_by_default() -> bool {
+    true
+}
+
+fn deserialize_enabled<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Selection {
+        All(bool),
+        Legacy(BTreeMap<String, bool>),
+    }
+    Ok(match Selection::deserialize(deserializer)? {
+        Selection::All(enabled) => enabled,
+        // Per-tool selections migrate to the new default: all tools available.
+        Selection::Legacy(_selection) => true,
+    })
+}
+
+impl Default for ToolConfig {
+    fn default() -> Self {
+        Self { enabled: true, http: Vec::new(), overrides: BTreeMap::new() }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,25 +99,17 @@ fn json_format() -> String {
     "json".into()
 }
 
-pub fn load(store: &Store, hub: &Hub) -> Result<ToolConfig, String> {
+pub fn load(store: &Store, _hub: &Hub) -> Result<ToolConfig, String> {
     let mut config = store.load_config()?;
     if let Some(mut tools) = config.tools.clone() {
-        let changed = migrate_browser_selection(&mut tools);
+        let changed = migrate_browser_overrides(&mut tools);
         if changed {
             config.tools = Some(tools.clone());
             store.save_config(&config)?;
         }
         return Ok(tools);
     }
-    // One-time migration preserves the user's existing enabled tools, visibly on disk.
-    hub.sync(&config.mcp_servers);
     let mut selection = ToolConfig::default();
-    for tool in tools::builtins().into_iter().chain(hub.tools()) {
-        let enabled = ai_platform_contract::browser::find(&tool.id).is_none_or(|api| api.agent_default);
-        selection.enabled.insert(tool.id, enabled);
-    }
-
-    selection.enabled.insert("web_search".into(), true);
     selection.http.push(HttpTool {
         id: "web_search".into(),
         name: "web_search".into(),
@@ -115,7 +131,7 @@ pub fn load(store: &Store, hub: &Hub) -> Result<ToolConfig, String> {
 }
 
 /// Data migration only: no old request names survive in the runtime registry.
-fn migrate_browser_selection(config: &mut ToolConfig) -> bool {
+fn migrate_browser_overrides(config: &mut ToolConfig) -> bool {
     let groups: &[(&str, &[&str])] = &[
         ("shell_tab", &["list_tabs", "open_tab", "switch_tab", "close_tab"]),
         ("shell_canvas", &["canvas"]), ("shell_page_read", &["read_page"]),
@@ -125,12 +141,8 @@ fn migrate_browser_selection(config: &mut ToolConfig) -> bool {
         ("shell_storage", &["read_storage", "write_storage"]),
     ];
     let mut changed = false;
-    for (canonical, old) in groups {
-        if !old.iter().any(|id| config.enabled.contains_key(*id) || config.overrides.contains_key(*id)) { continue; }
-        let enabled = old.iter().all(|id| config.enabled.get(*id).copied().unwrap_or(false));
-        config.enabled.entry((*canonical).into()).or_insert(enabled);
-        for id in *old { config.enabled.remove(*id); config.overrides.remove(*id); }
-        changed = true;
+    for (_, old) in groups {
+        for id in *old { changed |= config.overrides.remove(*id).is_some(); }
     }
     changed
 }
@@ -212,10 +224,10 @@ pub fn validate_names(config: &ToolConfig, hub: &Hub) -> Result<(), String> {
     Ok(())
 }
 
-pub fn catalog(store: &Store, hub: &Hub) -> (Vec<Value>, Option<String>) {
+pub fn catalog(store: &Store, hub: &Hub) -> (Vec<Value>, bool, Option<String>) {
     let (config, error) = match load(store, hub) {
         Ok(config) => (config, None),
-        Err(error) => (ToolConfig::default(), Some(error)),
+        Err(error) => (ToolConfig { enabled: false, ..ToolConfig::default() }, Some(error)),
     };
     let mut rows = Vec::new();
     let servers = store.config().mcp_servers;
@@ -247,24 +259,23 @@ pub fn catalog(store: &Store, hub: &Hub) -> (Vec<Value>, Option<String>) {
             "id": tool.id, "name": tool.name, "title": title, "description": tool.description,
             "source": source, "target": target, "parameters": tool.parameters,
             "read_only": !tool.write,
-            "enabled": config.enabled.get(&tool.id).copied().unwrap_or(false),
+            "enabled": config.enabled,
             "model_definition": tool.schema(),
         });
         if let Kind::Http(http) = &tool.kind { row["http"] = json!(http); }
         rows.push(row);
     }
-    for (name, enabled) in &config.enabled {
+    for (name, edit) in &config.overrides {
         if name.starts_with("mcp_") && !rows.iter().any(|row| row["id"] == *name) {
-            let edit = config.overrides.get(name);
-            rows.push(json!({ "id": name, "name": edit.map(|edit| edit.name.as_str()).unwrap_or(name),
-                "title": edit.map(|edit| edit.title.as_str()).unwrap_or(name), "enabled": enabled,
+            rows.push(json!({ "id": name, "name": edit.name,
+                "title": edit.title, "enabled": config.enabled,
                 "source": "mcp", "target": "MCP server not connected",
-                "description": edit.map(|edit| edit.description.as_str()).unwrap_or("Previously discovered tool; reconnect its server in MCP settings."),
-                "parameters": edit.map(|edit| edit.parameters.clone()).unwrap_or_else(|| json!({"type":"object","properties":{}})),
+                "description": edit.description,
+                "parameters": edit.parameters,
                 "read_only": false }));
         }
     }
-    (rows, error)
+    (rows, config.enabled, error)
 }
 
 fn argument(config: &HttpTool, args: &Value, key: &str) -> Result<Value, String> {
@@ -455,12 +466,11 @@ mod tests {
     }
 
     #[test]
-    fn migration_is_visible_and_disabled_choices_survive_reload() {
+    fn all_tools_default_on_and_global_switch_survives_reload() {
         let (dir, store) = profile("migration");
         let hub = Hub::default();
         let migrated = load(&store, &hub).unwrap();
-        assert!(migrated.enabled["shell_tab"]);
-        assert!(!migrated.enabled["shell_window"]);
+        assert!(migrated.enabled);
         assert_eq!(migrated.http[0].id, "web_search");
         assert!(migrated.http[0].url.contains("duckduckgo"));
         let state = super::super::admin::state(&store, &hub);
@@ -469,6 +479,8 @@ mod tests {
             .unwrap()
             .iter()
             .any(|tool| tool["id"] == "fetch_url"));
+        assert_eq!(state["tools_enabled"], true);
+        assert!(state["tools"].as_array().unwrap().iter().all(|tool| tool["enabled"] == true));
         let models = crate::provider::Catalog::from_config(
             &ai_platform_contract::config::AiConfig::default(),
         );
@@ -476,30 +488,39 @@ mod tests {
             &store,
             &hub,
             &models,
-            &json!({"method":"shell_agent_tool","operation":"enabled_set","id":"web_search","enabled":false}),
+            &json!({"method":"shell_agent_tool","operation":"enabled_set","enabled":false}),
         )
         .unwrap();
         let reloaded = Store::new(&dir);
-        assert!(!load(&reloaded, &hub).unwrap().enabled["web_search"]);
+        assert!(!load(&reloaded, &hub).unwrap().enabled);
+        let state = super::super::admin::state(&reloaded, &hub);
+        assert_eq!(state["tools_enabled"], false);
+        assert!(state["tools"].as_array().unwrap().iter().all(|tool| tool["enabled"] == false));
+        let result = super::super::admin::handle(&store, &hub, &models,
+            &json!({"method":"shell_agent_tool","operation":"enabled_set","enabled":true})).unwrap();
+        assert_eq!(result["tools_enabled"], true);
+        assert!(load(&reloaded, &hub).unwrap().enabled);
         assert_eq!(load(&reloaded, &hub).unwrap().http.len(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn explicit_empty_selection_and_corrupt_config_never_restore_defaults() {
+    fn explicit_global_off_and_corrupt_config_never_restore_defaults() {
         let (dir, store) = profile("empty");
         let hub = Hub::default();
         let mut config = store.config();
-        config.tools = Some(ToolConfig::default());
+        let disabled = ToolConfig { enabled: false, ..ToolConfig::default() };
+        config.tools = Some(disabled.clone());
         store.save_config(&config).unwrap();
-        assert_eq!(load(&store, &hub).unwrap(), ToolConfig::default());
+        assert_eq!(load(&store, &hub).unwrap(), disabled);
         assert!(catalog(&store, &hub)
             .0
             .iter()
             .all(|tool| tool["enabled"] == false));
         fs::write(dir.join("agent.json"), "{invalid").unwrap();
         assert!(load(&store, &hub).is_err());
-        assert!(catalog(&store, &hub).1.is_some());
+        assert!(!catalog(&store, &hub).1);
+        assert!(catalog(&store, &hub).2.is_some());
         assert_eq!(
             fs::read_to_string(dir.join("agent.json")).unwrap(),
             "{invalid"
@@ -508,28 +529,26 @@ mod tests {
     }
 
     #[test]
-    fn storage_tool_migration_preserves_existing_choices_and_write_approvals() {
+    fn legacy_per_tool_choices_migrate_to_all_enabled_without_changing_definitions() {
         let (dir, store) = profile("storage-migration");
         let hub = Hub::default();
-        let mut config = store.config();
-        let mut tools = ToolConfig::default();
-        tools.enabled.insert("read_page".into(), true);
-        tools.enabled.insert("fill".into(), true);
-        tools.enabled.insert("read_cookies".into(), false);
-        tools.enabled.insert("write_cookie".into(), true);
-        tools.enabled.insert("read_storage".into(), true);
-        tools.enabled.insert("write_storage".into(), true);
-        tools.enabled.insert("list_tabs".into(), true);
-        tools.enabled.insert("open_tab".into(), false);
-        config.tools = Some(tools);
-        store.save_config(&config).unwrap();
+        let http = search();
+        let edit = json!({"name":"fetch_url","title":"Fetch","description":"Custom fetch", "parameters":{"type":"object","properties":{}}});
+        fs::write(dir.join("agent.json"), json!({"tools": {
+            "enabled":{"shell_page_zoom":false,"read_cookies":false,"shell_storage":true},
+            "http":[http], "overrides":{"fetch_url":edit}
+        }}).to_string()).unwrap();
         let migrated = load(&store, &hub).unwrap();
-        assert!(!migrated.enabled["shell_cookie"]);
-        assert!(migrated.enabled["shell_storage"]);
-        assert!(!migrated.enabled["shell_tab"]);
-        assert!(migrated.enabled["shell_page_read"]);
-        assert!(migrated.enabled.keys().all(|key| key.starts_with("shell_")));
+        assert!(migrated.enabled);
+        assert_eq!(migrated.http, [http]);
+        assert_eq!(migrated.overrides["fetch_url"].description, "Custom fetch");
+        assert!(catalog(&store, &hub).0.iter().all(|tool| tool["enabled"] == true));
         assert_eq!(load(&Store::new(&dir), &hub).unwrap(), migrated);
+        let empty: ToolConfig = serde_json::from_value(json!({"enabled":{}})).unwrap();
+        assert!(empty.enabled);
+        let missing: ToolConfig = serde_json::from_value(json!({})).unwrap();
+        assert!(missing.enabled);
+        assert!(serde_json::from_value::<ToolConfig>(json!({"enabled":"invalid"})).is_err());
         assert!(!ai_platform_contract::browser::mutates("shell_storage", &json!({"operation":"read"})));
         assert!(ai_platform_contract::browser::mutates("shell_storage", &json!({"operation":"set"})));
         fs::remove_dir_all(dir).unwrap();
@@ -584,7 +603,7 @@ mod tests {
         let models = crate::provider::Catalog::from_config(&ai_platform_contract::config::AiConfig::default());
         load(&store, &hub).unwrap();
         super::super::admin::handle(&store, &hub, &models,
-            &json!({"method":"shell_agent_tool","operation":"enabled_set","id":"shell_page_read","enabled":false})).unwrap();
+            &json!({"method":"shell_agent_tool","operation":"enabled_set","enabled":false})).unwrap();
         let edit = json!({
             "name":"shell_page_read", "title":"Read the current page",
             "description":"Edited page reader description.",
@@ -612,7 +631,7 @@ mod tests {
         super::super::admin::handle(&store, &hub, &models,
             &json!({"method":"shell_agent_tool","operation":"definition_reset","id":"shell_page_read"})).unwrap();
         let restored = load(&store, &hub).unwrap();
-        assert!(!restored.enabled["shell_page_read"]);
+        assert!(!restored.enabled);
         assert!(!restored.overrides.contains_key("shell_page_read"));
         assert_eq!(definitions(&restored, &hub).into_iter().find(|tool| tool.id == "shell_page_read").unwrap().name, "shell_page_read");
         fs::remove_dir_all(dir).unwrap();

@@ -71,6 +71,15 @@ function ToolSummaryList({ rows }: { rows: ToolSummary[] }) {
   );
 }
 
+function Thinking({ reasoning, notes = [] }: { reasoning?: string; notes?: string[] }) {
+  if (!reasoning && !notes.length) return null;
+  return <div class="ag-thinking" aria-label="River thinking">
+    <div class="ag-meta">Thinking</div>
+    {reasoning ? <div class="ag-think"><Markdown text={reasoning} /></div> : null}
+    {notes.map((text, i) => <div class="ag-think" key={i}><Markdown text={text} /></div>)}
+  </div>;
+}
+
 function AgentView({ t }: { t: AgentTurn }) {
   const live = t.status === 'running';
   return (
@@ -83,9 +92,9 @@ function AgentView({ t }: { t: AgentTurn }) {
       {t.echo ? <Echo e={t.echo} /> : null}
       <div class={'ag-msg is-assistant' + (live ? ' is-live' : '')}>
         <div class="ag-speaker">River replies</div>
+        <Thinking reasoning={t.reasoning} notes={t.thinking} />
         {live ? (
           <div class="ag-live">
-            {t.thinking.map((x, i) => <div class="ag-think" key={i}>{x}</div>)}
             {t.tools.map((r) => <ToolLine key={r.id} t={r} />)}
           </div>
         ) : t.summary ? (
@@ -140,6 +149,7 @@ function AskView({ t }: { t: AskTurn }) {
   return (
     <div class={'ask-turn' + (t.stale ? ' is-stale' : '')}>
       <div class="ask-question">{t.question}</div>
+      <Thinking reasoning={t.reasoning} />
       <div class={'ask-answer' + (pending ? ' is-pending' : '') + (t.status === 'error' ? ' is-error' : '')}>
         {pending ? (t.streamed ? <Markdown text={t.streamed} /> : 'Thinking…')
           : t.status === 'error' ? t.text || failureLine(t.failure) || 'No answer.'
@@ -161,7 +171,7 @@ export function Transcript({ onStarter }: { onStarter: (text: string) => void })
   const ref = useRef<HTMLDivElement>(null);
   const list = turns.value;
   const last = list[list.length - 1];
-  const sig = list.length + ':' + (last ? (last.kind === 'agent' ? last.text.length + last.tools.length + last.status : last.streamed.length + last.status) : '');
+  const sig = list.length + ':' + (last?.reasoning?.length || 0) + ':' + (last ? (last.kind === 'agent' ? last.text.length + last.thinking.length + last.tools.length + last.status : last.streamed.length + last.status) : '');
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
   }, [sig]);

@@ -32,9 +32,11 @@ export function reduceAgent(t: AgentTurn, ev: AgentEvent): AgentTurn {
   if (t.runId && ev.run_id !== t.runId) return t;
   switch (ev.type) {
     case 'round':
-      return { ...t, rounds: ev.n };
+      return { ...t, rounds: ev.n, reasoning: t.reasoning && ev.n > t.rounds ? t.reasoning + '\n\n' : t.reasoning };
     case 'delta':
       return { ...t, text: t.text + ev.text };
+    case 'thinking':
+      return { ...t, reasoning: ((t.reasoning || '') + ev.text).slice(0, 128_000) };
     case 'tool_start': {
       // Text streamed before a tool call is the model thinking aloud; keep it as a note.
       const thinking = t.text.trim() ? [...t.thinking, t.text.trim()] : t.thinking;
@@ -120,21 +122,25 @@ export function provenance(t: AskTurn): string {
   return `offline extract · no network request${ms}`;
 }
 
-/** The conversation as the model should see it, across both modes. */
+/** Conversation messages and display metadata. Model requests use only role/content. */
 export function toMessages(turns: Turn[]): ChatMessage[] {
   const out: ChatMessage[] = [];
   for (const t of turns) {
     if (t.kind === 'agent') {
       out.push({ role: 'user', content: t.question });
+      const thinking = {
+        ...(t.reasoning ? { reasoning: t.reasoning } : {}),
+        ...(t.thinking.length ? { thinking: t.thinking } : {}),
+      };
       if (t.status === 'done') {
         const tools = summarizeTools(t);
-        out.push({ role: 'assistant', content: t.text, tools, meta: t.rounds ? `${t.rounds} round${t.rounds === 1 ? '' : 's'}` : '' });
-      } else if (t.status === 'error' && t.text.trim()) {
-        out.push({ role: 'assistant', content: t.text, tools: summarizeTools(t) });
+        out.push({ role: 'assistant', content: t.text, tools, meta: t.rounds ? `${t.rounds} round${t.rounds === 1 ? '' : 's'}` : '', ...thinking });
+      } else if (t.status === 'error' && (t.text.trim() || t.reasoning || t.thinking.length)) {
+        out.push({ role: 'assistant', content: t.text, tools: summarizeTools(t), ...thinking });
       }
     } else if (t.status === 'ok' && t.text) {
       out.push({ role: 'user', content: t.question });
-      out.push({ role: 'assistant', content: t.text });
+      out.push({ role: 'assistant', content: t.text, ...(t.reasoning ? { reasoning: t.reasoning } : {}) });
     }
   }
   return out;
@@ -152,6 +158,8 @@ export function fromMessages(messages: ChatMessage[], nextId: () => number): Age
         last.text = m.content;
         last.summary = m.tools ?? [];
         last.rounds = Number.parseInt(m.meta ?? '', 10) || 0;
+        last.reasoning = m.reasoning;
+        last.thinking = m.thinking ?? [];
       }
     }
   }

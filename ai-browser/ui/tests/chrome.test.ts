@@ -87,8 +87,31 @@ it('native chrome sends canonical operations while retaining empty cells, monito
       cmd: 'shell_window', payload: { operation: 'span_select', ...layout },
     });
     expect(document.getElementById('monitor-picker')!.hidden).toBe(true);
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    sent.length = 0;
+    listeners.get('shell.focus_changed')!({ scope: 'cycle' });
+    expect(sent.map(({ cmd, payload }) => [cmd, payload])).toEqual([
+      ['shell_ui', { operation: 'shortcut', name: 'focus_omnibox' }],
+    ]);
+    hasFocus.mockReturnValue(true);
+    listeners.get('shell.focus_changed')!({ scope: 'omnibox', select_all: true });
+    expect(document.activeElement?.id).toBe('omnibox');
+    listeners.get('shell.focus_changed')!({ scope: 'cycle' });
+    expect(document.activeElement?.closest('.tab-row')).not.toBeNull();
+    sent.length = 0;
+    listeners.get('shell.focus_changed')!({ scope: 'cycle' });
+    expect(sent.filter(message => message.payload.operation === 'page_focus')).toHaveLength(1);
+
+    click('win-span-menu');
+    await flush();
+    input.value = 'keep this search';
+    listeners.get('shell.shortcut')!({ name: 'escape' });
+    listeners.get('shell.escape')!({});
+    expect(document.getElementById('monitor-picker')!.hidden).toBe(true);
+    expect(input.value).toBe('keep this search');
   } finally {
     await flush();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   }
 });

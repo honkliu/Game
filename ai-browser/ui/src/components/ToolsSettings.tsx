@@ -3,6 +3,7 @@ import type { ConfiguredTool, HttpToolConfig } from '../types';
 
 type Props = {
   tools: ConfiguredTool[];
+  enabled?: boolean;
   error?: string | null;
   onChange: (operation: string, payload: Record<string, unknown>) => Promise<void>;
   onEditMcp?: () => void;
@@ -12,10 +13,10 @@ const querySchema = {
   type: 'object', properties: { query: { type: 'string' } }, required: ['query'],
 };
 
-export function ToolsSettings({ tools, error, onChange, onEditMcp }: Props) {
+export function ToolsSettings({ tools, enabled = true, error, onChange, onEditMcp }: Props) {
   const [editing, setEditing] = useState<ConfiguredTool | 'new' | null>(null);
   const [busy, setBusy] = useState(false);
-  const [pendingToggle, setPendingToggle] = useState<{ id: string; enabled: boolean } | null>(null);
+  const [pendingEnabled, setPendingEnabled] = useState<boolean | null>(null);
   const [message, setMessage] = useState('');
   const act = async (op: string, payload: Record<string, unknown>) => {
     setBusy(true);
@@ -27,7 +28,7 @@ export function ToolsSettings({ tools, error, onChange, onEditMcp }: Props) {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
       return false;
-    } finally { setBusy(false); setPendingToggle(null); }
+    } finally { setBusy(false); setPendingEnabled(null); }
   };
   if (editing && editing !== 'new' && !editing.http) return <DefinitionEditor key={editing.id}
     tool={editing} busy={busy} message={message} cancel={() => setEditing(null)}
@@ -44,7 +45,14 @@ export function ToolsSettings({ tools, error, onChange, onEditMcp }: Props) {
       if (await act('http_save', payload)) setEditing(null);
     }} cancel={() => setEditing(null)} busy={busy} message={message} />;
   return <>
-    <p class="ag-help">Only enabled tools are sent to the model. Browser operations, network access, skills and MCP tools are all listed here. Existing enabled tools are preserved on upgrade.</p>
+    <label class="ag-check"><input type="checkbox" checked={pendingEnabled ?? enabled}
+      aria-label="Enable tools" disabled={busy || !!error}
+      onChange={event => {
+        const enabled = event.currentTarget.checked;
+        setPendingEnabled(enabled);
+        void act('enabled_set', { enabled });
+      }} /><span>Enable tools</span></label>
+    <p class="ag-help">One switch controls all tools, enabled by default. When off, no tools are sent to the model. Action approval settings still apply when tools are on.</p>
     <p class="ag-help">Definitions are sent separately from the System Prompt in the model request's <code>tools</code> field. The model returns <code>tool_calls</code>; the browser runs the selected handler below and sends back its result. Edit changes the model-facing name, description and parameters, not the handler implementation.</p>
     {error ? <p role="alert">Could not load tool configuration: {error}</p> : null}
     <div><button type="button" class="chip-btn is-accent" disabled={busy || !!error}
@@ -56,14 +64,7 @@ export function ToolsSettings({ tools, error, onChange, onEditMcp }: Props) {
       {tool.name !== tool.id ? <small>Handler ID: {tool.id}</small> : null}
       <p class="ag-help">{tool.description}</p>
       <p class="ag-help"><b>Target:</b> <code>{tool.target}</code></p>
-      <label class="ag-check"><input type="checkbox" checked={pendingToggle?.id === tool.id ? pendingToggle.enabled : tool.enabled}
-        aria-label={`Enable ${tool.id}`} disabled={busy || !!error}
-        onChange={event => {
-          const enabled = event.currentTarget.checked;
-          setPendingToggle({ id: tool.id, enabled });
-          void act('enabled_set', { id: tool.id, enabled });
-        }} />
-        <span>Enabled{tool.read_only ? ' (read-only)' : ' (may change data)'}</span></label>
+      <p class="ag-help">{tool.read_only ? 'Read-only' : 'May change data'}</p>
       <details><summary>Model tool definition (tools field)</summary>
         <pre class="ag-code">{JSON.stringify(tool.model_definition || {
           type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters },
@@ -146,7 +147,6 @@ function HttpEditor({ existing, save, cancel, busy, message }: {
   const [body, setBody] = useState(JSON.stringify(tool?.body ?? { query: '{{query}}' }, null, 2));
   const [response, setResponse] = useState<HttpToolConfig['response']>(tool?.response || 'json');
   const [readOnly, setReadOnly] = useState(tool?.read_only ?? false);
-  const [enabled, setEnabled] = useState(existing?.enabled ?? true);
   const [error, setError] = useState('');
   const preset = (document: boolean) => {
     if (!existing) {
@@ -174,12 +174,12 @@ function HttpEditor({ existing, save, cancel, busy, message }: {
         url: url.trim(), parameters: JSON.parse(parameters),
         body: method === 'POST' ? JSON.parse(body) : null, response, read_only: readOnly,
       };
-      await save({ tool: definition, editing: !!existing, enabled });
+      await save({ tool: definition, editing: !!existing });
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
   };
   return <>
     <h3>{existing ? `Edit ${existing.id}` : 'Add HTTP tool'}</h3>
-    <p class="ag-help">Use {'{{argument}}'} in the URL or JSON body. URL values are encoded; JSON placeholders preserve their types. No endpoint is contacted until the model calls this enabled tool.</p>
+    <p class="ag-help">Use {'{{argument}}'} in the URL or JSON body. URL values are encoded; JSON placeholders preserve their types. No endpoint is contacted until the model calls this tool. Availability follows the global tools switch.</p>
     <div><button type="button" class="chip-btn" onClick={() => preset(false)}>MoonShot search template</button>{' '}
       <button type="button" class="chip-btn" onClick={() => preset(true)}>Document lookup template</button></div>
     <label class="ag-field">Tool ID<input value={id} disabled={!!existing} onInput={e => setId(e.currentTarget.value)} /></label>
@@ -201,7 +201,6 @@ function HttpEditor({ existing, save, cancel, busy, message }: {
       <option value="json">JSON</option><option value="text">Text / HTML</option>
       <option value="duckduckgo_html">DuckDuckGo HTML results</option></select></label>
     <label class="ag-check"><input type="checkbox" checked={readOnly} onChange={e => setReadOnly(e.currentTarget.checked)} /> Read-only tool</label>
-    <label class="ag-check"><input type="checkbox" checked={enabled} onChange={e => setEnabled(e.currentTarget.checked)} /> Enabled</label>
     {error ? <p role="alert">{error}</p> : null}
     <div><button type="button" class="chip-btn is-accent" disabled={busy} onClick={() => void submit()}>Save</button>{' '}
       <button type="button" class="chip-btn" disabled={busy} onClick={cancel}>Cancel</button>{' '}

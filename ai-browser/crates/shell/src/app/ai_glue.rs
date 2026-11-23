@@ -509,6 +509,9 @@ impl AppState {
         let Some(state) = self.ai.tasks.get_mut(&task) else { return };
         let turn_id = state.turn_id;
         match event {
+            TaskEvent::Thinking { text, .. } => {
+                self.emit("ai.thinking", json!({ "turn_id": turn_id, "text": text }));
+            }
             TaskEvent::Delta { seq, text, .. } => {
                 state.next_delta = seq + 1;
                 if state.text.len() > 64 * 1024 {

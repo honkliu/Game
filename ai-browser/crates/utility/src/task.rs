@@ -335,11 +335,14 @@ impl Run<'_, '_> {
             let Some(provider) = self.catalog.provider(&model.provider_id) else { continue };
             let mut request = self.base.clone();
             request.model_id = model.model_id.clone();
-            let mut streamed = false;
+            let streamed = Cell::new(false);
             let started = Instant::now();
-            let result = provider.complete(&request, self.control, &mut |delta| {
-                streamed = true;
+            let result = provider.complete_with_thinking(&request, self.control, &mut |delta| {
+                streamed.set(true);
                 on_delta(delta);
+            }, &mut |text| {
+                streamed.set(true);
+                self.em.event(&TaskEvent::Thinking { task: self.view.task, text: text.to_string() });
             });
             audit::line(
                 "provider",
@@ -353,7 +356,7 @@ impl Run<'_, '_> {
             match result {
                 Ok(reply) => return Ok(reply),
                 Err(failure) => {
-                    if streamed || self.control.is_stopped() || failure.kind == FailureKind::NoAnswer {
+                    if streamed.get() || self.control.is_stopped() || failure.kind == FailureKind::NoAnswer {
                         return Err(failure);
                     }
                     last = failure;

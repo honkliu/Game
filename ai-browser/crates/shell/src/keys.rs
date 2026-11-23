@@ -220,6 +220,7 @@ pub fn resolve(vk: u32, mods: Mods, focused_is_input: bool) -> Outcome {
             vk::E => Outcome::Consume(S::ToggleRail),
             vk::P => Outcome::Consume(S::TogglePin),
             vk::A => Outcome::Consume(S::AskAi),
+            vk::OEM_PLUS | vk::NUMPAD_PLUS => Outcome::Consume(S::ZoomIn),
             // Ctrl+Shift+1..9 is reserved for group switching (§3.5), unbound.
             _ => Outcome::Pass,
         };
@@ -256,6 +257,15 @@ pub fn resolve(vk: u32, mods: Mods, focused_is_input: bool) -> Outcome {
     }
 }
 
+/// Native accelerators cannot inspect DOM focus. Space and Escape belong to
+/// the focused control (text entry, menus, find and palette dismissal).
+pub fn resolve_native(vk: u32, mods: Mods) -> Outcome {
+    match resolve(vk, mods, false) {
+        Outcome::Consume(Shortcut::ItemMenu | Shortcut::Escape) => Outcome::Pass,
+        outcome => outcome,
+    }
+}
+
 /// Translate AppKit key events without assuming a US keyboard layout for letters.
 pub fn macos_key(code: u16, characters: &str) -> u32 {
     match code {
@@ -283,6 +293,9 @@ pub fn macos_key(code: u16, characters: &str) -> u32 {
 
 pub fn resolve_macos(key: u32, command: bool, control: bool, option: bool, shift: bool) -> Outcome {
     use Shortcut as S;
+    if key == vk::ESCAPE {
+        return Outcome::Pass;
+    }
     if control && !command && !option && key == vk::TAB {
         return Outcome::Consume(if shift { S::PrevTab } else { S::NextTab });
     }
@@ -339,8 +352,12 @@ mod tests {
 
     #[test]
     fn mac_shortcuts_preserve_editing_and_system_commands() {
+        assert_eq!(resolve_macos(T, true, false, false, false), Outcome::Consume(Shortcut::NewTab));
+        assert_eq!(resolve_macos(T, true, false, false, true), Outcome::Consume(Shortcut::ReopenClosed));
         assert_eq!(resolve_macos(W, true, false, false, false), Outcome::Consume(Shortcut::CloseTab));
+        assert_eq!(resolve_macos(W, false, true, false, false), Outcome::Pass);
         assert_eq!(resolve_macos(L, true, false, false, false), Outcome::Consume(Shortcut::FocusOmnibox));
+        assert_eq!(resolve_macos(TAB, false, true, false, false), Outcome::Consume(Shortcut::NextTab));
         assert_eq!(resolve_macos(TAB, false, true, false, true), Outcome::Consume(Shortcut::PrevTab));
         assert_eq!(resolve_macos(LEFT, true, false, true, false), Outcome::Consume(Shortcut::PrevTab));
         for key in [A, C, V, X, H, TAB, SPACE] {
@@ -423,6 +440,7 @@ mod tests {
         assert_eq!(sc(F5, Mods::SHIFT), Some(Shortcut::ReloadIgnoringCache));
         assert_eq!(sc(OEM_PLUS, Mods::CTRL), Some(Shortcut::ZoomIn));
         assert_eq!(sc(NUMPAD_PLUS, Mods::CTRL), Some(Shortcut::ZoomIn));
+        assert_eq!(sc(OEM_PLUS, Mods::CTRL_SHIFT), Some(Shortcut::ZoomIn));
         assert_eq!(sc(OEM_MINUS, Mods::CTRL), Some(Shortcut::ZoomOut));
         assert_eq!(sc(NUMPAD_MINUS, Mods::CTRL), Some(Shortcut::ZoomOut));
         assert_eq!(sc(COMMA, Mods::CTRL), Some(Shortcut::OpenSettings));
@@ -459,6 +477,17 @@ mod tests {
             }
             assert_eq!(resolve(code, Mods::CTRL, true), Outcome::Pass, "vk {code:#x}");
         }
+    }
+
+    #[test]
+    fn native_shortcuts_preserve_typing_but_close_tabs_from_inputs() {
+        for key in [SPACE, ESCAPE, A, C, V, X, Z] {
+            assert_eq!(resolve_native(key, Mods::NONE), Outcome::Pass);
+            assert_eq!(resolve_native(key, Mods::CTRL), Outcome::Pass);
+        }
+        assert_eq!(resolve_native(W, Mods::CTRL), Outcome::Consume(Shortcut::CloseTab));
+        assert_eq!(resolve_native(L, Mods::CTRL), Outcome::Consume(Shortcut::FocusOmnibox));
+        assert_eq!(resolve_macos(ESCAPE, false, false, false, false), Outcome::Pass);
     }
 
     #[test]

@@ -145,12 +145,16 @@ fn extractive_answer_streams_densely_and_cites_verbatim() {
 fn citations_that_are_not_verbatim_are_rejected_and_reported() {
     let text = "ANSWER: Returns take 90 days.\nQUOTE b0: Returns are accepted within 90 days of delivery.\nQUOTE b0: Returns are accepted within 30 days of delivery.";
     let server = FakeServer::start(script_for(text));
-    let outcome = run(&plain_shell(), &Tabs::default(), &view("ask", QUESTION, json!({})), &http_config(&server.base_url));
+    let shell = plain_shell();
+    let outcome = run(&shell, &Tabs::default(), &view("ask", QUESTION, json!({})), &http_config(&server.base_url));
     let TaskOutcome::Answered(answer) = outcome else { panic!("{outcome:?}") };
     assert_eq!(answer.citations.len(), 1);
     assert_eq!(answer.citations[0].anchor.quote, "Returns are accepted within 30 days of delivery.");
     assert_eq!(answer.limit.expect("rejection is reported").dropped_items, 1);
     assert!(!answer.answer.contains("SECRET-REASONING"));
+    let events = shell.events();
+    assert!(events.iter().any(|e| e["event"] == "thinking" && e["text"].as_str().is_some_and(|s| s.contains("SECRET-REASONING"))));
+    assert!(!events.iter().filter(|e| e["event"] == "delta").any(|e| e["text"].as_str().unwrap().contains("SECRET-REASONING")));
 }
 
 #[test]

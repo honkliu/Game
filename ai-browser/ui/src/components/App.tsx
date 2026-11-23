@@ -59,7 +59,6 @@ function Header() {
 function Chat() {
   const state = agentState.value;
   const tools = state?.tools || [];
-  const enabled = tools.filter(tool => tool.enabled).length;
   return (
     <div class="chat">
       <Transcript onStarter={(text) => void sendMessage(text)} />
@@ -68,7 +67,7 @@ function Chat() {
       {agentOn.value ? (
         <div class="ag-foot">
           <button type="button" id="ag-tools" class="ag-chip" onClick={() => openSettings('tools')}>
-            {state ? `Tools: ${enabled}/${tools.length} enabled` : 'Tools'}
+            {state ? state.tools_enabled === false ? 'Tools: off' : `Tools: on (${tools.length})` : 'Tools'}
           </button>
           <button type="button" class="ag-chip" onClick={() => void saveAsSkill()}>Save chat as skill</button>
           <button type="button" class="ag-chip" onClick={() => openSettings('prompts')}>Edit prompts</button>

@@ -127,6 +127,7 @@ pub trait ModelProvider: Send + Sync {
         _request: &ChatRequest,
         _control: &TaskControl,
         _on_delta: &mut dyn FnMut(&str),
+        _on_thinking: &mut dyn FnMut(&str),
     ) -> Result<ChatReply, Failure> {
         Err(Failure::unsupported("provider.no_tool_calling"))
     }
@@ -140,6 +141,17 @@ pub trait ModelProvider: Send + Sync {
         control: &TaskControl,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<ProviderReply, Failure>;
+
+    /// Streams provider-supplied thinking separately from answer text.
+    fn complete_with_thinking(
+        &self,
+        request: &CompletionRequest,
+        control: &TaskControl,
+        on_delta: &mut dyn FnMut(&str),
+        _on_thinking: &mut dyn FnMut(&str),
+    ) -> Result<ProviderReply, Failure> {
+        self.complete(request, control, on_delta)
+    }
 }
 
 /// One `model.list` row: the manifest plus whether it can be used right now.

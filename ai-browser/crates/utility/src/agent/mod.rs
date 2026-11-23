@@ -349,7 +349,7 @@ fn compact(env: &Env, run: u64, messages: &mut Vec<Value>, budget_chars: usize, 
         max_tokens: 1_500,
         temperature: 0.0,
     };
-    let summary = model.provider.chat(&request, control, &mut |_| {}).map(|r| r.text).unwrap_or_default();
+    let summary = model.provider.chat(&request, control, &mut |_| {}, &mut |_| {}).map(|r| r.text).unwrap_or_default();
     let summary = if summary.trim().is_empty() { "(earlier turns were dropped to save context)".to_string() } else { summary };
     let tail = messages.split_off(cut);
     messages.truncate(1);
@@ -556,7 +556,9 @@ fn run_inner(env: &Env, run_id: u64, params: &Value, control: &TaskControl) -> R
             max_tokens: MAX_TOKENS,
             temperature: 0.2,
         };
-        let reply = model.provider.chat(&request, control, &mut |d| emit(env, run_id, json!({ "type": "delta", "text": d })))?;
+        let reply = model.provider.chat(&request, control,
+            &mut |d| emit(env, run_id, json!({ "type": "delta", "text": d })),
+            &mut |d| emit(env, run_id, json!({ "type": "thinking", "text": d })))?;
         if reply.tool_calls.is_empty() {
             return Ok((reply.text, round, lock_vec(&loaded)));
         }
@@ -624,6 +626,36 @@ mod tests {
             lock(&self.calls).push((name.into(), params.clone()));
             Ok(ai_platform_contract::frame::ResponsePayload::Ok(json!({"ok":true})))
         }
+    }
+
+    #[test]
+    fn one_switch_gates_all_tools_and_new_tools_follow_it() {
+        let dir = std::env::temp_dir().join(format!("global-tools-{}-{}", std::process::id(), now_ms()));
+        let store = Store::new(&dir);
+        let shell = TestShell::default();
+        let approvals = Approvals::default();
+        let catalog = Catalog::from_config(&ai_platform_contract::config::AiConfig::default());
+        let mcp = mcp::Hub::default();
+        let env = Env { shell:&shell, approvals:&approvals, store:&store, catalog:&catalog, mcp:&mcp };
+        let stash = Mutex::new(Stash::default());
+        let defs = tools::registry(&env, &stash);
+        for id in ["shell_cookie", "shell_storage", "shell_page_zoom", "shell_window", "fetch_url", "web_search"] {
+            assert!(defs.iter().any(|tool| tool.id == id), "{id} must be available by default");
+        }
+        admin::handle(&store, &mcp, &catalog, &json!({"method":"shell_agent_tool","operation":"enabled_set","enabled":false})).unwrap();
+        assert!(tools::registry(&env, &stash).is_empty());
+        let result = admin::handle(&store, &mcp, &catalog, &json!({"method":"shell_agent_tool","operation":"http_save","tool":{
+            "id":"new_http", "title":"New request", "description":"New request", "method":"GET", "url":"https://example.test/",
+            "parameters":{"type":"object","properties":{}}, "response":"text", "read_only":true
+        }})).unwrap();
+        assert_eq!(result["tools_enabled"], false);
+        assert!(tools::registry(&env, &stash).is_empty());
+        assert!(admin::handle(&store, &mcp, &catalog, &json!({"method":"shell_agent_tool","operation":"enabled_set","id":"shell_page_zoom","enabled":true})).is_err());
+        admin::handle(&store, &mcp, &catalog, &json!({"method":"shell_agent_tool","operation":"enabled_set","enabled":true})).unwrap();
+        let defs = tools::registry(&env, &stash);
+        assert!(defs.iter().any(|tool| tool.id == "new_http"));
+        assert_eq!(defs.len(), tools::builtins().len() + 2);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

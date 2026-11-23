@@ -21,7 +21,7 @@ fn strings(p: &Value, key: &str) -> Vec<String> {
 }
 
 pub fn state(store: &Store, hub: &Hub) -> Value {
-    let (tools, tools_error) = tool_config::catalog(store, hub);
+    let (tools, tools_enabled, tools_error) = tool_config::catalog(store, hub);
     let config = store.config();
     json!({
         "config": {
@@ -33,6 +33,7 @@ pub fn state(store: &Store, hub: &Hub) -> Value {
         "prompts": store.prompts(),
         "mcp": hub.status(&config.mcp_servers),
         "tools": tools,
+        "tools_enabled": tools_enabled,
         "tools_error": tools_error,
     })
 }
@@ -77,7 +78,7 @@ fn distill(store: &Store, catalog: &Catalog, p: &Value) -> Result<Value, String>
         temperature: 0.2,
     };
     let control = TaskControl::new(now_ms() + 120_000);
-    let reply = provider.chat(&request, &control, &mut |_| {}).map_err(|f| f.code)?;
+    let reply = provider.chat(&request, &control, &mut |_| {}, &mut |_| {}).map_err(|f| f.code)?;
     let draft = first_object(&reply.text).unwrap_or_else(|| json!({ "name": "New skill", "description": "", "triggers": [], "instructions": reply.text }));
     let name = s(&draft, "name").trim();
     let name = if name.is_empty() { "New skill" } else { name };
@@ -102,13 +103,12 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
     match (s(p, "method"), s(p, "operation")) {
         ("shell_agent", "state_get") => Ok(state(store, hub)),
         ("shell_agent_tool", "enabled_set") => {
-            let id = s(p, "id");
+            if p.get("id").is_some() {
+                return Err("Tool availability is controlled globally; omit id.".into());
+            }
             let enabled = p["enabled"].as_bool().ok_or("Enabled must be a boolean.")?;
             let mut tools = tool_config::load(store, hub)?;
-            if !tool_config::catalog(store, hub).0.iter().any(|tool| tool["id"] == id) {
-                return Err("Unknown tool.".into());
-            }
-            tools.enabled.insert(id.to_string(), enabled);
+            tools.enabled = enabled;
             let mut config = store.load_config()?;
             config.tools = Some(tools);
             store.save_config(&config)?;
@@ -122,7 +122,6 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             if existing.is_some() && p["editing"] != true {
                 return Err("That tool ID already exists. Edit the existing tool instead.".into());
             }
-            tools.enabled.insert(tool.id.clone(), p["enabled"].as_bool().unwrap_or(false));
             if let Some(index) = existing { tools.http[index] = tool; }
             else { tools.http.push(tool); }
             tool_config::validate_names(&tools, hub)?;
@@ -156,7 +155,6 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             let mut tools = tool_config::load(store, hub)?;
             let id = s(p, "id");
             tools.http.retain(|tool| tool.id != id);
-            tools.enabled.remove(id);
             let mut config = store.load_config()?;
             config.tools = Some(tools);
             store.save_config(&config)?;
@@ -262,14 +260,6 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             }
             store.save_config(&c)?;
             hub.sync(&c.mcp_servers);
-            let mut selection = tool_config::load(store, hub)?;
-            for tool in hub.tools() {
-                if matches!(&tool.kind, super::tools::Kind::Mcp { server, .. } if server == &id) {
-                    selection.enabled.entry(tool.id).or_insert(true);
-                }
-            }
-            c.tools = Some(selection);
-            store.save_config(&c)?;
             Ok(state(store, hub))
         }
         ("shell_agent_mcp", "delete") => {

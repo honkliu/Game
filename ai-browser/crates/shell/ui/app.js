@@ -542,7 +542,6 @@ import { bridge } from './sidebar/mcp.js';
     el.omnibox.blur();
     // The host moves OS focus back to the active page webview.
     invoke('shell_ui', { operation: 'page_focus' }).catch(() => {});
-    void invoke('shell_ui', { operation: 'page_focus' });
   }
 
   function focusOmnibox(selectAll = true) {
@@ -1041,11 +1040,6 @@ import { bridge } from './sidebar/mcp.js';
   on('shell.shortcut', (p) => {
     if (!p) return;
     switch (p.name) {
-      case 'escape':
-        if (!monitorPicker.hidden) { closeMonitorPicker(); return; }
-        if (!el.itemMenu.hidden) { closeItemMenu(); return; }
-        if (el.findInput.value) { closeFind(); return; }
-        break;
       case 'item_menu': {
         const row = document.activeElement && document.activeElement.closest('.tab-row');
         if (row) {
@@ -1110,6 +1104,10 @@ import { bridge } from './sidebar/mcp.js';
 
   // F6 cycles page → omnibox → rail → page (§3.6).
   function cycleFocus() {
+    if (!document.hasFocus()) {
+      invoke('shell_ui', { operation: 'shortcut', name: 'focus_omnibox' }).catch(() => {});
+      return;
+    }
     const a = document.activeElement;
     if (a === el.omnibox) {
       const row = el.railList.querySelector('.tab-row');

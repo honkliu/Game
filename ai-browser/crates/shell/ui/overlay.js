@@ -840,8 +840,7 @@ import { bridge } from './sidebar/mcp.js';
 
   on('shell.shortcut', (p) => {
     if (!p) return;
-    if (p.name === 'escape') invoke('shell_ui', { operation: 'overlay_close_top' });
-    else if (p.name === 'ask_ai') openAsk(false);
+    if (p.name === 'ask_ai') openAsk(false);
   });
 
   // Streamed answer text. It is provisional: the final `ai.answer` replaces it, and

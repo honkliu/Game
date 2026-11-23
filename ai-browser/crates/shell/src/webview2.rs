@@ -120,8 +120,7 @@ pub fn install_browser_shortcuts(webview: &wry::WebView, on_shortcut: impl Fn(cr
                     alt: GetKeyState(0x12) < 0,
                     shift: GetKeyState(0x10) < 0,
                 };
-                let Outcome::Consume(shortcut @ (Shortcut::CloseTab | Shortcut::NextTab | Shortcut::PrevTab | Shortcut::OpenDevtools))
-                    = keys::resolve(key, mods, false) else { return Ok(()) };
+                let Outcome::Consume(shortcut) = keys::resolve_native(key, mods) else { return Ok(()) };
                 args.SetHandled(true)?;
                 let mut lparam = 0;
                 args.KeyEventLParam(&mut lparam)?;

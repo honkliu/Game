@@ -162,9 +162,9 @@ describe('shared UI MCP client', () => {
     try {
       await client.ready;
       const call = createAgentCalls(client);
-      const first = call('shell_agent_tool', 'enabled_set', { id: 'shell_cookie', enabled: false });
+      const first = call('shell_agent_tool', 'enabled_set', { enabled: false });
       const second = call('shell_conversation', 'load', { id: 'saved-chat' });
-      await expect(first).resolves.toEqual({ id: 'shell_cookie', enabled: false, operation: 'enabled_set' });
+      await expect(first).resolves.toEqual({ enabled: false, operation: 'enabled_set' });
       await expect(second).resolves.toEqual({ id: 'saved-chat', operation: 'load' });
       expect(server.calls.filter(call => call.method === 'tools/call').map(call => call.params.name)).toEqual(['shell_agent_tool', 'shell_conversation']);
       expect(server.calls.find(call => call.method === 'resources/subscribe')?.params).toEqual({ uri: 'shell://events' });

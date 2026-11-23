@@ -105,7 +105,7 @@ pub fn envelope(stash: &Mutex<Stash>, value: Value) -> String {
     let id = lock(stash).put(text);
     json!({
         "stashed": true, "result_id": id, "total_chars": total, "preview": preview,
-        "hint": "The full result is stored. If enabled in Tools settings, read_result pages through it and grep_result searches it; otherwise only this preview is available."
+        "hint": "The full result is stored. Use read_result to page through it or grep_result to search it."
     })
     .to_string()
 }
@@ -141,9 +141,8 @@ pub fn builtins() -> Vec<ToolDef> {
 
 pub fn registry(env: &Env, _stash: &Mutex<Stash>) -> Vec<ToolDef> {
     let Ok(config) = tool_config::load(env.store, env.mcp) else { return Vec::new() };
-    tool_config::definitions(&config, env.mcp).into_iter()
-        .filter(|tool| config.enabled.get(&tool.id).copied().unwrap_or(false))
-        .collect()
+    if !config.enabled { return Vec::new(); }
+    tool_config::definitions(&config, env.mcp)
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
