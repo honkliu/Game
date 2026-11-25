@@ -11,7 +11,7 @@ product-name = "AI Browser"
 identifier = "com.honkliu.ai-browser"
 publisher = "honkliu"
 category = "Productivity"
-icons = ["assets/browser.png", "assets/browser.ico"]
+icons = ["assets/browser@2x.png", "assets/browser.ico"]
 out-dir = "../../dist"
 before-packaging-command = "cargo build --locked --release --package browser"
 

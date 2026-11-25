@@ -56,6 +56,13 @@ jobs:
         run: cargo install cargo-packager --locked --version 0.11.8
       - name: Package application
         run: cargo packager --release
+      - name: Verify macOS disk image
+        if: runner.os == 'macOS'
+        run: |
+          $images = @(Get-ChildItem dist -Filter '*.dmg')
+          if ($images.Count -ne 1) { throw 'Expected one native-architecture DMG.' }
+          hdiutil verify $images[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw 'DMG verification failed.' }
       - name: Upload application package
         uses: actions/upload-artifact@v6
         with:

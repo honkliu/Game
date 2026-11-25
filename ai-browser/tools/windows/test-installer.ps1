@@ -50,6 +50,7 @@ try {
         $config.nsis.'installer-icon' = Join-Path $shell $config.nsis.'installer-icon'
         $config.macos.'info-plist-path' = Join-Path $shell $config.macos.'info-plist-path'
         $config | Add-Member -NotePropertyName version -NotePropertyValue $package.version
+        $config | Add-Member -NotePropertyName name -NotePropertyValue 'browser'
         $config | Add-Member -NotePropertyName binariesDir -NotePropertyValue (Split-Path -Parent $BrowserPath)
         $config | Add-Member -NotePropertyName binaries -NotePropertyValue @(@{ path = 'browser'; main = $true })
         $configPath = Join-Path $root 'test-packager.json'
