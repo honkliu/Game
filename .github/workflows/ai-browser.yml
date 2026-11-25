@@ -52,13 +52,15 @@ jobs:
         env:
           BROWSER_EXE: '${{ github.workspace }}\ai-browser\target\debug\browser.exe'
         run: cargo build --locked -p browser && npm --prefix e2e test
-      - name: Package macOS application
-        if: runner.os == 'macOS'
-        run: bash tools/package-macos.sh
-      - name: Upload macOS application
-        if: runner.os == 'macOS'
+      - name: Install Cargo Packager
+        run: cargo install cargo-packager --locked --version 0.11.8
+      - name: Package application
+        run: cargo packager --release
+      - name: Upload application package
         uses: actions/upload-artifact@v6
         with:
           name: ai-browser-${{ runner.os }}-${{ runner.arch }}
-          path: ai-browser/dist/*/AI Browser.zip
+          path: |
+            ai-browser/dist/*-setup.exe
+            ai-browser/dist/*.dmg
           if-no-files-found: error

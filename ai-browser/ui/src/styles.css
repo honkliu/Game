@@ -48,6 +48,17 @@ textarea, input, select { font: inherit; color: inherit; user-select: text; }
 .settings-page .ag-row-main { min-width: 0; }
 .settings-page .ag-row-main small { overflow-wrap: anywhere; }
 .settings-page fieldset { border: 1px solid var(--border-subtle); margin-bottom: 12px; }
+.settings-manual { max-width: 82ch; padding: 8px 0 24px; font-size: 15px; line-height: 1.75; overflow-wrap: anywhere; }
+.settings-manual .rich h1 { margin: 0 0 20px; font-size: 30px; line-height: 1.25; letter-spacing: -0.02em; }
+.settings-manual .rich h1 + p { color: var(--fg-muted); font-size: 17px; line-height: 1.65; }
+.settings-manual .rich h2 { margin: 40px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border-subtle); font-size: 21px; line-height: 1.35; }
+.settings-manual .rich h3 { margin: 24px 0 12px; font-size: 17px; line-height: 1.4; }
+.settings-manual .rich p, .settings-manual .rich ul, .settings-manual .rich ol { margin: 0 0 16px; }
+.settings-manual .rich li + li { margin-top: 8px; }
+.settings-manual .rich blockquote { margin: 20px 0; padding: 14px 18px; border-left: 3px solid var(--accent); border-radius: 0 var(--radius-md) var(--radius-md) 0; background: var(--accent-15); opacity: 1; }
+.settings-manual .rich blockquote > :last-child { margin-bottom: 0; }
+.settings-manual .rich table { margin: 20px 0; font-size: 14px; line-height: 1.6; }
+.settings-manual .rich th, .settings-manual .rich td { padding: 10px 12px; border-color: var(--border-subtle); }
 .settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
 .settings-actions select { background: var(--bg-surface); }
 .model-picker { border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--bg-surface); padding: 10px; margin: 8px 0; }

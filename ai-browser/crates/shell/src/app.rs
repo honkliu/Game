@@ -370,6 +370,7 @@ impl AppState {
 
     fn wv_settings_state_get(&self) -> Value {
         json!({
+            "app_version": env!("CARGO_PKG_VERSION"),
             "theme": self.settings.theme,
             "system_dark": self.system_dark,
             "rail_collapsed": self.settings.rail_collapsed,

@@ -2,6 +2,7 @@ import { signal } from '@preact/signals';
 import { applyModels, applyStatus, native, refreshAgentState, refreshStatus, settingsTab, skillDraft, type SettingsTab } from './store';
 
 export interface BrowserSettings {
+  app_version: string;
   theme: string;
   system_dark: boolean;
   rail_collapsed: boolean;

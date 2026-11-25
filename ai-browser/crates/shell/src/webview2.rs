@@ -1,8 +1,8 @@
 //! WebView2 Evergreen runtime gate (DESIGN A5).
 //!
 //! Detection, not installation. If the runtime is absent we show one clear
-//! dialog with the download URL and exit — the design explicitly rules out a
-//! bundled installer.
+//! dialog with the download URL and exit. The Windows installer handles runtime
+//! installation; this gate also supports portable executable launches.
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2Environment,

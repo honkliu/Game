@@ -13,7 +13,7 @@ Single delivery cycle. Everything below is in-scope unless it appears under **Ou
 | A2 | Tabs = vertical strip **+** horizontal header band. The **top strip is horizontal** (title only) and the **left rail is vertical**. | Both layouts are cheap; switching is a runtime flag. Not two products. |
 | A3 | "Canvas/spatial browsing" is **not** delivered. Tabs are a linear list with group nesting. | See §2 trade-offs. A zoomable canvas of live WebView2 surfaces is a multi-cycle project and fails the latency budget in §1. |
 | A4 | No remote services, no accounts, no telemetry, no sync, no auto-update. | Network egress = page loads + search query dispatch only. |
-| A5 | Target: Windows 10 1809+/Windows 11, WebView2 Evergreen runtime present (verified at startup, otherwise hard error dialog with runtime download hint — no bundled installer). | No runtime install flow in v1. |
+| A5 | Target: Windows 10 1809+/Windows 11 with WebView2 Evergreen. Windows Setup installs the runtime through Microsoft's bootstrapper when missing; portable builds retain the startup check and download hint. | Cargo builds generate the Windows installer; no fixed-version WebView2 runtime is bundled. |
 
 ---
 
@@ -320,7 +320,7 @@ Single-scroll page, left nav (4 sections) + right content. Persisted to `setting
 | Section | Controls |
 |---|---|
 | **Appearance** | Theme: Light / Dark / System (radio). Rail expanded / collapsed (toggle). Compact tab rows (toggle). Density: Comfortable / Compact. |
-| **Search** | Search engine: a list of one (DuckDuckGo HTML) plus custom URL template field. **No suggest API.** Default is a plain `GET` to the template with `%s`. |
+| **Search** | Default search: `http://talko.eastasia.cloudapp.azure.com:3010/ui/?q=%s`, with a custom URL template field. **No suggest API.** Search uses a plain `GET`, substituting the URL-encoded query for `%s`. |
 | **Privacy** | "Clear data on exit": history / cookies / cache (3 toggles). Show full URL always (default on, no truncation). Nothing else is collected — a static statement with the list of what is written to disk. |
 | **Advanced** | History cap (number, default 100000). Sleep after N minutes (default 5). Download directory (path, `Browse…` uses a native dialog). `Open data folder` (reveals dir). |
 
@@ -498,7 +498,7 @@ One `session.json` (sub-second writes debounced 500 ms, atomic replace) + one `h
 
 **Kill:** horizontal overflowing tab pills; vendor sidebar content and any vendor-origin network call at idle; remote search suggestions; telemetry; per-tab "first run" screens; error pages that only offer one button; a separate, second command surface with distinct ranking.
 
-**Invent (relative to Chrome/Edge):** one field with an explicit, typeable mode chip (URL / Search / Command / Find); palette and omnibox as one state machine with history search performed in Rust; rail rows that never shrink (fixed 28 px, 20 px close target at 100 tabs); `Ctrl+Alt+←/→` page-swallowing fallback; a documented, testable zero-egress assertion in the shipped product (`diagnostics.self_test`); downloads with per-row explicit actions; a local-only search engine default (DuckDuckGo HTML endpoint) with a user-set template.
+**Invent (relative to Chrome/Edge):** one field with an explicit, typeable mode chip (URL / Search / Command / Find); palette and omnibox as one state machine with history search performed in Rust; rail rows that never shrink (fixed 28 px, 20 px close target at 100 tabs); `Ctrl+Alt+←/→` page-swallowing fallback; a documented, testable zero-egress assertion in the shipped product (`diagnostics.self_test`); downloads with per-row explicit actions; a configurable address-bar search URL, defaulting to Talko.
 
 **Could go wrong:**
 - **R1 — Overlay webview focus flicker.** Toggling a transparent overlay webview can steal focus from the page. Mitigation: overlay created once at startup, 0×0, focusable only when sized; explicit focus handoff on close, tested by the keyboard walkthrough (W9).

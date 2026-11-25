@@ -98,15 +98,20 @@ checks do not validate AppKit event delivery, WebKit rendering or native linking
 From `ai-browser` on a Mac:
 
 ```sh
-bash tools/package-macos.sh
+cargo install cargo-packager --locked --version 0.11.8
+cargo packager --release
 ```
 
-This produces `dist/<target>/AI Browser.app` and a ZIP archive. Pass
-`aarch64-apple-darwin` or `x86_64-apple-darwin` as the first argument to select an
-installed Rust target; the default is the build machine's native target.
-The script ad-hoc signs local builds.
+Install Cargo Packager only once. The second command builds the release browser and
+produces `dist/AI Browser.app` and `AI Browser_<version>_aarch64.dmg` or
+`AI Browser_<version>_x64.dmg`. Users open the DMG and drag AI Browser into Applications.
+The default is the native Rust toolchain architecture. The same command creates the
+Windows NSIS installer on Windows. The standard packager reads the Cargo package
+version; the supplemental Info.plist does not override its executable, ID or version.
 
-For distribution, set `APPLE_SIGNING_IDENTITY` to an installed **Developer ID
-Application** identity. To notarize and staple as well, set `APPLE_NOTARY_PROFILE`
-to a preconfigured `notarytool` keychain profile. Credentials are not stored in
-the repository. CI artifacts are ad-hoc signed, not notarized release downloads.
+Developer ID signing and notarization are not configured by default. A downloaded
+app may need approval in System Settings > Privacy & Security > Open Anyway.
+For signed releases, use Cargo Packager's `macos.signing-identity` setting and its
+standard Apple notarization credentials (such as `APPLE_KEYCHAIN_PROFILE`).
+Do not store signing credentials in the repository. See `tools/README.md` for
+cross-architecture builds and the shared packaging configuration.

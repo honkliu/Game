@@ -10,7 +10,7 @@ fn main() {
     println!("cargo:rerun-if-changed=ui");
     println!("cargo:rerun-if-changed=assets");
     println!("cargo:rerun-if-env-changed=AI_BROWSER_SKIP_UI_BUILD");
-    for p in ["src", "sidebar.html", "package.json", "vite.config.ts", "tsconfig.json"] {
+    for p in ["src", "sidebar.html", "package.json", "package-lock.json", "vite.config.ts", "tsconfig.json"] {
         println!("cargo:rerun-if-changed={}", pane_src.join(p).display());
     }
 
@@ -46,6 +46,15 @@ fn build_pane(src: &Path, out: &Path) {
     if std::env::var_os("AI_BROWSER_SKIP_UI_BUILD").is_some() || !src.join("package.json").is_file() {
         return;
     }
+    let built = ["sidebar.html", "sidebar.js", "mcp.js", "style.css"].iter()
+        .map(|name| std::fs::metadata(out.join(name)).and_then(|meta| meta.modified()))
+        .collect::<Result<Vec<_>, _>>().ok().and_then(|times| times.into_iter().min());
+    if let Some(built) = built {
+        let inputs = ["src", "sidebar.html", "package.json", "package-lock.json", "vite.config.ts", "tsconfig.json"];
+        if inputs.iter().all(|name| !input_changed(&src.join(name), built)) {
+            return;
+        }
+    }
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
     let run = |args: &[&str]| Command::new(npm).args(args).current_dir(src).status();
     if !src.join("node_modules").is_dir()
@@ -61,6 +70,18 @@ fn build_pane(src: &Path, out: &Path) {
         }
         _ => panic!("npm run build failed for the AI pane"),
     }
+}
+
+fn input_changed(path: &Path, built: std::time::SystemTime) -> bool {
+    let Ok(meta) = path.metadata() else { return true };
+    if meta.modified().map_or(true, |modified| modified > built) {
+        return true;
+    }
+    if meta.is_dir() {
+        let Ok(mut entries) = std::fs::read_dir(path) else { return true };
+        return entries.any(|entry| entry.map_or(true, |entry| input_changed(&entry.path(), built)));
+    }
+    false
 }
 
 fn collect(root: &Path, dir: &Path, out: &mut Vec<String>) {

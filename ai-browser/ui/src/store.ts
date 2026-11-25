@@ -18,7 +18,7 @@ export const native = bridge();
 export const call = createAgentCalls(native);
 
 export type View = 'chat' | 'settings' | 'history';
-export type SettingsTab = 'tools' | 'skills' | 'mcp' | 'rivermcp' | 'prompts' | 'instructions' | 'model' | 'general' | 'history' | 'downloads' | 'chats';
+export type SettingsTab = 'tools' | 'skills' | 'mcp' | 'rivermcp' | 'prompts' | 'instructions' | 'model' | 'general' | 'history' | 'downloads' | 'chats' | 'help' | 'about';
 export type Intent = 'ask' | 'summarize' | 'explain' | 'verify' | 'translate' | 'rewrite' | 'act';
 
 const MAX_TURNS = 100;

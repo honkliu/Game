@@ -348,6 +348,45 @@ try {
       await chat.getByLabel('River thinking', { exact: true }).filter({ hasText: 'Checking the fixture page.' }).waitFor();
       assert.match(await chat.locator('.ask-answer').innerText(), /CONFIGURED-ONLY/);
     }],
+    ['Settings exposes the Cargo app version and one rendered manual across reloads', async () => {
+      await app.invoke('shell_settings', { operation: 'open', section: 'about' });
+      const settings = await app.pageWith(/pages\/settings\.html/);
+      const manifest = fs.readFileSync(new URL('../Cargo.toml', import.meta.url), 'utf8');
+      const version = manifest.match(/\[workspace\.package\][\s\S]*?\nversion\s*=\s*"([^"]+)"/)[1];
+      const snapshot = await app.invoke('shell_settings', { operation: 'state_get' });
+      assert.equal(snapshot.settings.app_version, version);
+      await settings.locator('#app-version').waitFor();
+      assert.equal(await settings.locator('#app-version').textContent(), `AI Browser ${version}`);
+      await settings.reload();
+      await settings.waitForFunction(() => document.querySelector('#settings-about')?.getAttribute('aria-selected') === 'true');
+      assert.equal(await settings.locator('#app-version').textContent(), `AI Browser ${version}`);
+      await settings.getByRole('tab', { name: 'Help', exact: true }).click();
+      await settings.getByRole('heading', { name: 'Using AI Browser', exact: true }).waitFor();
+      assert.equal(await settings.locator('#settings-content h1').count(), 1);
+      const table = await settings.locator('#settings-content table').filter({ hasText: 'macOS' }).textContent();
+      assert.match(table, /Span monitors/);
+      assert.match(table, /not available/);
+      await settings.reload();
+      await settings.waitForFunction(() => document.querySelector('#settings-help')?.getAttribute('aria-selected') === 'true');
+      await settings.getByRole('heading', { name: 'Using AI Browser', exact: true }).waitFor();
+    }],
+    ['address-bar search uses the default endpoint and URL-encodes the query', async () => {
+      const endpoint = 'http://talko.eastasia.cloudapp.azure.com:3010/ui/?q=';
+      const query = 'AI browser & 中文';
+      await app.ctx.route(`${endpoint}*`, route => route.fulfill({
+        contentType: 'text/html', body: '<h1>Default search fixture</h1>',
+      }));
+      try {
+        await app.invoke('shell_tab', { operation: 'open', url: 'native://newtab', background: false });
+        await app.shell.locator('#omnibox').fill(query);
+        await app.shell.locator('#omnibox').press('Enter');
+        const page = await app.pageWith(/talko\.eastasia\.cloudapp\.azure\.com:3010\/ui\//);
+        await page.getByRole('heading', { name: 'Default search fixture', exact: true }).waitFor();
+        assert.equal(page.url(), endpoint + encodeURIComponent(query));
+      } finally {
+        await app.ctx.unroute(`${endpoint}*`);
+      }
+    }],
   ]);
 } finally {
   await app.close();

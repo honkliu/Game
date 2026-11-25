@@ -6,6 +6,53 @@ rust-version.workspace = true
 license.workspace = true
 description = "AI-native browser: WebView2 on Windows and WKWebView on macOS"
 
+[package.metadata.packager]
+product-name = "AI Browser"
+identifier = "com.honkliu.ai-browser"
+publisher = "honkliu"
+category = "Productivity"
+icons = ["assets/browser.png", "assets/browser.ico"]
+out-dir = "../../dist"
+before-packaging-command = "cargo build --locked --release --package browser"
+
+[package.metadata.packager.macos]
+minimum-system-version = "14.0"
+info-plist-path = "../../tools/macos/Info.plist"
+
+[package.metadata.packager.nsis]
+installMode = "perMachine"
+installer-icon = "assets/browser.ico"
+preinstall-section = '''
+Section "WebView2 Runtime"
+  SetRegView 32
+  ReadRegStr $0 HKLM "SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  SetRegView 64
+  ReadRegStr $1 HKLM "SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  ${If} $0 == "0.0.0.0"
+    StrCpy $0 ""
+  ${EndIf}
+  ${If} $1 == "0.0.0.0"
+    StrCpy $1 ""
+  ${EndIf}
+  ${If} $0 == ""
+  ${AndIf} $1 == ""
+    InitPluginsDir
+    DetailPrint "Downloading Microsoft Edge WebView2 Runtime..."
+    nsis_tauri_utils::download "https://go.microsoft.com/fwlink/p/?LinkId=2124703" "$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe"
+    Pop $0
+    ${If} $0 != 0
+      Abort "Could not download WebView2 Runtime. Check your internet connection and run Setup again."
+    ${EndIf}
+    ExecWait '"$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe" /silent /install' $1
+    ${If} $1 == 3010
+      SetRebootFlag true
+    ${ElseIf} $1 != 0
+      Abort "WebView2 Runtime installation failed. Restart Windows and run Setup again."
+    ${EndIf}
+  ${EndIf}
+SectionEnd
+'''
+
 [[bin]]
 name = "browser"
 path = "src/main.rs"

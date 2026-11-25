@@ -44,6 +44,7 @@ fn recent_json(e: HistoryEntry) -> serde_json::Value {
 /// `native://settings` → the settings page with the current state embedded.
 pub fn settings_url(settings: &settings::Settings, system_dark: bool, history_count: i64, webview2_version: Option<String>) -> String {
     let payload = serde_json::json!({
+        "app_version": env!("CARGO_PKG_VERSION"),
         "theme": settings.theme,
         "system_dark": system_dark,
         "rail_collapsed": settings.rail_collapsed,
@@ -168,6 +169,21 @@ mod tests {
         let (url, typed) = resolve_navigation("> new-tab", "https://e.com/?q=%s");
         assert_eq!(url, "");
         assert!(!typed);
+    }
+
+    #[test]
+    fn search_navigation_uses_default_or_saved_template() {
+        let fallback = "http://talko.eastasia.cloudapp.azure.com:3010/ui/?q=AI%20browser%20%26%20%E4%B8%AD%E6%96%87";
+        for (settings, expected) in [
+            (settings::Settings::default(), fallback),
+            (serde_json::from_str::<settings::Settings>(r#"{"theme":"dark"}"#).unwrap(), fallback),
+            (serde_json::from_str::<settings::Settings>(r#"{"search_template":"https://example.com/search?q=%s"}"#).unwrap(),
+                "https://example.com/search?q=AI%20browser%20%26%20%E4%B8%AD%E6%96%87"),
+        ] {
+            let (url, typed) = resolve_navigation("AI browser & 中文", &settings.search_template);
+            assert_eq!(url, expected);
+            assert!(typed);
+        }
     }
 
     #[test]

@@ -31,6 +31,8 @@ pub(super) fn valid_section(section: &str) -> bool {
         "history",
         "downloads",
         "chats",
+        "help",
+        "about",
     ]
     .contains(&section)
 }

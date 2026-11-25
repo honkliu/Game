@@ -74,7 +74,7 @@ Spec: `../ai-native-browser-design-and-engineering-backlog.md`.
 `cd ai-browser; cargo run` (needs Node for the first build). Endpoints, models and keys: Settings > Models. Switch with `/model` in River/洛.
 
 On macOS, run `bash run-ai-browser.sh` from the repository root. Native app
-packaging: `bash tools/package-macos.sh` from `ai-browser`.
+packaging: `cargo packager --release` from `ai-browser` (also the Windows packaging command).
 
 ## PDF cells
 - Extensionless PDF URLs are detected via content type: Windows retains native rendering; macOS routes to the bundled viewer.

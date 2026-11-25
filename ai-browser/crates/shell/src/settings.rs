@@ -7,9 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Default search template. DuckDuckGo's HTML endpoint: a plain GET, no
-/// client-side suggest API (§4.8 Search, §2 D-keep list).
-pub const DEFAULT_SEARCH_TEMPLATE: &str = "https://html.duckduckgo.com/html/?q=%s";
+pub const DEFAULT_SEARCH_TEMPLATE: &str = "http://talko.eastasia.cloudapp.azure.com:3010/ui/?q=%s";
 
 pub const DEFAULT_HISTORY_CAP: u32 = 100_000;
 pub const DEFAULT_SLEEP_MINUTES: u32 = 5;

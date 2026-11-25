@@ -3,6 +3,88 @@
 Tooling for the contract crate in `../crates/contract/`, plus the measurement spike that was
 required before `NavigationId` could be trusted.
 
+## Build and package with Cargo Packager
+
+Install the standard packaging tool once:
+
+```text
+cargo install cargo-packager --locked --version 0.11.8
+```
+
+Then run the same command from `ai-browser` on Windows or macOS:
+
+```text
+cargo packager --release
+```
+
+This builds the release browser and uses Cargo Packager's standard installer
+templates. No custom Cargo tasks, linkers or build scripts are needed. Ordinary
+`cargo build` remains compilation-only. All application packaging configuration is
+in `[package.metadata.packager]` in `crates/shell/Cargo.toml`; its version comes from
+the workspace package version. End users do not need Cargo or Rust.
+
+Upload the resulting installer from `dist/`:
+
+| Platform | Package name |
+| --- | --- |
+| Windows x64 | `browser_<version>_x64-setup.exe` |
+| Windows ARM64 | `browser_<version>_arm64-setup.exe` |
+| macOS Intel | `AI Browser_<version>_x64.dmg` |
+| macOS Apple Silicon | `AI Browser_<version>_aarch64.dmg` |
+
+The default is the installed Rust toolchain's native architecture. Build Windows
+packages on Windows and macOS packages on a Mac with Xcode tools. Use a native
+ARM64 Rust toolchain on ARM hardware for native ARM64 output. Cargo Packager
+downloads its own installer tooling as needed; Inno Setup is no longer used.
+
+### Windows installation
+
+Visual Studio's C++ build tools are required for compilation. The MSVC runtime is
+linked statically through `.cargo/config.toml`, so the installer does not need to
+copy architecture-specific Visual C++ runtime DLLs. The standard NSIS installer
+uses all-users mode, requests elevation, and defaults to `%ProgramFiles%\AI Browser`.
+Users get the usual installation wizard, shortcuts and registered uninstaller.
+If the machine-wide WebView2 runtime is absent, a small NSIS preinstall section
+downloads and runs Microsoft's Evergreen bootstrapper (internet is required then).
+The browser profile in `%LOCALAPPDATA%\native-browser` is preserved on uninstall.
+No Windows Firewall rules are added.
+
+Run `powershell -NoProfile -File tools\windows\test-installer.ps1` from an elevated
+PowerShell after packaging for isolated install/reinstall/startup/uninstall checks.
+Use `-BrowserPath <path>` if building with a custom `CARGO_TARGET_DIR`. The test uses
+a unique application name and Program Files folder and removes its own installation.
+
+### macOS installation and signing
+
+Open the DMG and drag `AI Browser.app` to Applications. The packager also leaves
+the `.app` in `dist/`. The supplemental `tools/macos/Info.plist` only supplies app
+permissions and web-content transport settings, not a second version number.
+The minimum macOS version is 14.0, matching `MACOSX_DEPLOYMENT_TARGET` in Cargo config.
+
+Release signing and Apple notarization are optional and not configured by default.
+Windows may show an unrecognized-app warning; macOS may require approval through
+System Settings > Privacy & Security > Open Anyway. Changing ZIP to DMG does not
+remove these checks. For signed releases, use Cargo Packager's standard signing
+configuration; do not put credentials in the repository.
+
+### Cross-architecture builds
+
+Install the target with `rustup target add <triple>` and the corresponding native
+compiler/SDK. Set `CARGO_BUILD_TARGET` to that same triple, then run
+`cargo packager --release --target <triple>`. Both are required: Cargo uses the
+environment variable for the build hook, and Cargo Packager uses `--target` for
+binary discovery and installer architecture. For example, in PowerShell:
+
+```powershell
+$env:CARGO_BUILD_TARGET = 'aarch64-pc-windows-msvc'
+cargo packager --release --target aarch64-pc-windows-msvc
+Remove-Item Env:CARGO_BUILD_TARGET
+```
+
+On macOS, the equivalent is
+`CARGO_BUILD_TARGET=aarch64-apple-darwin cargo packager --release --target aarch64-apple-darwin`.
+Do not select a packaging target without building the matching target binary.
+
 ## Native PDF extraction probe
 
 ```powershell
