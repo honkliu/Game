@@ -89,7 +89,7 @@ fn main() {
     // A5: hard gate on the WebView2 Evergreen runtime, with a dialog and a
     // download hint rather than a panic deep inside tao.
     if let Err(e) = platform::ensure_runtime() {
-        eprintln!("native-browser: {} unavailable: {e}", platform::ENGINE_NAME);
+        eprintln!("River: {} unavailable: {e}", platform::ENGINE_NAME);
         std::process::exit(1);
     }
 

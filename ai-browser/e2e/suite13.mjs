@@ -356,19 +356,19 @@ try {
       const snapshot = await app.invoke('shell_settings', { operation: 'state_get' });
       assert.equal(snapshot.settings.app_version, version);
       await settings.locator('#app-version').waitFor();
-      assert.equal(await settings.locator('#app-version').textContent(), `AI Browser ${version}`);
+      assert.equal(await settings.locator('#app-version').textContent(), `River ${version}`);
       await settings.reload();
       await settings.waitForFunction(() => document.querySelector('#settings-about')?.getAttribute('aria-selected') === 'true');
-      assert.equal(await settings.locator('#app-version').textContent(), `AI Browser ${version}`);
+      assert.equal(await settings.locator('#app-version').textContent(), `River ${version}`);
       await settings.getByRole('tab', { name: 'Help', exact: true }).click();
-      await settings.getByRole('heading', { name: 'Using AI Browser', exact: true }).waitFor();
+      await settings.getByRole('heading', { name: 'Using River', exact: true }).waitFor();
       assert.equal(await settings.locator('#settings-content h1').count(), 1);
       const table = await settings.locator('#settings-content table').filter({ hasText: 'macOS' }).textContent();
       assert.match(table, /Span monitors/);
       assert.match(table, /not available/);
       await settings.reload();
       await settings.waitForFunction(() => document.querySelector('#settings-help')?.getAttribute('aria-selected') === 'true');
-      await settings.getByRole('heading', { name: 'Using AI Browser', exact: true }).waitFor();
+      await settings.getByRole('heading', { name: 'Using River', exact: true }).waitFor();
     }],
     ['address-bar search uses the default endpoint and URL-encodes the query', async () => {
       const endpoint = 'http://talko.eastasia.cloudapp.azure.com:3010/ui/?q=';

@@ -36,7 +36,7 @@ export function SettingsPage() {
       {section === 'general' ? <>
         {preferences.value ? <BrowserPreferences settings={preferences.value} /> : <p>Loading preferences...</p>}
         <h2>River</h2><SettingsPanel key={section} />
-      </> : section === 'about' ? preferences.value ? <p id="app-version">AI Browser {preferences.value.app_version}</p> : <p>Loading...</p>
+      </> : section === 'about' ? preferences.value ? <p id="app-version">River {preferences.value.app_version}</p> : <p>Loading...</p>
         : section === 'help' ? <article class="settings-manual"><Markdown text={manual} /></article>
         : section === 'rivermcp' ? <RiverMcpSettings /> : section === 'history' ? <BrowserHistory /> : section === 'downloads' ? <Downloads /> : section === 'chats' ? <History /> : <SettingsPanel key={section} />}
     </div></main>

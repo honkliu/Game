@@ -1,4 +1,4 @@
-# Using AI Browser
+# Using River
 
 Turn the web into a workspace you can see, arrange, and control through conversation. Canvas puts related pages together. Multiscreen gives that workspace more room. River works with the pages you are using. RiverMCP connects the same live browser to an external AI assistant.
 
@@ -50,7 +50,7 @@ On Windows, **Span monitors** expands one browser window across selected display
 3. Select **2 screens side by side**, **2 screens stacked**, or **4 screens (2 by 2)**.
 4. Assign a different connected monitor to each position, then click **Save and span**.
 
-The monitor choices include their numbers, resolution, and scale. Match the positions to your physical arrangement. AI Browser saves your selection without changing Windows display settings.
+The monitor choices include their numbers, resolution, and scale. Match the positions to your physical arrangement. River saves your selection without changing Windows display settings.
 
 Use **Span monitors** again to restore the previous window. If the button is unavailable, check that a second distinct display is connected. Reopen **Choose monitors** if a saved display has been disconnected.
 
@@ -133,13 +133,13 @@ River is the assistant inside the browser. **RiverMCP** lets an MCP-capable exte
 
 Open **Settings > RiverMCP**. Add an HTTP MCP connection in your external client using the displayed **local endpoint** and **token**. Use that client's authentication settings for the token; it is not your model API key.
 
-For a client on another computer, replace the local address with this computer's IP address and keep the active port shown in Settings. If you change the port or token, click **Apply** and update the client too. Keep AI Browser running while the client is using it.
+For a client on another computer, replace the local address with this computer's IP address and keep the active port shown in Settings. If you change the port or token, click **Apply** and update the client too. Keep River running while the client is using it.
 
 ### Pass the task across applications
 
 Tell the external assistant what browser material to use and what to do with it:
 
-> "Read the API documentation open in AI Browser, including the selected example. Use it to implement this request in my project, then open the local preview in the browser."
+> "Read the API documentation open in River, including the selected example. Use it to implement this request in my project, then open the local preview in the browser."
 
 This connects browser research to work in another application. Be clear about the context to read; do not assume the client has already loaded every page or River's conversation history. Actions from the client affect the live browser workspace.
 

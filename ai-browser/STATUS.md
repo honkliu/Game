@@ -3,9 +3,9 @@
 Spec: `../ai-native-browser-design-and-engineering-backlog.md`.
 
 ## Architecture
-- `crates/shell`: the browser and the only executable (`browser.exe` on Windows, `browser` on macOS). Rust, WebView2/WKWebView via wry/tao. It owns identity, tabs, policy and action dispatch. The AI engine (`crates/utility`, library `ai-engine`) runs as a thread inside the same process.
+- `crates/shell`: the browser and the only executable (`river_browser.exe` on Windows, `river_browser` on macOS). Rust, WebView2/WKWebView via wry/tao. It owns identity, tabs, policy and action dispatch. The AI engine (`crates/utility`, library `ai-engine`) runs as a thread inside the same process.
 - `crates/contract`: the shared message contract.
-- `ui/`: the docked AI pane, TypeScript + Preact + signals, built with Vite into `crates/shell/ui/sidebar/` and **embedded in `browser.exe`** by `crates/shell/build.rs` (which runs `npm run build`; set `AI_BROWSER_SKIP_UI_BUILD=1` to skip, `AI_BROWSER_UI_DIR=<dir>` to serve shell assets from disk).
+- `ui/`: the docked AI pane, TypeScript + Preact + signals, built with Vite into `crates/shell/ui/sidebar/` and **embedded in `river_browser.exe`** by `crates/shell/build.rs` (which runs `npm run build`; set `AI_BROWSER_SKIP_UI_BUILD=1` to skip, `AI_BROWSER_UI_DIR=<dir>` to serve shell assets from disk).
 - Kernel: WebView2 on Windows; system WKWebView on macOS 14+. The AI engine and UI
   are shared. Platform adapters, build instructions and verification boundaries:
   [macOS support](docs/MACOS.md).

@@ -9,12 +9,12 @@ $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if (!$BrowserPath) {
     $buildRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $workspace 'target' }
     if ($Target) { $buildRoot = Join-Path $buildRoot $Target }
-    $BrowserPath = Join-Path $buildRoot 'release\browser.exe'
+    $BrowserPath = Join-Path $buildRoot 'release\river_browser.exe'
 }
 $BrowserPath = (Resolve-Path -LiteralPath $BrowserPath).Path
 $id = 'honkliu.ai-browser.test.' + [Guid]::NewGuid().ToString('N')
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\target\installer-tests\$id"))
-$appName = "AI Browser Installer Test $id"
+$appName = "River Installer Test $id"
 $install = Join-Path $env:ProgramW6432 $appName
 $registry = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$appName"
 $browser = $null
@@ -52,7 +52,7 @@ try {
         $config | Add-Member -NotePropertyName version -NotePropertyValue $package.version
         $config | Add-Member -NotePropertyName name -NotePropertyValue 'browser'
         $config | Add-Member -NotePropertyName binariesDir -NotePropertyValue (Split-Path -Parent $BrowserPath)
-        $config | Add-Member -NotePropertyName binaries -NotePropertyValue @(@{ path = 'browser'; main = $true })
+        $config | Add-Member -NotePropertyName binaries -NotePropertyValue @(@{ path = 'river_browser'; main = $true })
         $configPath = Join-Path $root 'test-packager.json'
         [IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
         $packageArguments = @('packager', '--config', $configPath, '--formats', 'nsis')
@@ -67,11 +67,11 @@ try {
     Run-Setup $setup $arguments
     Assert (Test-Path -LiteralPath $registry) 'Uninstall registration is missing.'
     Assert ((Get-ItemPropertyValue -LiteralPath $registry -Name InstallLocation).Trim('"').TrimEnd('\') -eq $install) 'Setup did not use the default Program Files directory.'
-    $files = @('browser.exe', 'uninstall.exe')
+    $files = @('river_browser.exe', 'uninstall.exe')
     foreach ($name in $files) {
         Assert (Test-Path -LiteralPath (Join-Path $install $name)) "Missing installed file: $name"
     }
-    Assert ((Get-FileHash -LiteralPath (Join-Path $install 'browser.exe')).Hash -eq (Get-FileHash -LiteralPath $BrowserPath).Hash) 'Setup packaged a different browser build.'
+    Assert ((Get-FileHash -LiteralPath (Join-Path $install 'river_browser.exe')).Hash -eq (Get-FileHash -LiteralPath $BrowserPath).Hash) 'Setup packaged a different browser build.'
 
     $data = Join-Path $install 'user-data'
     New-Item -ItemType Directory -Path $data | Out-Null
@@ -84,7 +84,7 @@ try {
     $profile = Join-Path $root 'profile'
     try {
         $env:AI_BROWSER_DATA_DIR = $profile
-        $browser = Start-Process -FilePath (Join-Path $install 'browser.exe') -ArgumentList '--self-test=native://newtab' -PassThru
+        $browser = Start-Process -FilePath (Join-Path $install 'river_browser.exe') -ArgumentList '--self-test=native://newtab' -PassThru
     } finally {
         $env:AI_BROWSER_DATA_DIR = $previousProfile
     }
@@ -95,7 +95,7 @@ try {
     Run-Setup (Join-Path $install 'uninstall.exe') @('/S', "_?=$install")
     $uninstalled = $true
     Assert (!(Test-Path -LiteralPath $registry)) 'Uninstall registration was not removed.'
-    Assert (!(Test-Path -LiteralPath (Join-Path $install 'browser.exe'))) 'Uninstall left the browser executable behind.'
+    Assert (!(Test-Path -LiteralPath (Join-Path $install 'river_browser.exe'))) 'Uninstall left the browser executable behind.'
     Assert (Test-Path -LiteralPath $marker) 'Uninstall deleted user-created data.'
     Write-Output 'PASS: default Program Files directory, machine registration, installer payload, reinstall, isolated browser startup, uninstall and data preservation.'
 } finally {

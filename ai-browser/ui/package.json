@@ -2,7 +2,7 @@
   "name": "ai-browser-ui",
   "version": "0.1.0",
   "private": true,
-  "description": "Side pane (AI assistant) of the AI-native browser: Preact + TypeScript, built to crates/shell/ui/sidebar and embedded in browser.exe",
+  "description": "Side pane (AI assistant) of the AI-native browser: Preact + TypeScript, built to crates/shell/ui/sidebar and embedded in river_browser.exe",
   "type": "module",
   "scripts": {
     "build": "vite build",

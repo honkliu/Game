@@ -31,7 +31,7 @@ pub fn environments_constructed() -> u64 {
 pub fn ensure_runtime() -> Result<String, String> {
     let version = NSProcessInfo::processInfo().operatingSystemVersion();
     if version.majorVersion < 14 {
-        let error = "AI Browser requires macOS 14 (Sonoma) or newer.".to_string();
+        let error = "River requires macOS 14 (Sonoma) or newer.".to_string();
         show_fatal(&error);
         return Err(error);
     }
@@ -39,10 +39,10 @@ pub fn ensure_runtime() -> Result<String, String> {
 }
 
 pub fn show_fatal(message: &str) {
-    eprintln!("AI Browser: {message}");
+    eprintln!("River: {message}");
     if let Some(mtm) = MainThreadMarker::new() {
         let alert = NSAlert::new(mtm);
-        alert.setMessageText(&NSString::from_str("AI Browser"));
+        alert.setMessageText(&NSString::from_str("River"));
         alert.setInformativeText(&NSString::from_str(message));
         alert.runModal();
     }
@@ -264,10 +264,10 @@ fn install_menu(mtm: MainThreadMarker) {
     let main = NSMenu::new(mtm);
     for (title, items) in [
         (
-            "AI Browser",
+            "River",
             vec![
-                ("Hide AI Browser", sel!(hide:), "h"),
-                ("Quit AI Browser", sel!(terminate:), "q"),
+                ("Hide River", sel!(hide:), "h"),
+                ("Quit River", sel!(terminate:), "q"),
             ],
         ),
         (

@@ -21,28 +21,33 @@ This builds the release browser and uses Cargo Packager's standard installer
 templates. No custom Cargo tasks, linkers or build scripts are needed. Ordinary
 `cargo build` remains compilation-only. All application packaging configuration is
 in `[package.metadata.packager]` in `crates/shell/Cargo.toml`; its version comes from
-the workspace package version. End users do not need Cargo or Rust.
+the workspace package version. The project remains `ai-browser`; the installed
+application is named **River**. End users do not need Cargo or Rust.
 
 Upload the resulting installer from `dist/`:
 
 | Platform | Package name |
 | --- | --- |
-| Windows x64 | `browser_<version>_x64-setup.exe` |
-| Windows ARM64 | `browser_<version>_arm64-setup.exe` |
-| macOS Intel | `AI Browser_<version>_x64.dmg` |
-| macOS Apple Silicon | `AI Browser_<version>_aarch64.dmg` |
+| Windows x64 | `river_browser_<version>_x64-setup.exe` |
+| Windows ARM64 | `river_browser_<version>_arm64-setup.exe` |
+| macOS Intel | `River_<version>_x64.dmg` |
+| macOS Apple Silicon | `River_<version>_aarch64.dmg` |
 
 The default is the installed Rust toolchain's native architecture. Build Windows
 packages on Windows and macOS packages on a Mac with Xcode tools. Use a native
 ARM64 Rust toolchain on ARM hardware for native ARM64 output. Cargo Packager
 downloads its own installer tooling as needed; Inno Setup is no longer used.
 
+The executable is `river_browser.exe` on Windows and `river_browser` on macOS.
+Cargo Packager derives the Windows installer filename from this binary target;
+the installed app's display name remains **River**.
+
 ### Windows installation
 
 Visual Studio's C++ build tools are required for compilation. The MSVC runtime is
 linked statically through `.cargo/config.toml`, so the installer does not need to
 copy architecture-specific Visual C++ runtime DLLs. The standard NSIS installer
-uses all-users mode, requests elevation, and defaults to `%ProgramFiles%\AI Browser`.
+uses all-users mode, requests elevation, and defaults to `%ProgramFiles%\River`.
 Users get the usual installation wizard, shortcuts and registered uninstaller.
 If the machine-wide WebView2 runtime is absent, a small NSIS preinstall section
 downloads and runs Microsoft's Evergreen bootstrapper (internet is required then).
@@ -56,7 +61,7 @@ a unique application name and Program Files folder and removes its own installat
 
 ### macOS installation and signing
 
-Open the DMG and drag `AI Browser.app` to Applications. The packager also leaves
+Open the DMG and drag `River.app` to Applications. The packager also leaves
 the `.app` in `dist/`. The supplemental `tools/macos/Info.plist` only supplies app
 permissions and web-content transport settings, not a second version number.
 The minimum macOS version is 14.0, matching `MACOSX_DEPLOYMENT_TARGET` in Cargo config.
@@ -88,7 +93,7 @@ Do not select a packaging target without building the matching target binary.
 ## Native PDF extraction probe
 
 ```powershell
-$env:BROWSER_EXE='Q:\gitroot\Game\ai-browser\target\debug\browser.exe'
+$env:BROWSER_EXE='Q:\gitroot\Game\ai-browser\target\debug\river_browser.exe'
 node ai-browser\tools\probe-native-pdf.mjs
 ```
 

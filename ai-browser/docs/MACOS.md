@@ -1,6 +1,6 @@
 # macOS
 
-AI Browser uses the same Rust application, AI engine, Preact pane, session format,
+River (the `ai-browser` project) uses the same Rust application, AI engine, Preact pane, session format,
 approval policy and agent tools on both platforms. Windows uses WebView2; macOS
 uses the system WKWebView through the existing Wry/Tao stack. No Chromium runtime
 is bundled on macOS.
@@ -103,8 +103,8 @@ cargo packager --release
 ```
 
 Install Cargo Packager only once. The second command builds the release browser and
-produces `dist/AI Browser.app` and `AI Browser_<version>_aarch64.dmg` or
-`AI Browser_<version>_x64.dmg`. Users open the DMG and drag AI Browser into Applications.
+produces `dist/River.app` and `River_<version>_aarch64.dmg` or
+`River_<version>_x64.dmg`. Users open the DMG and drag River into Applications.
 The default is the native Rust toolchain architecture. The same command creates the
 Windows NSIS installer on Windows. The standard packager reads the Cargo package
 version; the supplemental Info.plist does not override its executable, ID or version.

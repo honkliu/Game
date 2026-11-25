@@ -283,7 +283,7 @@ fn wide(s: &str) -> Vec<u16> {
 /// Modal error box. Safe to call before any window exists.
 pub fn show_fatal(message: &str) {
     let body = wide(message);
-    let caption = w!("native-browser");
+    let caption = w!("River");
     // SAFETY: both strings are NUL-terminated and outlive the call; a null
     // owner HWND means "desktop owner", which is valid.
     unsafe {
@@ -303,7 +303,7 @@ pub fn ensure_runtime() -> Result<String, String> {
                 format!("WebView2 failed to initialize: {e}")
             };
             show_fatal(&format!(
-                "{detail}\n\nnative-browser renders pages with Microsoft Edge WebView2.\n\
+                "{detail}\n\nRiver renders pages with Microsoft Edge WebView2.\n\
                  Install the Evergreen Runtime (x64) and start the browser again:\n\n\
                  {DOWNLOAD_HINT}"
             ));

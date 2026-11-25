@@ -25,7 +25,7 @@ fn main() {
         panic!("the AI pane is not built: run `npm install && npm run build` in ai-browser/ui");
     }
 
-    // Embed every shell asset so browser.exe is a single self-contained file.
+    // Embed every shell asset so river_browser.exe is a single self-contained file.
     let mut files = Vec::new();
     collect(&ui, &ui, &mut files);
     files.sort();

@@ -2045,7 +2045,7 @@ pub fn run_with(start_tick: u64, self_test_url: Option<String>, driver: Option<S
     // ---- window ---------------------------------------------------------
     let window = {
         let mut b = WindowBuilder::new()
-            .with_title("native-browser")
+            .with_title("River")
             .with_inner_size(tao::dpi::LogicalSize::new(
                 restored_window.width.max(640) as f64,
                 restored_window.height.max(480) as f64,

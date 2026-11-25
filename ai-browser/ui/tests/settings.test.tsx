@@ -8,7 +8,7 @@ import { RiverMcpSettings } from '../src/components/RiverMcpSettings';
 
 vi.mock('../src/components/Settings', () => ({ SettingsPanel: () => null }));
 
-it('shows only the running AI Browser version in About and follows native state updates', async () => {
+it('shows only the running River version in About and follows native state updates', async () => {
   const previous = { settings: preferences.value, ready: settingsReady.value, tab: settingsTab.value };
   const host = document.createElement('div');
   const invoke = vi.spyOn(native, 'invoke').mockResolvedValue(null);
@@ -24,11 +24,11 @@ it('shows only the running AI Browser version in About and follows native state 
       settingsReady.value = true; settingsTab.value = 'about';
       render(<SettingsPage />, host);
     });
-    expect(host.querySelector('#app-version')?.textContent).toBe('AI Browser 9.8.7');
-    expect(host.querySelector('#settings-content')?.textContent).toBe('AboutAI Browser 9.8.7');
+    expect(host.querySelector('#app-version')?.textContent).toBe('River 9.8.7');
+    expect(host.querySelector('#settings-content')?.textContent).toBe('AboutRiver 9.8.7');
     expect(invoke).toHaveBeenCalledWith('shell_settings', { operation: 'section_set', section: 'about' });
     await act(() => { preferences.value = { ...preferences.value!, app_version: '9.8.8' }; });
-    expect(host.querySelector('#app-version')?.textContent).toBe('AI Browser 9.8.8');
+    expect(host.querySelector('#app-version')?.textContent).toBe('River 9.8.8');
   } finally {
     await act(() => { render(null, host); preferences.value = previous.settings; settingsReady.value = previous.ready; settingsTab.value = previous.tab; });
     invoke.mockRestore();
@@ -43,7 +43,7 @@ it('opens the Markdown workflow manual with distinct Windows and macOS capabilit
     await act(() => { settingsReady.value = true; settingsTab.value = 'general'; render(<SettingsPage />, host); });
     await act(() => host.querySelector<HTMLButtonElement>('#settings-help')!.click());
     const manual = host.querySelector('#settings-content article.settings-manual .rich')!;
-    expect(manual.querySelector('h1')?.textContent).toBe('Using AI Browser');
+    expect(manual.querySelector('h1')?.textContent).toBe('Using River');
     expect(host.querySelectorAll('#settings-content h1')).toHaveLength(1);
     expect(manual.querySelector('ol')?.textContent).toContain('Save model');
     const platforms = [...manual.querySelectorAll('table')].find(table => table.textContent?.includes('macOS'));

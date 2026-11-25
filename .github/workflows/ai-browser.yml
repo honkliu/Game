@@ -50,7 +50,7 @@ jobs:
       - name: Run Windows browser regressions
         if: runner.os == 'Windows'
         env:
-          BROWSER_EXE: '${{ github.workspace }}\ai-browser\target\debug\browser.exe'
+          BROWSER_EXE: '${{ github.workspace }}\ai-browser\target\debug\river_browser.exe'
         run: cargo build --locked -p browser && npm --prefix e2e test
       - name: Install Cargo Packager
         run: cargo install cargo-packager --locked --version 0.11.8

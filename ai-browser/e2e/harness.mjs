@@ -1,4 +1,4 @@
-// Drives the real browser.exe (WebView2) through Playwright over CDP.
+// Drives the real river_browser.exe (WebView2) through Playwright over CDP.
 // Each run uses a throwaway profile and a local fixture server, plus a scripted
 // OpenAI-compatible model server so AI behaviour is deterministic.
 import { chromium } from 'playwright';
@@ -162,7 +162,7 @@ export async function startFixtures() {
 }
 
 export async function launch({ modelPort, debugPort = 9444, withProvider = true, profilePath } = {}) {
-  const exe = process.env.BROWSER_EXE || path.join(os.tmpdir(), 'ai-target', 'debug', 'browser.exe');
+  const exe = process.env.BROWSER_EXE || path.join(os.tmpdir(), 'ai-target', 'debug', 'river_browser.exe');
   const profile = profilePath || fs.mkdtempSync(path.join(os.tmpdir(), 'ai-e2e-'));
   const data = path.join(profile, 'native-browser');
   fs.mkdirSync(data, { recursive: true });

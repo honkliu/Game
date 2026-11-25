@@ -7,7 +7,7 @@ license.workspace = true
 description = "AI-native browser: WebView2 on Windows and WKWebView on macOS"
 
 [package.metadata.packager]
-product-name = "AI Browser"
+product-name = "River"
 identifier = "com.honkliu.ai-browser"
 publisher = "honkliu"
 category = "Productivity"
@@ -54,7 +54,7 @@ SectionEnd
 '''
 
 [[bin]]
-name = "browser"
+name = "river_browser"
 path = "src/main.rs"
 
 [[test]]
@@ -75,7 +75,7 @@ serde_json = "1"
 # consumes these types directly rather than mirroring them. Path dependency,
 # serde + serde_json only, builds offline.
 ai-platform-contract = { path = "../contract" }
-# The AI utility runs inside this same executable (`browser.exe --ai-utility`), in its own process.
+# The AI utility runs inside this same executable (`river_browser.exe --ai-utility`), in its own process.
 ai-utility = { path = "../utility" }
 # history/bookmarks store; bundled = no system SQLite dependency
 rusqlite = { version = "0.32.1", features = ["bundled"] }
