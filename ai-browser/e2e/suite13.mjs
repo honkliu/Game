@@ -11,12 +11,20 @@ const waitFor = async (fn, timeout = 20000) => {
 const fixtures = await startFixtures();
 const requests = [];
 const mcpRequests = [];
+const authenticatedMcpToken = 'fixture-bearer-credential';
+let authenticatedMcpReady = false;
 const api = await listen((req, res) => {
   let text = '';
   req.on('data', chunk => { text += chunk; });
   req.on('end', () => {
     res.setHeader('content-type', 'application/json');
-    if (req.url === '/mcp') {
+    if (req.url === '/mcp' || req.url === '/mcp-auth') {
+      if (req.url === '/mcp-auth') {
+        if (req.headers.authorization !== `Bearer ${authenticatedMcpToken}`) {
+          res.writeHead(401); res.end(); return;
+        }
+        if (!authenticatedMcpReady) { res.writeHead(503); res.end(); return; }
+      }
       const message = JSON.parse(text || '{}');
       mcpRequests.push(message);
       const result = message.method === 'initialize'
@@ -386,6 +394,30 @@ try {
       } finally {
         await app.ctx.unroute(`${endpoint}*`);
       }
+    }],
+    ['Settings saves an authenticated MCP server and Reconnect all retries its unchanged failed connection', async () => {
+      authenticatedMcpReady = true;
+      await app.invoke('shell_settings', { operation: 'open', section: 'mcp' });
+      const settings = await app.pageWith(/pages\/settings\.html/);
+      await settings.getByRole('button', { name: 'Add server', exact: true }).click();
+      await settings.getByLabel('Name', { exact: true }).fill('Authenticated fixture');
+      await settings.getByLabel('URL', { exact: true }).fill(`${apiBase}/mcp-auth`);
+      await settings.getByLabel('Bearer token', { exact: true }).fill(authenticatedMcpToken);
+      await settings.getByRole('button', { name: 'Save', exact: true }).click();
+      const card = settings.locator('section.ag-card').filter({ has: settings.getByText('Authenticated fixture', { exact: true }) });
+      await card.locator('.ag-badge.is-ok').waitFor();
+      const saved = JSON.parse(fs.readFileSync(path.join(app.data, 'agent.json'), 'utf8'));
+      assert.equal(saved.mcp_servers.find(server => server.name === 'Authenticated fixture').token, authenticatedMcpToken);
+      authenticatedMcpReady = false;
+      await settings.getByRole('button', { name: 'Reconnect all', exact: true }).click();
+      await card.locator('.ag-error').filter({ hasText: 'server answered HTTP 503' }).waitFor();
+      authenticatedMcpReady = true;
+      await settings.getByRole('button', { name: 'Reconnect all', exact: true }).click();
+      await card.locator('.ag-badge.is-ok').waitFor();
+      assert.equal(await card.locator('.ag-error').count(), 0);
+      assert.match(await card.locator('details').textContent(), /echo/);
+      await settings.reload();
+      await card.locator('.ag-badge.is-ok').waitFor();
     }],
   ]);
 } finally {

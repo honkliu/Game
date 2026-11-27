@@ -70,6 +70,22 @@ fn tool_name(server: &str, tool: &str) -> String {
     name
 }
 
+fn http_transport_error(error: &ureq::Transport) -> String {
+    let mut message = format!("could not connect ({:?})", error.kind());
+    // Transport's Display includes the URL, which may contain credentials.
+    if let Some(detail) = error.message() {
+        message.push_str(": ");
+        message.push_str(detail);
+    }
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
 fn http_rpc(agent: &ureq::Agent, url: &str, token: &Option<String>, session: &mut Option<String>, body: &Value, want: Option<u64>) -> Result<Value, String> {
     let mut request = agent
         .post(url)
@@ -84,7 +100,7 @@ fn http_rpc(agent: &ureq::Agent, url: &str, token: &Option<String>, session: &mu
     let response = match request.send_string(&body.to_string()) {
         Ok(r) => r,
         Err(ureq::Error::Status(code, _)) => return Err(format!("server answered HTTP {code}")),
-        Err(ureq::Error::Transport(t)) => return Err(format!("could not connect ({:?})", t.kind())),
+        Err(ureq::Error::Transport(t)) => return Err(http_transport_error(&t)),
     };
     if let Some(id) = response.header("mcp-session-id") {
         *session = Some(id.to_string());
@@ -251,14 +267,23 @@ impl Hub {
     /// Bring the connected set in line with the configuration. Unchanged servers keep
     /// their connection; new or edited ones are (re)connected; removed ones are dropped.
     pub fn sync(&self, wanted: &[McpServerConfig]) {
+        self.sync_connections(wanted, false);
+    }
+
+    pub fn reconnect_all(&self, wanted: &[McpServerConfig]) {
+        self.sync_connections(wanted, true);
+    }
+
+    fn sync_connections(&self, wanted: &[McpServerConfig], reconnect: bool) {
         let mut servers = lock(&self.servers);
         servers.retain(|id, s| wanted.iter().any(|w| &w.id == id && w.enabled) && lock(s).config.id == *id);
         let mut fresh: Vec<Arc<Mutex<Server>>> = Vec::new();
         for config in wanted.iter().filter(|c| c.enabled) {
-            let keep = servers.get(&config.id).is_some_and(|s| lock(s).config == *config);
+            let keep = !reconnect && servers.get(&config.id).is_some_and(|s| lock(s).config == *config);
             if keep {
                 continue;
             }
+
             let server = Arc::new(Mutex::new(Server {
                 config: config.clone(),
                 conn: None,
@@ -358,5 +383,21 @@ impl Hub {
                 }),
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_errors_preserve_the_underlying_os_cause() {
+        let error = ureq::Error::from(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "network access denied by system policy",
+        ));
+        let ureq::Error::Transport(error) = error else { panic!("expected a transport error") };
+        let message = http_transport_error(&error);
+        assert!(message.contains("network access denied by system policy"), "{message}");
     }
 }

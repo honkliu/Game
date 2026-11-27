@@ -16,10 +16,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
+use ai_platform_contract::config::AiConfig;
 use ai_platform_contract::contract::CancelReason;
 use ai_platform_contract::failure::{Failure, FailureKind};
+use ai_utility::agent::{admin, mcp, store::Store};
 use ai_utility::browser::{Client, ConnectionInfo};
 use ai_utility::control::{StopReason, TaskControl};
+use ai_utility::provider::Catalog;
 use api_server::{ApiRequest, ApiServer};
 use serde_json::{json, Value};
 
@@ -103,6 +106,37 @@ fn authenticated_discovery_sessions_canonical_calls_and_client_isolation() {
     assert!(before.elapsed() < Duration::from_secs(4));
     assert!(!profile.0.join("shell-api.json").exists());
     assert!(ureq::get(&old_url).timeout(Duration::from_secs(1)).call().is_err());
+}
+
+#[test]
+fn reconnect_all_recovers_an_unchanged_failed_connection_to_another_river() {
+    let profile = Profile::new();
+    let server = ApiServer::start(&profile.0, |request| {
+        request.reply.send(Ok(json!({"tabs":[]}))).unwrap();
+        Ok(())
+    }).unwrap();
+    let store = Store::new(&profile.0.join("client"));
+    let hub = mcp::Hub::default();
+    let catalog = Catalog::from_config(&AiConfig::default());
+    let token = "client-test-credential";
+    let state = admin::handle(&store, &hub, &catalog, &json!({
+        "method":"shell_agent_mcp", "operation":"save", "id":"remote-river",
+        "name":"Remote River", "url":server.connection().url, "token":token,
+    })).unwrap();
+    assert_eq!(state["mcp"][0]["status"], "error");
+    assert_eq!(state["mcp"][0]["error"], "server answered HTTP 401");
+
+    let mut config = server.config();
+    config.token = token.into();
+    server.apply(server.prepare(config).unwrap());
+    let state = admin::handle(&store, &hub, &catalog, &json!({
+        "method":"shell_agent_mcp", "operation":"sync",
+    })).unwrap();
+    assert_eq!(state["mcp"][0]["status"], "connected", "{}", state["mcp"][0]["error"]);
+    assert_eq!(state["mcp"][0]["error"], "");
+    assert_eq!(state["mcp"][0]["tools"].as_array().unwrap().len(), ai_platform_contract::browser::definitions().len());
+    let result = hub.call("remote-river", "shell_tab", &json!({"operation":"list"}), &TaskControl::new(0)).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(result.as_str().unwrap()).unwrap()["tabs"], json!([]));
 }
 
 #[test]
