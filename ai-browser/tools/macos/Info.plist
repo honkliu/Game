@@ -6,6 +6,8 @@
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>River connects to MCP servers and other services on your local network.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoadsInWebContent</key>

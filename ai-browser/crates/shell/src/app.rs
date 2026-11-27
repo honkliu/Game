@@ -815,7 +815,7 @@ impl AppState {
     }
 
     fn wv_tab_close(&mut self, id: TabId) {
-        // Closing a page inside a canvas clears its cell; the canvas itself closes
+        // Closing a page inside a canvas reveals its predecessor; the canvas closes
         // its pages first.
         if let Some(parent) = self.tabs.get(id).and_then(|t| t.member_of) {
             self.wv_canvas_member_close(parent, id);
@@ -1156,7 +1156,7 @@ impl AppState {
             }
             "close_tab" => {
                 if let Some(canvas) = self.canvas_shown {
-                    self.wv_canvas_focused_cell_clear(canvas);
+                    self.wv_canvas_focused_page_close(canvas);
                 } else if let Some(id) = self.active {
                     self.wv_tab_close(id);
                 }

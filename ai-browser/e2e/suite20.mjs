@@ -121,21 +121,37 @@ try {
       await waitFor(async () => (await canvas())?.id === grid.canvas_id);
       assert.equal((await canvas()).focus, 1);
     }],
-    ['Ctrl+W clears every layer and advances 1, 2, 3, 0 even when the page traps keys', async () => {
-      const opener = await app.pageWith(/\/cell-0$/);
-      await opener.evaluate(u => window.open(u, '_blank'), url('covered-1'));
-      await waitFor(async () => (await canvas()).cells[1].url === url('covered-1'));
-      const covered = await app.pageWith(/\/covered-1$/);
-      await covered.waitForSelector('h1');
+    ['Ctrl+W pops a three-cell stack before advancing, even when the page traps keys', async () => {
+      await app.invoke('shell_canvas', { operation: 'open', cols: 3, rows: 1, urls: [url('stack-source')] });
+      const opener = await app.pageWith(/\/stack-source$/);
+      await opener.waitForSelector('h1');
+      for (const [name, cell] of [['stack-older', 1], ['stack-neighbor', 2], ['stack-latest', 1]]) {
+        await opener.evaluate(u => window.open(u, '_blank'), url(name));
+        await waitFor(async () => (await canvas()).cells[cell].url === url(name));
+        const page = await app.pageWith(new RegExp(`/${name}$`));
+        await page.waitForSelector('h1');
+        if (name === 'stack-older') await page.locator('#edit').fill('preserve the covered page');
+      }
+      const older = await app.pageWith(/\/stack-older$/);
+      const latest = await app.pageWith(/\/stack-latest$/);
+      const before = await canvas();
       await app.invoke('shell_canvas', { operation: 'cell_focus', cell: 1 });
-      for (const cell of [2, 3, 0]) {
+      press(87);
+      await waitFor(async () => (await canvas()).cells[1].url === url('stack-older'));
+      const restored = await canvas();
+      assert.equal(restored.focus, 1);
+      for (const cell of [0, 2]) assert.equal(restored.cells[cell].tab_id, before.cells[cell].tab_id);
+      assert.equal(await older.locator('#edit').inputValue(), 'preserve the covered page');
+      await waitFor(() => latest.isClosed());
+      assert.ok(!older.isClosed());
+      for (const cell of [2, 0]) {
         press(87);
         await waitFor(async () => (await canvas()).focus === cell);
         const state = await canvas();
         assert.ok(state.cells[cell].tab_id !== null);
         if (cell === 2) {
           assert.equal(state.cells[1].tab_id, null);
-          assert.ok(!app.ctx.pages().some(page => /\/(cell-1|covered-1)$/.test(page.url())));
+          await waitFor(() => older.isClosed());
         }
       }
       press(87);

@@ -149,18 +149,17 @@ impl Canvas {
         self.cells.get(self.focus).copied().flatten()
     }
 
-    /// Clear a whole cell stack and advance to the next occupied cell, wrapping.
-    pub fn clear_focused_cell(&mut self) -> Vec<TabId> {
-        let Some(cell) = (0..self.capacity()).map(|offset| (self.focus + offset) % self.capacity())
-            .find(|&cell| self.cells[cell].is_some()) else { return Vec::new() };
-        let mut closed: Vec<_> = self.cells[cell].take().into_iter().collect();
-        if let Some(stack) = self.layers.get_mut(cell) {
-            closed.append(stack);
+    /// Pop one page, staying in its cell until the stack is empty.
+    pub fn close_focused_page(&mut self) -> Option<TabId> {
+        let cell = (0..self.capacity()).map(|offset| (self.focus + offset) % self.capacity())
+            .find(|&cell| self.cells[cell].is_some())?;
+        let closed = self.uncover(cell)?;
+        self.focus = cell;
+        if self.cells[cell].is_none() {
+            self.focus = (1..self.capacity()).map(|offset| (cell + offset) % self.capacity())
+                .find(|&next| self.cells[next].is_some()).unwrap_or(cell);
         }
-        self.popup_next.retain(|page, _| !closed.contains(page));
-        self.focus = (1..self.capacity()).map(|offset| (cell + offset) % self.capacity())
-            .find(|&next| self.cells[next].is_some()).unwrap_or(cell);
-        closed
+        Some(closed)
     }
 
     /// Change the grid shape. Pages keep their reading order; the ones that no longer
@@ -576,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn clearing_focused_cells_discards_layers_and_advances_in_reading_order() {
+    fn closing_focused_pages_pops_layers_before_advancing_in_reading_order() {
         let mut c = Canvas::new(2, 2);
         for cell in 0..4 { c.cover(cell, TabId(cell as u64 + 1)); }
         c.popup_target(TabId(2));
@@ -584,29 +583,41 @@ mod tests {
         c.cover(1, TabId(6));
         c.popup_target(TabId(6));
         c.focus = 1;
-        assert_eq!(c.clear_focused_cell(), vec![TabId(6), TabId(2), TabId(5)]);
-        assert!(!c.popup_next.contains_key(&TabId(2)));
+        assert_eq!(c.close_focused_page(), Some(TabId(6)));
+        assert_eq!(c.cells[1], Some(TabId(5)));
+        assert_eq!(c.layers[1], vec![TabId(2)]);
+        assert_eq!(c.focus, 1);
+        assert!(c.popup_next.contains_key(&TabId(2)));
         assert!(!c.popup_next.contains_key(&TabId(6)));
+        assert_eq!(c.close_focused_page(), Some(TabId(5)));
+        assert_eq!(c.cells[1], Some(TabId(2)));
+        assert_eq!(c.focus, 1);
+        assert_eq!(c.close_focused_page(), Some(TabId(2)));
+        assert!(!c.popup_next.contains_key(&TabId(2)));
         assert_eq!(c.focus, 2);
-        assert_eq!(c.clear_focused_cell(), vec![TabId(3)]);
+        assert_eq!(c.close_focused_page(), Some(TabId(3)));
         assert_eq!(c.focus, 3);
-        assert_eq!(c.clear_focused_cell(), vec![TabId(4)]);
+        assert_eq!(c.close_focused_page(), Some(TabId(4)));
         assert_eq!(c.focus, 0);
-        assert_eq!(c.clear_focused_cell(), vec![TabId(1)]);
-        assert!(c.clear_focused_cell().is_empty());
+        assert_eq!(c.close_focused_page(), Some(TabId(1)));
+        assert_eq!(c.close_focused_page(), None);
         assert!(c.all_members().is_empty());
     }
 
     #[test]
-    fn clearing_cells_skips_empty_slots_including_the_focused_slot() {
+    fn closing_pages_skips_empty_slots_including_the_focused_slot() {
         let mut c = Canvas::new(2, 2);
         c.cover(0, TabId(1));
         c.cover(3, TabId(2));
+        c.cover(3, TabId(3));
         c.focus = 1;
-        assert_eq!(c.clear_focused_cell(), vec![TabId(2)]);
+        assert_eq!(c.close_focused_page(), Some(TabId(3)));
+        assert_eq!(c.focus, 3);
+        assert_eq!(c.cells[3], Some(TabId(2)));
+        assert_eq!(c.close_focused_page(), Some(TabId(2)));
         assert_eq!(c.focus, 0);
-        assert_eq!(c.clear_focused_cell(), vec![TabId(1)]);
-        assert!(c.clear_focused_cell().is_empty());
+        assert_eq!(c.close_focused_page(), Some(TabId(1)));
+        assert_eq!(c.close_focused_page(), None);
     }
 
     #[test]
