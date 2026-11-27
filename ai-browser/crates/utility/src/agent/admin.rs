@@ -270,7 +270,7 @@ pub fn handle(store: &Store, hub: &Hub, catalog: &Catalog, p: &Value) -> Result<
             Ok(state(store, hub))
         }
         ("shell_agent_mcp", "sync") => {
-            hub.sync(&store.config().mcp_servers);
+            hub.reconnect_all(&store.config().mcp_servers);
             Ok(state(store, hub))
         }
         ("shell_agent_mcp", "retry") => {
